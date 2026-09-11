@@ -1,0 +1,27 @@
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+
+# 本地环境变量（含密钥，不要提交）
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器 / 系统
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# OCR 训练数据（体积大，运行时按需从 CDN 获取，不必入库）
+*.traineddata
+
+# 一次性修复脚本（历史遗留）
+note_v13.py
+rewrite_hybrid.py

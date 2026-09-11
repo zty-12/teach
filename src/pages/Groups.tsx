@@ -1,0 +1,611 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
+import {
+  BookOpen,
+  Download,
+  Pencil,
+  Plus,
+  Trash2,
+  Users,
+} from 'lucide-react'
+import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { useBreakpoint } from '@/hooks/useBreakpoint'
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Field,
+  Input,
+  Modal,
+  PageHeader,
+  Select,
+} from '@/components/ui'
+import { cn, initialOf, subjectColorVar } from '@/lib/utils'
+import type { Group, GroupMember, Student } from '@/lib/types'
+import { exportGroups } from '@/lib/exporters'
+
+export default function GroupsPage() {
+  const bp = useBreakpoint()
+  const isDesktop = bp === 'desktop'
+
+  const [editing, setEditing] = useState<Group | null>(null)
+  const [groupModalOpen, setGroupModalOpen] = useState(false)
+  const [memberGroup, setMemberGroup] = useState<Group | null>(null)
+  const [memberModalOpen, setMemberModalOpen] = useState(false)
+
+  const groups = useLiveQuery(() => db.groups.toArray(), [])
+  const members = useLiveQuery(() => db.groupMembers.toArray(), [])
+  const students = useLiveQuery(() => db.students.toArray(), [])
+
+  const liveGroups = useMemo(
+    () => (groups ?? []).filter((g) => !g.deletedAt).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
+    [groups],
+  )
+  const liveMembers = useMemo(
+    () => (members ?? []).filter((m) => !m.deletedAt),
+    [members],
+  )
+  const liveStudents = useMemo(
+    () => (students ?? []).filter((s) => !s.deletedAt),
+    [students],
+  )
+
+  const memberCountOf = (groupId: string) =>
+    liveMembers.filter((m) => m.groupId === groupId).length
+
+  const studentName = (id: string) =>
+    liveStudents.find((s) => s.id === id)?.name ?? '未知'
+
+  function openCreate() {
+    setEditing(null)
+    setGroupModalOpen(true)
+  }
+  function openEdit(g: Group) {
+    setEditing(g)
+    setGroupModalOpen(true)
+  }
+  function openMembers(g: Group) {
+    setMemberGroup(g)
+    setMemberModalOpen(true)
+  }
+  async function handleDelete(g: Group) {
+    if (!confirm(`确定删除班课「${g.name}」吗？该班课下的排课记录仍会保留为「班课」关联，但成员关系会一并清除。`)) return
+    await db.transaction('rw', db.groups, db.groupMembers, async () => {
+      await db.groups.put(markDeleted(g))
+      const rel = liveMembers.filter((m) => m.groupId === g.id)
+      for (const m of rel) await db.groupMembers.put(markDeleted(m))
+    })
+  }
+
+  function handleExport() {
+    exportGroups(
+      liveGroups.map((g) => ({
+        group: g,
+        members: liveMembers
+          .filter((m) => m.groupId === g.id)
+          .map((m) => studentName(m.studentId)),
+      })),
+    )
+  }
+
+  return (
+    <div>
+      <PageHeader
+        title="班课 / 小组课"
+        subtitle={`共 ${liveGroups.length} 个班课`}
+        action={
+          <>
+            <Button variant="secondary" onClick={handleExport}>
+              <Download size={16} />
+              {isDesktop ? '导出' : ''}
+            </Button>
+            <Button variant="primary" onClick={openCreate}>
+              <Plus size={16} />
+              {isDesktop ? '新建班课' : '新建'}
+            </Button>
+          </>
+        }
+      />
+
+      {liveGroups.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={<BookOpen size={30} />}
+            title="还没有班课"
+            description="班课 / 小组课可一次性给多个学生排课，课酬会按成员均摊计入欠费。"
+            action={
+              <Button variant="primary" onClick={openCreate}>
+                <Plus size={16} />
+                新建班课
+              </Button>
+            }
+          />
+        </Card>
+      ) : isDesktop ? (
+        <Card className="overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-line-1 bg-surface-2 text-left text-[13px] text-text-2">
+                <th className="px-4 py-2.5 font-medium">班课</th>
+                <th className="px-4 py-2.5 font-medium">科目</th>
+                <th className="px-4 py-2.5 font-medium">单次时长</th>
+                <th className="px-4 py-2.5 font-medium">成员</th>
+                <th className="px-4 py-2.5 text-right font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line-1">
+              {liveGroups.map((g) => (
+                <tr key={g.id} className="transition-colors hover:bg-surface-1">
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-2.5">
+                      <span
+                        className="h-7 w-7 shrink-0 rounded-full"
+                        style={{ background: subjectColorVar(g.colorSlot) }}
+                      />
+                      <div className="min-w-0">
+                        <span className="font-medium text-text-1">{g.name}</span>
+                        {g.note && (
+                          <span className="ml-2 truncate text-xs text-text-3">{g.note}</span>
+                        )}
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5 text-text-2">{g.subject || '—'}</td>
+                  <td className="px-4 py-2.5 tabular-nums text-text-2">{g.defaultDurationMin} 分钟</td>
+                  <td className="px-4 py-2.5 text-text-2">{memberCountOf(g.id)} 人</td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex justify-end gap-1">
+                      <Button size="sm" variant="ghost" onClick={() => openMembers(g)}>
+                        <Users size={14} />
+                        成员
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => openEdit(g)}>
+                        <Pencil size={14} />
+                        编辑
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => void handleDelete(g)}>
+                        <Trash2 size={14} />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      ) : (
+        <ul className="space-y-2">
+          {liveGroups.map((g) => {
+            const hasWeekly = g.weekday >= 0 && g.startTimeMin >= 0
+            const scheduleText = hasWeekly
+              ? `${WEEKDAY_LABELS[g.weekday]} ${minToHHMM(g.startTimeMin)}–${minToHHMM(g.endTimeMin)}`
+              : null
+            return (
+              <li key={g.id} className="card p-3">
+                <div className="flex items-center gap-3">
+                  <span
+                    className="h-10 w-10 shrink-0 rounded-full"
+                    style={{ background: subjectColorVar(g.colorSlot) }}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-text-1">{g.name}</p>
+                    <p className="mt-0.5 text-[13px] text-text-2">
+                      {g.subject || '未设科目'} · {g.defaultDurationMin}分钟 · {memberCountOf(g.id)} 人
+                    </p>
+                    {scheduleText && (
+                      <p className="mt-0.5 truncate text-[12px] text-accent">
+                        每周 {scheduleText}
+                        {g.perStudentFeeCents > 0
+                          ? ` · ¥${(g.perStudentFeeCents / 100).toFixed(0)}/人`
+                          : ''}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="min-w-0 flex-1"
+                    onClick={() => openMembers(g)}
+                  >
+                    <Users size={14} />
+                    管理成员
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="shrink-0"
+                    onClick={() => openEdit(g)}
+                  >
+                    <Pencil size={14} />
+                    编辑
+                  </Button>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      <GroupModal
+        open={groupModalOpen}
+        group={editing}
+        onClose={() => setGroupModalOpen(false)}
+      />
+      <MemberModal
+        open={memberModalOpen}
+        group={memberGroup}
+        members={liveMembers}
+        students={liveStudents}
+        onClose={() => setMemberModalOpen(false)}
+      />
+    </div>
+  )
+}
+
+// ============================================================
+// 班课新建 / 编辑
+// ============================================================
+
+const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+const WEEKDAY_OPTIONS = WEEKDAY_LABELS.map((label, i) => ({ value: String(i), label }))
+
+function GroupModal({
+  open,
+  group,
+  onClose,
+}: {
+  open: boolean
+  group: Group | null
+  onClose: () => void
+}) {
+  const [form, setForm] = useState<GroupForm>(emptyForm())
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!open) return
+    setForm(group ? toForm(group) : emptyForm())
+    setError('')
+  }, [open, group])
+
+  const patch = (p: Partial<GroupForm>) => setForm((f) => ({ ...f, ...p }))
+
+  async function handleSave() {
+    const name = form.name.trim()
+    if (!name) {
+      setError('请填写班课名称')
+      return
+    }
+    const payload = {
+      name,
+      subject: form.subject.trim(),
+      defaultDurationMin: form.defaultDurationMin,
+      note: form.note.trim(),
+      colorSlot: form.colorSlot,
+      perStudentFeeCents: Math.round(Number(form.perStudentFeeYuan || 0) * 100),
+      weekday: form.weekday,
+      startTimeMin: form.startTime,
+      endTimeMin: form.endTime,
+    }
+    if (group) {
+      // 计算新计划时长
+      const newPlanned =
+        payload.endTimeMin > payload.startTimeMin && payload.startTimeMin >= 0
+          ? payload.endTimeMin - payload.startTimeMin
+          : null
+
+      // 同步更新该班课「未来、未上」课程的 durationMin，
+      // 避免「班课改了时间但课表里的旧课程还是旧时长」。
+      let synced = 0
+      if (newPlanned !== null && newPlanned > 0) {
+        const all = await db.courses.toArray()
+        const now = Date.now()
+        for (const c of all) {
+          if (c.deletedAt) continue
+          if (c.groupId !== group.id) continue
+          if (c.startAt < now) continue // 已经开始的课程不动
+          if (c.status !== 'pending') continue // 已完成 / 已取消的不动
+          if (c.durationMin === newPlanned) continue
+          await db.courses.put(touch({ ...c, durationMin: newPlanned }))
+          synced += 1
+        }
+      }
+
+      await db.groups.put(touch({ ...group, ...payload }))
+      if (synced > 0) {
+        // 用 alert 同步提示一下（与项目里其它确认交互一致）
+        window.alert(`班课时段已保存，已同步更新 ${synced} 节未上课程的时长`)
+      }
+    } else {
+      await db.groups.put(withSyncFields<Group>({ ...payload, createdAt: Date.now() }))
+    }
+    onClose()
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={group ? '编辑班课' : '新建班课'}
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={handleSave}>
+            保存
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <Field label="班课名称" error={error} hint="必填">
+          <Input
+            value={form.name}
+            onChange={(e) => {
+              patch({ name: e.target.value })
+              setError('')
+            }}
+            placeholder="如：初三数学冲刺班"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="科目">
+            <Input
+              value={form.subject}
+              onChange={(e) => patch({ subject: e.target.value })}
+              placeholder="数学"
+            />
+          </Field>
+          <Field label="单次时长（分钟）">
+            <Input
+              type="number"
+              min={15}
+              step={15}
+              value={form.defaultDurationMin}
+              onChange={(e) => patch({ defaultDurationMin: Number(e.target.value) || 60 })}
+            />
+          </Field>
+        </div>
+
+        {/* 每周固定时段 + 单价：班课自动排课依据 */}
+        <Field label="每周固定时段" hint="设了周几/时间后，可在课表一键「生成本周课程」">
+          <div className="grid grid-cols-3 gap-2">
+            <Select
+              value={String(form.weekday)}
+              onChange={(e) => patch({ weekday: Number(e.target.value) })}
+            >
+              <option value="-1">未设</option>
+              {WEEKDAY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+            <Input
+              type="time"
+              value={form.startTime >= 0 ? minToHHMM(form.startTime) : ''}
+              onChange={(e) => patch({ startTime: hhmmToMin(e.target.value) })}
+              disabled={form.weekday < 0}
+            />
+            <Input
+              type="time"
+              value={form.endTime >= 0 ? minToHHMM(form.endTime) : ''}
+              onChange={(e) => patch({ endTime: hhmmToMin(e.target.value) })}
+              disabled={form.weekday < 0}
+            />
+          </div>
+        </Field>
+
+        <Field label="每人单次课酬（元）" hint="课酬 = 单价 × 实际出席人数">
+          <Input
+            type="number"
+            min={0}
+            step={5}
+            value={form.perStudentFeeYuan}
+            onChange={(e) => patch({ perStudentFeeYuan: e.target.value })}
+            placeholder="20"
+            inputMode="decimal"
+          />
+        </Field>
+
+        <Field label="备注">
+          <Input
+            value={form.note}
+            onChange={(e) => patch({ note: e.target.value })}
+            placeholder="班级特点、教材版本等"
+          />
+        </Field>
+        <Field label="配色">
+          <div className="flex flex-wrap gap-2">
+            {Array.from({ length: 8 }, (_, i) => i + 1).map((slot) => (
+              <button
+                key={slot}
+                type="button"
+                aria-label={`配色 ${slot}`}
+                onClick={() => patch({ colorSlot: slot })}
+                className={cn(
+                  'h-8 w-8 rounded-full transition-transform',
+                  form.colorSlot === slot && 'ring-2 ring-accent ring-offset-2',
+                )}
+                style={{ background: subjectColorVar(slot) }}
+              />
+            ))}
+          </div>
+        </Field>
+      </div>
+    </Modal>
+  )
+}
+
+/** 「分钟数（一天中的）」 ↔ 「HH:mm」 */
+function minToHHMM(min: number): string {
+  if (min < 0) return ''
+  const h = Math.floor(min / 60)
+  const m = min % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+function hhmmToMin(s: string): number {
+  const [h, m] = s.split(':').map(Number)
+  if (h === undefined || m === undefined || Number.isNaN(h) || Number.isNaN(m)) return -1
+  return h * 60 + m
+}
+
+// ============================================================
+// 班课成员管理
+// ============================================================
+
+function MemberModal({
+  open,
+  group,
+  members,
+  students,
+  onClose,
+}: {
+  open: boolean
+  group: Group | null
+  members: GroupMember[]
+  students: Student[]
+  onClose: () => void
+}) {
+  const [addId, setAddId] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (open) {
+      setAddId('')
+      setError('')
+    }
+  }, [open, group])
+
+  if (!group) return null
+
+  const currentIds = members.filter((m) => m.groupId === group.id).map((m) => m.studentId)
+  const current = students.filter((s) => currentIds.includes(s.id))
+  const available = students.filter((s) => !currentIds.includes(s.id))
+
+  async function handleAdd() {
+    if (!addId) {
+      setError('请选择要添加的学生')
+      return
+    }
+    await db.groupMembers.put(
+      withSyncFields<GroupMember>({
+        groupId: group!.id,
+        studentId: addId,
+        joinedAt: Date.now(),
+      }),
+    )
+    setAddId('')
+    setError('')
+  }
+
+  async function handleRemove(studentId: string) {
+    const rel = members.find((m) => m.groupId === group!.id && m.studentId === studentId)
+    if (rel) await db.groupMembers.put(markDeleted(rel))
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`成员管理 · ${group.name}`}
+      footer={<Button onClick={onClose}>完成</Button>}
+    >
+      <div className="space-y-4">
+        <div>
+          <p className="mb-2 text-[13px] font-medium text-text-1">当前成员（{current.length}）</p>
+          {current.length === 0 ? (
+            <p className="rounded-lg bg-surface-2 px-3 py-2.5 text-[13px] text-text-3">
+              还没有成员，从下方添加
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {current.map((s) => (
+                <li
+                  key={s.id}
+                  className="flex items-center gap-2.5 rounded-lg border border-line-1 px-3 py-2"
+                >
+                  <span
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-medium text-white"
+                    style={{ background: subjectColorVar(s.colorSlot) }}
+                  >
+                    {initialOf(s.name)}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-text-1">{s.name}</span>
+                  <Badge>{s.grade || '—'}</Badge>
+                  <Button size="sm" variant="ghost" onClick={() => void handleRemove(s.id)}>
+                    <Trash2 size={14} />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <Field label="添加成员" error={error}>
+          <div className="flex gap-2">
+            <Select value={addId} onChange={(e) => {
+              setAddId(e.target.value)
+              setError('')
+            }}>
+              <option value="">选择学生…</option>
+              {available.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                  {s.grade ? ` · ${s.grade}` : ''}
+                </option>
+              ))}
+            </Select>
+            <Button variant="primary" onClick={handleAdd} disabled={!addId}>
+              添加
+            </Button>
+          </div>
+          {available.length === 0 && (
+            <span className="mt-1 block text-xs text-text-3">所有学生都已在该班课中</span>
+          )}
+        </Field>
+      </div>
+    </Modal>
+  )
+}
+
+// ============================================================
+// 表单类型
+// ============================================================
+
+interface GroupForm {
+  name: string
+  subject: string
+  defaultDurationMin: number
+  note: string
+  colorSlot: number
+  perStudentFeeYuan: string
+  weekday: number
+  startTime: number
+  endTime: number
+}
+
+const emptyForm = (): GroupForm => ({
+  name: '',
+  subject: '',
+  defaultDurationMin: 60,
+  note: '',
+  colorSlot: 1,
+  perStudentFeeYuan: '',
+  weekday: -1,
+  startTime: -1,
+  endTime: -1,
+})
+
+const toForm = (g: Group): GroupForm => ({
+  name: g.name,
+  subject: g.subject,
+  defaultDurationMin: g.defaultDurationMin,
+  note: g.note,
+  colorSlot: g.colorSlot,
+  perStudentFeeYuan: g.perStudentFeeCents ? String(g.perStudentFeeCents / 100) : '',
+  weekday: g.weekday ?? -1,
+  startTime: g.startTimeMin ?? -1,
+  endTime: g.endTimeMin ?? -1,
+})
