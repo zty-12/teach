@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { copyFileSync } from 'node:fs'
 import path from 'node:path'
 
 /**
@@ -68,11 +69,34 @@ function llmProxyPlugin(): Plugin {
   }
 }
 
+/**
+ * GitHub Pages 是静态托管、不会把未知路径重写到 index.html。
+ * SPA 刷新 / 深链（如 /teach/schedule）会 404。复制一份 index.html 为 404.html，
+ * 让 GitHub Pages 在 404 时回退到同一份 SPA 外壳，由前端路由接管。
+ * 配合 BrowserRouter 的 basename="/teach" 使用。
+ */
+function spa404Plugin(): Plugin {
+  return {
+    name: 'spa-404-fallback',
+    apply: 'build',
+    closeBundle() {
+      const src = path.resolve(import.meta.dirname, 'dist', 'index.html')
+      const dst = path.resolve(import.meta.dirname, 'dist', '404.html')
+      try {
+        copyFileSync(src, dst)
+      } catch {
+        /* 构建未产出 index.html 时忽略 */
+      }
+    },
+  }
+}
+
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
     llmProxyPlugin(),
+    spa404Plugin(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
