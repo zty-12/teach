@@ -44,6 +44,9 @@ export const SYNC_TABLES: SyncTableName[] = [
   'studentProfiles',
   // v8：结构化反馈模板字段
   'feedbackTemplateFields',
+  // v16：课堂积分
+  'classActivities',
+  'classActivityRecords',
 ]
 
 export interface SyncResult {

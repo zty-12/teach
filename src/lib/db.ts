@@ -3,6 +3,8 @@ import type {
   AppSettings,
   CheckInRecord,
   CheckInTask,
+  ClassActivity,
+  ClassActivityRecord,
   Course,
   CourseAttendance,
   CourseFeedback,
@@ -64,6 +66,9 @@ export class EduDB extends Dexie {
   feedbackTemplateFields!: Table<FeedbackTemplateField, string>
   // v9：数据版本快照（本地滚动留存；云端另存 data_snapshots 表）
   snapshots!: Table<DataSnapshot, string>
+  // v16：课堂积分
+  classActivities!: Table<ClassActivity, string>
+  classActivityRecords!: Table<ClassActivityRecord, string>
   settings!: Table<{ key: string; value: AppSettings }, string>
   syncMeta!: Table<SyncMeta, string>
 
@@ -150,6 +155,14 @@ export class EduDB extends Dexie {
     // v9：数据版本快照（本地滚动留存最近若干版；云端 data_snapshots 表另存）
     this.version(9).stores({
       snapshots: 'id, createdAt',
+    })
+
+    // v16：课堂积分（课堂活动 + 学生参与记录）
+    this.version(10).stores({
+      classActivities:
+        'id, title, courseId, createdAt, updatedAt, deletedAt, dirty',
+      classActivityRecords:
+        'id, activityId, studentId, status, updatedAt, deletedAt, dirty',
     })
   }
 }

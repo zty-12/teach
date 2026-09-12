@@ -501,6 +501,46 @@ export interface PointLedger extends SyncFields {
 }
 
 // ============================================================
+// 课堂积分（v16）
+// ============================================================
+
+/** 课堂活动计分规则的条件类型 */
+export type ClassRuleCondition = 'pass' | 'first'
+
+export const CLASS_RULE_CONDITION_LABEL: Record<ClassRuleCondition, string> = {
+  pass: '过关',
+  first: '第一个过关',
+}
+
+/** 课堂活动内的计分规则 */
+export interface ClassActivityRule {
+  name: string
+  points: number
+  condition: ClassRuleCondition
+  enabled: boolean
+}
+
+/** 课堂活动 */
+export interface ClassActivity extends SyncFields {
+  title: string
+  courseId: string | null
+  rules: ClassActivityRule[]
+  note: string
+  createdAt: number
+}
+
+/** 课堂活动记录（学生参与） */
+export interface ClassActivityRecord extends SyncFields {
+  activityId: string
+  studentId: string
+  status: 'pending' | 'pass' | 'fail'
+  pointsAwarded: number
+  note: string
+  checkedAt: number | null
+  createdAt: number
+}
+
+// ============================================================
 // 积分兑换
 // ============================================================
 
@@ -655,3 +695,6 @@ export type SyncTableName =
   | 'studentProfiles'
   // v8：结构化反馈模板的字段
   | 'feedbackTemplateFields'
+  // v16：课堂积分
+  | 'classActivities'
+  | 'classActivityRecords'

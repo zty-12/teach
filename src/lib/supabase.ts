@@ -100,6 +100,9 @@ export const REQUIRED_TABLES: SyncTableName[] = [
   'studentProfiles',
   // v8：结构化反馈模板字段
   'feedbackTemplateFields',
+  // v16：课堂积分
+  'classActivities',
+  'classActivityRecords',
 ]
 
 /**
@@ -184,7 +187,12 @@ export async function testConnection(
   }
 
   /** 可选表：缺失只降级提示，不影响连接判定 */
-  const OPTIONAL_TABLES = new Set(['app_settings', 'data_snapshots'])
+  const OPTIONAL_TABLES = new Set([
+    'app_settings',
+    'data_snapshots',
+    'classActivities',
+    'classActivityRecords',
+  ])
   const missing = tables.filter((t) => !t.ok)
   const critical = missing.filter((t) => !OPTIONAL_TABLES.has(t.table))
   if (critical.length > 0) {

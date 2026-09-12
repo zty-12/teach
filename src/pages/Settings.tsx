@@ -119,6 +119,12 @@ export default function SettingsPage() {
           : { kind: 'error', message: result.message },
       )
     } catch (e) {
+      setLastTest({
+        ok: false,
+        message: String(e),
+        source: 'settings',
+        tables: [],
+      })
       setSyncState({ kind: 'error', message: `测试失败：${String(e)}` })
     }
   }

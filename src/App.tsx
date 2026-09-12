@@ -9,6 +9,7 @@ import SchedulePage from '@/pages/Schedule'
 import GroupsPage from '@/pages/Groups'
 import KnowledgePage from '@/pages/Knowledge'
 import CheckInPage from '@/pages/CheckIn'
+import ClassPointsPage from '@/pages/ClassPoints'
 import FinancePage from '@/pages/Finance'
 import FeedbackPage from '@/pages/Feedback'
 import ReportsPage from '@/pages/Reports'
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="/groups" element={<GroupsPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/checkin" element={<CheckInPage />} />
+        <Route path="/classpoints" element={<ClassPointsPage />} />
         <Route path="/finance" element={<FinancePage />} />
         <Route path="/feedback" element={<FeedbackPage />} />
         <Route path="/reports" element={<ReportsPage />} />
