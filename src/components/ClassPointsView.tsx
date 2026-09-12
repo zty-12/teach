@@ -205,7 +205,6 @@ export default function ClassPointsView() {
             key={activity.id}
             activity={activity}
             records={recordsOf(activity.id)}
-            allRecords={liveRecords}
             studentMap={studentMap}
             groupMap={groupMap}
             balances={balances}
@@ -234,7 +233,6 @@ export default function ClassPointsView() {
 function ActivityCard({
   activity,
   records,
-  allRecords,
   studentMap,
   groupMap,
   balances,
@@ -245,7 +243,6 @@ function ActivityCard({
 }: {
   activity: ClassActivity
   records: ClassActivityRecord[]
-  allRecords: ClassActivityRecord[]
   studentMap: Map<string, Student>
   groupMap: Map<string, Group>
   balances: Map<string, PointBalance>
@@ -351,10 +348,12 @@ function ActivityCard({
               const bal = balances.get(rec.studentId)
               const isPass = rec.status === 'pass'
               const isFail = rec.status === 'fail'
-              const rank = isPass ? rankOf(allRecords, rec.studentId) : 0
-              const preview = rec.status === 'pending'
-                ? previewPassPoints(activity, allRecords, rec.studentId)
-                : 0
+              // 名次只看本活动的记录，避免跨活动同名次串味
+              const rank = isPass ? rankOf(records, rec.studentId) : 0
+              const preview =
+                rec.status === 'pending'
+                  ? previewPassPoints(activity, records, rec.studentId)
+                  : 0
 
               return (
                 <div
