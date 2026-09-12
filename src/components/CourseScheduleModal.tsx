@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { addDays, format } from 'date-fns'
 import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { getHolidayInfo } from '@/lib/holidays'
 import {
   BILLING_RULE_LABEL,
   COURSE_STATUS_LABEL,
@@ -266,7 +267,7 @@ export function CourseScheduleModal({
           }))
         }
       }
-      // 从班课/课程明细发起排课：预选该班课并带入其科目/配色/默认时长
+      // 从班课/课程明细发起排课：预选该班课并带入其科目/配色/默认时长/每周时段
       if (prefillGroupId) {
         const g = groups.find((x) => x.id === prefillGroupId)
         if (g) {
@@ -277,6 +278,7 @@ export function CourseScheduleModal({
             subject: g.subject,
             colorSlot: g.colorSlot || f.colorSlot,
             durationMin: groupPlannedDuration(g) || f.durationMin,
+            ...(g.startTimeMin >= 0 ? { startTime: minutesToTime(g.startTimeMin) } : {}),
           }))
         }
       }
@@ -403,6 +405,12 @@ export function CourseScheduleModal({
     return result
   }, [bulkEndDate, bulkEndMode, bulkRepeatCount, bulkRule, bulkSelectedDates, bulkWeekdays, createMode, form.date, course])
 
+  /** 批量日期中落在法定假期 / 调休上班日的部分（用于预览提醒） */
+  const bulkHolidayHits = useMemo(
+    () => bulkDates.filter((d) => getHolidayInfo(d) !== null),
+    [bulkDates],
+  )
+
   const isValid = useMemo(() => {
     if (Number.isNaN(startTimestamp)) return false
     if (form.kind === 'group' && !form.groupId) return false
@@ -425,6 +433,8 @@ export function CourseScheduleModal({
         subject: g?.subject || '',
         colorSlot: g?.colorSlot || form.colorSlot,
         durationMin: groupPlannedDuration(g) || form.durationMin,
+        // 排班课：起止时间自动对齐班课「每周固定时段」（startTimeMin ~ endTimeMin）
+        ...(g && g.startTimeMin >= 0 ? { startTime: minutesToTime(g.startTimeMin) } : {}),
       })
     } else {
       const s = students.find((x) => x.id === value)
@@ -1067,16 +1077,43 @@ export function CourseScheduleModal({
                     </div>
                     {bulkDates.length > 0 && (
                       <div className="mt-3 max-h-40 space-y-1.5 overflow-y-auto pr-1">
-                        {bulkDates.map((d) => (
-                          <div
-                            key={d}
-                            className="grid min-w-0 gap-1 rounded-lg bg-surface-0 px-3 py-2 text-[12px] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-                          >
-                            <span className="min-w-0 truncate font-semibold text-text-1">{d}</span>
-                            <span className="min-w-0 truncate text-text-2">{form.startTime}-{endTime}</span>
-                          </div>
-                        ))}
+                        {bulkDates.map((d) => {
+                          const hi = getHolidayInfo(d)
+                          return (
+                            <div
+                              key={d}
+                              className={cn(
+                                'grid min-w-0 gap-1 rounded-lg px-3 py-2 text-[12px] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center',
+                                hi?.type === 'holiday'
+                                  ? 'bg-leave-soft/60'
+                                  : hi?.type === 'workday'
+                                    ? 'bg-pending-soft/60'
+                                    : 'bg-surface-0',
+                              )}
+                            >
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <span className="min-w-0 truncate font-semibold text-text-1">{d}</span>
+                                {hi?.type === 'holiday' && (
+                                  <span className="shrink-0 rounded-full bg-leave-soft px-1.5 py-0.5 text-[10px] font-semibold text-leave">
+                                    假期 · {hi.name}
+                                  </span>
+                                )}
+                                {hi?.type === 'workday' && (
+                                  <span className="shrink-0 rounded-full bg-pending-soft px-1.5 py-0.5 text-[10px] font-semibold text-pending">
+                                    调休上班 · {hi.name}
+                                  </span>
+                                )}
+                              </span>
+                              <span className="min-w-0 truncate text-text-2">{form.startTime}-{endTime}</span>
+                            </div>
+                          )
+                        })}
                       </div>
+                    )}
+                    {bulkHolidayHits.length > 0 && (
+                      <p className="mt-2 rounded-lg bg-leave-soft/60 px-2.5 py-1.5 text-[11px] leading-5 text-leave">
+                        ⚠ 其中 {bulkHolidayHits.length} 天落在法定假期/调休上班日，请确认这些日期是否适合排课。
+                      </p>
                     )}
                   </div>
                 </div>

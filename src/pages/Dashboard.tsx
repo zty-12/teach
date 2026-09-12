@@ -30,6 +30,7 @@ import {
   type Student,
 } from '@/lib/types'
 import { completeCourseWithAttendance, persistAttendance } from './schedule-helpers'
+import { revertCompletion } from '@/lib/courseCompletion'
 import { computeFinanceMetrics } from '@/lib/finance'
 
 // ============================================================
@@ -293,7 +294,8 @@ export default function DashboardPage() {
 
   function quickComplete(c: Course) {
     if (c.status === 'done') {
-      void db.courses.put(touch({ ...c, status: 'pending' }))
+      // 撤销完成：归还课时 + 撤销结算（不能只改状态）
+      void revertCompletion(c.id)
       return
     }
     setAttendanceFor(c)

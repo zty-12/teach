@@ -251,6 +251,8 @@ export default function GroupsPage() {
 
 const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 const WEEKDAY_OPTIONS = WEEKDAY_LABELS.map((label, i) => ({ value: String(i), label }))
+/** 打卡日「星期几」选择器的展示顺序（周一~周日） */
+const CHECKIN_WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0]
 
 function GroupModal({
   open,
@@ -292,6 +294,9 @@ function GroupModal({
       checkInAuto: form.checkInAuto,
       checkInDays: Math.max(1, Math.min(30, Math.floor(form.checkInDays) || 7)),
       checkInStartOffset: Math.max(0, Math.min(30, Math.floor(form.checkInStartOffset) || 0)),
+      checkInWeekdays: Array.from(new Set(form.checkInWeekdays.filter((d) => d >= 0 && d <= 6))).sort(
+        (a, b) => a - b,
+      ),
     }
     if (group) {
       // 计算新计划时长
@@ -442,26 +447,68 @@ function GroupModal({
           </label>
         </Field>
         {form.checkInAuto && (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="打卡天数" hint="1 ~ 30 天">
-              <Input
-                type="number"
-                min={1}
-                max={30}
-                value={form.checkInDays}
-                onChange={(e) => patch({ checkInDays: Number(e.target.value) })}
-              />
-            </Field>
-            <Field label="起始日" hint="从下课日往后推">
-              <Select
-                value={String(form.checkInStartOffset)}
-                onChange={(e) => patch({ checkInStartOffset: Number(e.target.value) })}
-              >
-                <option value="0">下课当天开始</option>
-                <option value="1">次日起（默认）</option>
-                <option value="2">第 3 天起</option>
-                <option value="6">一周后起</option>
-              </Select>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="打卡天数" hint="1 ~ 30 天">
+                <Input
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={form.checkInDays}
+                  onChange={(e) => patch({ checkInDays: Number(e.target.value) })}
+                />
+              </Field>
+              <Field label="起始日" hint="从下课日往后推">
+                <Select
+                  value={String(form.checkInStartOffset)}
+                  onChange={(e) => patch({ checkInStartOffset: Number(e.target.value) })}
+                >
+                  <option value="0">下课当天开始</option>
+                  <option value="1">次日起（默认）</option>
+                  <option value="2">第 3 天起</option>
+                  <option value="6">一周后起</option>
+                </Select>
+              </Field>
+            </div>
+            <Field
+              label="打卡日（星期几）"
+              hint="不选=按自然日连续；选择后仅在这些星期几生成打卡"
+            >
+              <div className="flex flex-wrap gap-1.5">
+                {CHECKIN_WEEKDAY_ORDER.map((i) => {
+                  const on = form.checkInWeekdays.includes(i)
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() =>
+                        patch({
+                          checkInWeekdays: on
+                            ? form.checkInWeekdays.filter((d) => d !== i)
+                            : [...form.checkInWeekdays, i].sort((a, b) => a - b),
+                        })
+                      }
+                      className={cn(
+                        'h-8 w-9 rounded-lg border text-[12px] font-semibold transition-colors',
+                        on
+                          ? 'border-accent bg-accent text-white'
+                          : 'border-line-1 bg-surface-0 text-text-2 hover:bg-surface-2',
+                      )}
+                    >
+                      {WEEKDAY_LABELS[i]?.replace('周', '') ?? i}
+                    </button>
+                  )
+                })}
+                {form.checkInWeekdays.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => patch({ checkInWeekdays: [] })}
+                    className="h-8 rounded-lg border border-line-1 bg-surface-0 px-2.5 text-[12px] font-medium text-text-2 hover:bg-surface-2"
+                  >
+                    清空
+                  </button>
+                )}
+              </div>
             </Field>
           </div>
         )}
@@ -638,6 +685,8 @@ interface GroupForm {
   checkInAuto: boolean
   checkInDays: number
   checkInStartOffset: number
+  /** v16：限定打卡日落在这些星期几（0=周日~6=周六）；空=按自然日连续 */
+  checkInWeekdays: number[]
 }
 
 const emptyForm = (): GroupForm => ({
@@ -653,6 +702,7 @@ const emptyForm = (): GroupForm => ({
   checkInAuto: true,
   checkInDays: 7,
   checkInStartOffset: 1,
+  checkInWeekdays: [],
 })
 
 const toForm = (g: Group): GroupForm => ({
@@ -668,4 +718,7 @@ const toForm = (g: Group): GroupForm => ({
   checkInAuto: g.checkInAuto !== false,
   checkInDays: g.checkInDays ?? 7,
   checkInStartOffset: g.checkInStartOffset ?? 1,
+  checkInWeekdays: Array.isArray(g.checkInWeekdays)
+    ? Array.from(new Set(g.checkInWeekdays.filter((d) => d >= 0 && d <= 6))).sort((a, b) => a - b)
+    : [],
 })

@@ -11,8 +11,19 @@
 //   3. 部署后，前端「设置 → AI 辅助」勾选「经 Edge Function 中转」，
 //      填入 Function URL 与 LLM_PROXY_TOKEN。
 //
+// ⚠️ 关于 401「Proxy 401」：
+//   Supabase 函数网关默认开启 JWT 校验。若前端把 `<LLM_PROXY_TOKEN>` 直接放在
+//   Authorization 头，网关会先判定它不是合法 JWT 并直接返回 401，函数代码根本
+//   不会执行。因此新版前端改为：
+//        Authorization: Bearer <Supabase anon key>   ← 通过网关 JWT 校验
+//        apikey:        <Supabase anon key>
+//        x-proxy-token: <LLM_PROXY_TOKEN>            ← 真正的共享密钥
+//   本函数优先读取 x-proxy-token，并保留对旧协议（Authorization 携带共享密钥）
+//   的兼容 —— 旧协议要求关闭「Enforce JWT verification」。
+//
 // 请求：POST /functions/v1/llm-proxy
-//   Authorization: Bearer <LLM_PROXY_TOKEN>
+//   Authorization: Bearer <anon key>（或 <LLM_PROXY_TOKEN>，需关闭 JWT 校验）
+//   x-proxy-token: <LLM_PROXY_TOKEN>
 //   body: { baseUrl, apiKey, model, messages, jsonMode }
 //
 // 响应：
@@ -24,7 +35,8 @@ const TOKEN = Deno.env.get("LLM_PROXY_TOKEN") ?? ""
 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-user-id, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, x-proxy-token, x-user-id, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Max-Age": "86400",
 }
@@ -35,11 +47,18 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders })
   }
 
-  // 校验共享密钥
+  // 校验共享密钥：优先自定义头，回退到 Authorization（兼容旧部署）
+  const proxyToken = (req.headers.get("x-proxy-token") ?? "").trim()
   const auth = req.headers.get("authorization") ?? ""
-  if (!TOKEN || auth !== `Bearer ${TOKEN}`) {
+  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : ""
+  const provided = proxyToken || bearer
+  if (!TOKEN || provided !== TOKEN) {
     return new Response(
-      JSON.stringify({ error: "Unauthorized: LLM_PROXY_TOKEN mismatch" }),
+      JSON.stringify({
+        error: proxyToken
+          ? "Unauthorized: LLM_PROXY_TOKEN mismatch"
+          : "Unauthorized: 未收到共享密钥。请更新前端到最新版（会在 x-proxy-token 头携带），或关闭本函数的 JWT 校验后用 Authorization 传共享密钥",
+      }),
       { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }

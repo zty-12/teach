@@ -504,9 +504,12 @@ export async function ensureAutoCheckInTask(input: {
   if (ids.length === 0) return { created: false }
 
   const DAY = 86_400_000
+  const WD_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
   // v8：读取班课的「自动打卡」配置（班课设置里可调；1对1 或未配置时走默认 7 天 / 次日起）
   let cycleDays = 7
   let startOffset = 1
+  /** 限定打卡日落在这些星期几（0=周日~6=周六）；为空=按自然日连续 */
+  let weekdays: number[] = []
   if (input.groupId) {
     const g = await db.groups.get(input.groupId)
     if (g) {
@@ -517,21 +520,39 @@ export async function ensureAutoCheckInTask(input: {
         0,
         Math.min(30, Math.floor(g.checkInStartOffset ?? 1) || 0),
       )
+      if (Array.isArray(g.checkInWeekdays)) {
+        weekdays = Array.from(
+          new Set(g.checkInWeekdays.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)),
+        ).sort((a, b) => a - b)
+      }
     }
   }
   const day0 = startOfDay(new Date(input.courseEndAt)).getTime()
-  const days = Array.from(
-    { length: cycleDays },
-    (_, i) => day0 + (startOffset + i) * DAY,
-  )
+  const days: number[] = []
+  if (weekdays.length > 0) {
+    // 限定星期几：从起始日起向后取落在所选星期几的日期，共 cycleDays 天
+    const allow = new Set(weekdays)
+    const limit = startOffset + cycleDays * 7 + 7
+    for (let i = startOffset; i <= limit && days.length < cycleDays; i++) {
+      const d = day0 + i * DAY
+      if (allow.has(new Date(d).getDay())) days.push(d)
+    }
+  } else {
+    for (let i = 0; i < cycleDays; i++) days.push(day0 + (startOffset + i) * DAY)
+  }
+  if (days.length === 0) return { created: false }
   const offsetText = startOffset === 0 ? '下课当日起' : `第 ${startOffset + 1} 天起`
+  const weekdayText =
+    weekdays.length > 0
+      ? `，限 ${weekdays.map((d) => WD_LABELS[d]).join('/')}`
+      : ''
   await createCheckInTask({
     courseId: input.courseId,
     groupId: input.groupId,
     title: `课后打卡 · ${input.title}`,
     dueAt: null,
     scope: 'course',
-    note: `课程完成后自动创建（${cycleDays} 天，${offsetText}）；可在「班课设置 → 打卡」调整，也可在打卡页改日期`,
+    note: `课程完成后自动创建（${cycleDays} 天，${offsetText}${weekdayText}）；可在「班课设置 → 课后自动打卡」调整，也可在打卡页改日期`,
     cadenceLabel: formatCadenceLabel(days),
     memberIds: ids,
     days,

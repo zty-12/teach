@@ -18,6 +18,13 @@ export interface LlmConfig {
   /** 是否走 Edge Function 中转（由调用方从 settings 派生） */
   proxyUrl?: string
   proxyToken?: string
+  /**
+   * Supabase anon key（可选）。
+   * Supabase 函数网关默认要求 Authorization 携带合法 JWT，否则在进入函数代码前
+   * 就被拒为 401。中转时用它作 Authorization 通过网关，把自定义共享密钥放到
+   * `x-proxy-token` 头 —— 这样无论函数是否开启「Enforce JWT verification」都能调通。
+   */
+  proxyAnonKey?: string
 }
 
 /**
@@ -181,13 +188,25 @@ async function requestViaProxy(
   withJson: boolean,
 ): Promise<{ ok: true; content: string } | { ok: false; status: number; detail: string }> {
   let res: Response
+  const anon = cfg.proxyAnonKey?.trim()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    // 共享密钥走自定义头（新版函数读取）；同时兼容旧的 Authorization 协议
+    'x-proxy-token': cfg.proxyToken ?? '',
+  }
+  if (anon) {
+    // 携带 anon key 以通过 Supabase 函数网关的 JWT 校验（否则网关直接 401）
+    headers.apikey = anon
+    headers.Authorization = `Bearer ${anon}`
+  } else {
+    // 无 anon key（未配置 Supabase）：回退到共享密钥作 Authorization，
+    // 此时需在 Supabase 函数设置里关闭「Enforce JWT verification」
+    headers.Authorization = `Bearer ${cfg.proxyToken ?? ''}`
+  }
   try {
     res = await fetch(cfg.proxyUrl!.trim(), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${cfg.proxyToken}`,
-      },
+      headers,
       body: JSON.stringify({
         baseUrl: cfg.baseUrl,
         apiKey: cfg.apiKey,
@@ -203,7 +222,12 @@ async function requestViaProxy(
   }
   const data = await res.json().catch(() => null)
   if (!res.ok) {
-    const detail = (data?.error as string) ?? `Proxy ${res.status}`
+    const raw = (data?.error ?? data?.message ?? data?.msg) as string | undefined
+    const detail =
+      raw ??
+      (res.status === 401
+        ? 'Edge Function 网关鉴权失败：请部署新版函数（读取 x-proxy-token 头），或在 Supabase 函数设置中关闭「Enforce JWT verification」'
+        : `Proxy ${res.status}`)
     return { ok: false as const, status: res.status, detail }
   }
   return { ok: true as const, content: (data?.content as string) ?? '' }
@@ -638,25 +662,68 @@ function cfgFrom(settings: AppSettings): LlmConfig {
   if (settings.aiProxyMode === 'proxy' && settings.aiProxyUrl && settings.aiProxyToken) {
     cfg.proxyUrl = settings.aiProxyUrl
     cfg.proxyToken = settings.aiProxyToken
+    const anon = settings.supabaseAnonKey?.trim()
+    if (anon) cfg.proxyAnonKey = anon
   }
   return cfg
 }
 
 /**
- * 构造「视觉模型」专用 LlmConfig：与文本模型共用 Base URL / API Key / 中转设置，
- * 仅切换 model 字段。若未配置视觉模型或 AI 未启用，返回 null。
+ * 构造「视觉模型」专用 LlmConfig：默认与文本模型共用 Base URL / API Key / 中转设置，
+ * 仅切换 model 字段；若视觉区单独配置了可用的 Base URL / API Key / 中转，则优先使用。
+ * 若未配置视觉模型或 AI 未启用，返回 null。
  */
 export function buildVisionCfg(
   settings: Pick<
     AppSettings,
-    'aiEnabled' | 'aiBaseUrl' | 'aiApiKey' | 'aiVisionModel' | 'aiProxyMode' | 'aiProxyUrl' | 'aiProxyToken'
-  >,
+    | 'aiEnabled'
+    | 'aiBaseUrl'
+    | 'aiApiKey'
+    | 'aiVisionModel'
+    | 'aiProxyMode'
+    | 'aiProxyUrl'
+    | 'aiProxyToken'
+    | 'supabaseAnonKey'
+  > &
+    Partial<
+      Pick<
+        AppSettings,
+        | 'aiVisionBaseUrl'
+        | 'aiVisionApiKey'
+        | 'aiVisionProxyMode'
+        | 'aiVisionProxyUrl'
+        | 'aiVisionProxyToken'
+      >
+    >,
 ): LlmConfig | null {
   if (!settings.aiEnabled) return null
-  if (!settings.aiBaseUrl?.trim() || !settings.aiApiKey?.trim()) return null
   const model = settings.aiVisionModel.trim()
   if (!model) return null
-  return cfgFrom({ ...settings, aiModel: model } as AppSettings)
+
+  // 视觉区若单独配置了 Base URL / API Key，则优先（否则沿用文本模型）
+  const baseUrl = settings.aiVisionBaseUrl?.trim() || settings.aiBaseUrl?.trim()
+  const apiKey = settings.aiVisionApiKey?.trim() || settings.aiApiKey?.trim()
+  if (!baseUrl || !apiKey) return null
+
+  // 视觉区若单独配置了「经中转」，则覆盖文本模型的中转设置
+  const visionProxyOn =
+    settings.aiVisionProxyMode === 'proxy' &&
+    !!settings.aiVisionProxyUrl?.trim() &&
+    !!settings.aiVisionProxyToken?.trim()
+  const merged = {
+    ...settings,
+    aiModel: model,
+    aiBaseUrl: baseUrl,
+    aiApiKey: apiKey,
+    ...(visionProxyOn
+      ? {
+          aiProxyMode: 'proxy' as const,
+          aiProxyUrl: settings.aiVisionProxyUrl!.trim(),
+          aiProxyToken: settings.aiVisionProxyToken!.trim(),
+        }
+      : {}),
+  }
+  return cfgFrom(merged as AppSettings)
 }
 
 /** 从 settings 派生 LlmConfig（供 generateFeedback / generateReport / testLlm 使用） */

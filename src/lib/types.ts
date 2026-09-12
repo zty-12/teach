@@ -93,6 +93,11 @@ export interface Group extends SyncFields {
    * 打卡日 = 下课日 + startOffset，共 checkInDays 天。
    */
   checkInStartOffset?: number
+  /**
+   * 打卡日限定的星期几（0=周日~6=周六）；为空表示不限制（按自然日连续）。
+   * 设置后：从起始日起向后取「落在所选星期几」的日期，共 checkInDays 天。
+   */
+  checkInWeekdays?: number[]
 }
 
 export interface GroupMember extends SyncFields {

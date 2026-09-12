@@ -509,7 +509,10 @@ export default function SettingsPage() {
                     spellCheck={false}
                   />
                 </Field>
-                <Field label="中转 Token" hint="Supabase Secret LLM_PROXY_TOKEN 的值">
+                <Field
+                  label="中转 Token"
+                  hint="Supabase Secret LLM_PROXY_TOKEN 的值（前端经 x-proxy-token 头携带）"
+                >
                   <Input
                     value={settings.aiProxyToken}
                     onChange={(e) => void update({ aiProxyToken: e.target.value })}
@@ -522,6 +525,10 @@ export default function SettingsPage() {
                 </Field>
                 <p className="text-[11px] text-text-3 leading-relaxed">
                   首次使用需先在 Supabase Edge Functions 部署 <code className="rounded bg-surface-0 px-1">llm-proxy</code>（源码见 <code className="rounded bg-surface-0 px-1">supabase/functions/llm-proxy/index.ts</code>），并在项目 Secrets 中加 <code className="rounded bg-surface-0 px-1">LLM_PROXY_TOKEN</code>。
+                  <br />
+                  若提示「API 401 / Proxy 401」：说明函数网关默认开启 JWT 校验，把本 Token 当作 JWT 拒绝了。请
+                  <strong className="text-text-2"> 重新粘贴上面源码并重新部署 llm-proxy</strong>
+                  ——新版函数改从 <code className="rounded bg-surface-0 px-1">x-proxy-token</code> 头读取共享密钥，会由前端自动携带 Supabase anon key 通过网关校验（需在「数据同步」里填好 URL 与 anon key）。
                 </p>
               </>
             )}
@@ -673,7 +680,7 @@ export default function SettingsPage() {
                       spellCheck={false}
                     />
                   </Field>
-                  <Field label="中转 Token">
+                  <Field label="中转 Token" hint="与文本模型一致，来自 LLM_PROXY_TOKEN">
                     <Input
                       type="password"
                       value={settings.aiVisionProxyToken}

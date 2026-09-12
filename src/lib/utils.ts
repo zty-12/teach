@@ -32,11 +32,13 @@ export function formatMoney(cents: number): string {
 export function formatMoneyShort(cents: number): string {
   const abs = Math.abs(cents)
   const sign = cents < 0 ? '-' : ''
-  if (abs >= 1_000_00) {
-    return `${sign}¥${(abs / 100_000).toFixed(1)}w`
+  // 万元级：¥10,000 起（1e6 分）
+  if (abs >= 1_000_000) {
+    return `${sign}¥${(abs / 1_000_000).toFixed(1)}w`
   }
-  if (abs >= 1_000_00 / 10) {
-    return `${sign}¥${(abs / 100).toFixed(1)}k`
+  // 千元级：¥1,000 起（1e5 分）
+  if (abs >= 100_000) {
+    return `${sign}¥${(abs / 100_000).toFixed(1)}k`
   }
   return `${sign}¥${(abs / 100).toFixed(0)}`
 }

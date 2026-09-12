@@ -26,6 +26,7 @@ import {
 } from '@/lib/types'
 import { cn, formatCourseRange, subjectColorVar } from '@/lib/utils'
 import { courseTitle } from '@/pages/schedule-helpers'
+import { revertCompletion } from '@/lib/courseCompletion'
 
 /** 每页显示多少条 */
 const PAGE_SIZE = 20
@@ -184,8 +185,14 @@ export function CourseScheduleSheet({
   async function batchSetStatus(status: CourseStatus) {
     if (!scope || selected.size === 0) return
     const targets = scope.list.filter((c) => selected.has(c.id))
-    const now = Date.now()
-    await db.courses.bulkPut(targets.map((c) => ({ ...c, status, updatedAt: now, dirty: 1 })))
+    // 撤销完成：先归还课时 / 撤销结算，再改状态（不能直接 bulkPut 覆盖）
+    const reverts = targets.filter((c) => c.status === 'done' && status !== 'done')
+    for (const c of reverts) await revertCompletion(c.id)
+    const rest = targets.filter((c) => !(c.status === 'done' && status !== 'done'))
+    if (rest.length > 0) {
+      const now = Date.now()
+      await db.courses.bulkPut(rest.map((c) => ({ ...c, status, updatedAt: now, dirty: 1 })))
+    }
     setSelected(new Set())
     setSelectMode(false)
   }

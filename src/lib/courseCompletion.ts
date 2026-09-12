@@ -7,7 +7,7 @@
  *  - 预付学生：每次出席扣 1 课时，扣至 0 停止
  *  - 完成时自动写一条 Settlement
  */
-import { db, touch, withSyncFields } from './db'
+import { db, markDeleted, touch, withSyncFields } from './db'
 import type {
   Course,
   CourseAttendance,
@@ -189,6 +189,79 @@ export async function applyCompletion(
   }
 
   return breakdown
+}
+
+/**
+ * 撤销「完成上课」——applyCompletion 的逆操作：
+ *  1. 归还该课对预付学生扣减的课时；
+ *  2. 软删除该课未结清的 Settlement（撤销课酬结算）；
+ *  3. 课程状态回 pending、feeCents 归零。
+ *
+ * 说明：完成时未记录逐生扣减快照，这里按「当前出席记录」重算应扣量并对称加回；
+ * 对「完成后立即撤销」这一常见场景结果精确。幂等：未完成的课调用无副作用。
+ */
+export async function revertCompletion(
+  courseId: string,
+): Promise<{ restoredHours: number; removedSettlements: number }> {
+  const course = await db.courses.get(courseId)
+  if (!course) return { restoredHours: 0, removedSettlements: 0 }
+
+  const attendances = (await db.courseAttendances.toArray()).filter(
+    (a) => !a.deletedAt && a.courseId === courseId,
+  )
+  const groupMembers = course.groupId
+    ? (await db.groupMembers.toArray()).filter(
+        (m) => !m.deletedAt && m.groupId === course.groupId,
+      )
+    : []
+  const student = course.studentId
+    ? (await db.students.get(course.studentId)) ?? null
+    : null
+  const group = course.groupId
+    ? (await db.groups.get(course.groupId)) ?? null
+    : null
+  const allStudents = student
+    ? [student]
+    : (await db.students.bulkGet(groupMembers.map((m) => m.studentId))).filter(
+        (s): s is Student => !!s && !s.deletedAt,
+      )
+
+  const breakdown = calculateCompletion({
+    course,
+    attendances,
+    student,
+    group,
+    groupMembers,
+    allStudents,
+  })
+
+  // 1) 归还课时
+  let restoredHours = 0
+  for (const d of breakdown.deductions) {
+    const deducted = d.before - d.after
+    if (deducted <= 0) continue
+    const s = await db.students.get(d.studentId)
+    if (!s) continue
+    await db.students.put(
+      touch({ ...s, remainingHours: s.remainingHours + deducted }),
+    )
+    restoredHours += deducted
+  }
+
+  // 2) 撤销结算
+  let removedSettlements = 0
+  const settled = (await db.settlements.toArray()).filter(
+    (s) => s.courseId === courseId && !s.deletedAt,
+  )
+  for (const st of settled) {
+    await db.settlements.put(markDeleted(st))
+    removedSettlements++
+  }
+
+  // 3) 状态回退（清空课酬，避免残留待结算金额）
+  await db.courses.put(touch({ ...course, status: 'pending', feeCents: 0 }))
+
+  return { restoredHours, removedSettlements }
 }
 
 /**
