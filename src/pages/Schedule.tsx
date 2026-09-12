@@ -688,16 +688,18 @@ function WeekView({
                       }}
                       title={selectMode ? '点击选择/取消' : '单击查看全部排课，双击快速完成'}
                       className={cn(
-                        'absolute inset-x-1 overflow-hidden rounded-md px-1.5 py-1 text-[11px] leading-tight',
+                        'absolute inset-x-1 overflow-hidden rounded-md border border-line-1 px-1.5 py-1 text-[11px] leading-tight',
                         selectMode ? 'cursor-pointer' : 'cursor-pointer transition-shadow hover:shadow-md',
                         c.status === 'cancelled' && 'opacity-50',
-                        isSelected && 'ring-2 ring-white/90',
+                        isSelected && 'ring-2 ring-[var(--accent)]',
                       )}
                       style={{
                         top: top + 1,
                         height,
-                        background: subjectColorVar(c.colorSlot),
-                        color: '#fff',
+                        // v14：与「当日时间线」视图统一——浅色底 + 左侧色条，替代整块实色
+                        background: `${subjectColorVar(c.colorSlot)}14`,
+                        borderLeft: `3px solid ${subjectColorVar(c.colorSlot)}`,
+                        color: 'var(--text-1)',
                       }}
                     >
                       <div className="flex items-center justify-between gap-1">

@@ -288,6 +288,10 @@ function GroupModal({
       weekday: form.weekday,
       startTimeMin: form.startTime,
       endTimeMin: form.endTime,
+      // v14：课后自动打卡配置（与详情页「打卡」Tab 写入同一组字段）
+      checkInAuto: form.checkInAuto,
+      checkInDays: Math.max(1, Math.min(30, Math.floor(form.checkInDays) || 7)),
+      checkInStartOffset: Math.max(0, Math.min(30, Math.floor(form.checkInStartOffset) || 0)),
     }
     if (group) {
       // 计算新计划时长
@@ -416,6 +420,52 @@ function GroupModal({
             placeholder="班级特点、教材版本等"
           />
         </Field>
+
+        {/* v14：班课「课后自动打卡」配置（与详情页「打卡」Tab 同源，便于在班课设置里直接找到） */}
+        <Field
+          label="课后自动打卡"
+          hint="本班每次课完成后，自动为出勤学员生成周期打卡任务"
+        >
+          <label className="flex items-start gap-2 rounded-lg border border-line-1 bg-surface-0 px-3 py-2.5 text-[13px] text-text-1">
+            <input
+              type="checkbox"
+              checked={form.checkInAuto}
+              onChange={(e) => patch({ checkInAuto: e.target.checked })}
+              className="mt-0.5 h-3.5 w-3.5 accent-accent"
+            />
+            <span>
+              完成课程后自动生成打卡
+              <span className="block text-[11px] text-text-3">
+                关闭后需到「打卡」页手动创建任务。
+              </span>
+            </span>
+          </label>
+        </Field>
+        {form.checkInAuto && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="打卡天数" hint="1 ~ 30 天">
+              <Input
+                type="number"
+                min={1}
+                max={30}
+                value={form.checkInDays}
+                onChange={(e) => patch({ checkInDays: Number(e.target.value) })}
+              />
+            </Field>
+            <Field label="起始日" hint="从下课日往后推">
+              <Select
+                value={String(form.checkInStartOffset)}
+                onChange={(e) => patch({ checkInStartOffset: Number(e.target.value) })}
+              >
+                <option value="0">下课当天开始</option>
+                <option value="1">次日起（默认）</option>
+                <option value="2">第 3 天起</option>
+                <option value="6">一周后起</option>
+              </Select>
+            </Field>
+          </div>
+        )}
+
         <Field label="配色">
           <div className="flex flex-wrap gap-2">
             {Array.from({ length: 8 }, (_, i) => i + 1).map((slot) => (
@@ -584,6 +634,10 @@ interface GroupForm {
   weekday: number
   startTime: number
   endTime: number
+  // v14：班课「课后自动打卡」配置（从课表详情页迁入，便于在班课设置里直接找到）
+  checkInAuto: boolean
+  checkInDays: number
+  checkInStartOffset: number
 }
 
 const emptyForm = (): GroupForm => ({
@@ -596,6 +650,9 @@ const emptyForm = (): GroupForm => ({
   weekday: -1,
   startTime: -1,
   endTime: -1,
+  checkInAuto: true,
+  checkInDays: 7,
+  checkInStartOffset: 1,
 })
 
 const toForm = (g: Group): GroupForm => ({
@@ -608,4 +665,7 @@ const toForm = (g: Group): GroupForm => ({
   weekday: g.weekday ?? -1,
   startTime: g.startTimeMin ?? -1,
   endTime: g.endTimeMin ?? -1,
+  checkInAuto: g.checkInAuto !== false,
+  checkInDays: g.checkInDays ?? 7,
+  checkInStartOffset: g.checkInStartOffset ?? 1,
 })
