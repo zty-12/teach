@@ -596,6 +596,31 @@ export interface SyncMeta {
   lastPushedAt: number
 }
 
+/**
+ * 数据版本快照（v15）——同步成功后自动生成，本地 + 云端双份，支持回滚到任意历史版本。
+ *  - payload：{ [表名]: 该表全量行数组 }
+ *  - settingsRow：设置行快照（key='app'），可能为 null
+ *  - signature：内容签名，数据未变化时不重复建版本（避免自动同步刷出大量重复版本）
+ */
+export interface DataSnapshot {
+  id: string
+  createdAt: number
+  /** 展示标签：自动版本为时间描述，手动版本可自定义 */
+  label: string
+  /** 是否自动生成 */
+  auto: boolean
+  /** 生成端简要标识（区分设备） */
+  device: string
+  /** 每张表行数统计（列表快速展示，免读大 payload） */
+  counts: Record<string, number>
+  /** 内容签名（counts + 各表最大 updatedAt + 设置修订号） */
+  signature: string
+  /** 全量数据 */
+  payload: Record<string, unknown[]>
+  /** 设置快照 */
+  settingsRow: { key: string; value: AppSettings } | null
+}
+
 /** 所有可同步表的名称 */
 export type SyncTableName =
   | 'students'

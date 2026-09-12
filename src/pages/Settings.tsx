@@ -27,6 +27,8 @@ import {
   type ConnectionTestResult,
 } from '@/lib/supabase'
 import { pendingCount, syncNow } from '@/lib/sync'
+import { createSnapshot } from '@/lib/snapshots'
+import { VersionHistoryCard } from '@/components/VersionHistoryCard'
 import { isAiConfigured, testLlm, testVisionLlm, LLM_PRESETS } from '@/lib/llm'
 import { exportBackupJson, importBackupJson } from '@/lib/exporters'
 import {
@@ -63,6 +65,8 @@ export default function SettingsPage() {
   const [copied, setCopied] = useState(false)
   // 同步过程中检测到云端缺表时的引导（用于手动同步而非 testConnection 的场景）
   const [syncSchemaHint, setSyncSchemaHint] = useState<string | null>(null)
+  // 数据版本列表刷新信号（同步/恢复后 +1 触发重载）
+  const [versionRefresh, setVersionRefresh] = useState(0)
   const [aiStatus, setAiStatus] = useState<'idle' | 'testing' | 'ok' | 'err'>(() =>
     isAiConfigured(settings) ? 'ok' : 'idle',
   )
@@ -131,10 +135,11 @@ export default function SettingsPage() {
       })
       // 检测「云端缺少表」类错误（schema 版本不一致），给出补建表引导
       const missingTable = r.errors.find((m) => /could not find the table|schema cache|table does not exist/i.test(m))
+      const fatal = r.errors.length > 0 && r.pushed === 0 && r.pulled === 0
       if (missingTable) {
         setSyncState({ kind: 'error', message: '同步中断：云端缺少部分数据表' })
         setSyncSchemaHint(missingTable)
-      } else if (r.errors.length > 0 && r.pushed === 0 && r.pulled === 0) {
+      } else if (fatal) {
         setSyncState({ kind: 'error', message: r.errors[0] ?? '同步失败' })
       } else {
         const tail = r.errors.length > 0 ? `（${r.errors[0]}）` : ''
@@ -142,6 +147,11 @@ export default function SettingsPage() {
           kind: 'success',
           message: `已推送 ${r.pushed} 条，拉取 ${r.pulled} 条${tail}`,
         })
+      }
+      // 同步无致命错误 → 留档一个数据版本（数据未变会自动去重），并刷新版本列表
+      if (!missingTable && !fatal) {
+        await createSnapshot({ auto: true }).catch(() => null)
+        setVersionRefresh((v) => v + 1)
       }
       setPending(await pendingCount())
       // 触发 settings 重读，让 lastSyncAt 刷新
@@ -899,6 +909,16 @@ export default function SettingsPage() {
           )}
         </div>
       </Card>
+
+      {/* 数据版本（同步后自动留档，可回滚到历史版本） */}
+      <VersionHistoryCard
+        refreshKey={versionRefresh}
+        hasCloud={hasSavedConfig}
+        onChanged={async () => {
+          setVersionRefresh((v) => v + 1)
+          setPending(await pendingCount())
+        }}
+      />
 
       {/* 数据 */}
       <Card>

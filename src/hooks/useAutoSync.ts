@@ -3,6 +3,7 @@ import { liveQuery, type Table } from 'dexie'
 import { db } from '@/lib/db'
 import { isSupabaseConfigured } from '@/lib/supabase'
 import { syncNow } from '@/lib/sync'
+import { createSnapshot } from '@/lib/snapshots'
 import { useSettings } from '@/store/useSettings'
 import { SYNC_TABLES } from '@/lib/sync'
 import type { AppSettings } from '@/lib/types'
@@ -32,10 +33,15 @@ async function runSyncOnce(
   syncingFlag = true
   try {
     // 限时：避免网络卡死挂起后续调度
-    await Promise.race([
+    const r = await Promise.race([
       syncNow(settings),
-      new Promise((r) => setTimeout(r, timeoutMs)),
+      new Promise<null>((res) => setTimeout(() => res(null), timeoutMs)),
     ])
+    // 同步成功（无错误）后自动留档一个数据版本；失败/超时不留（多为网络问题）
+    // 数据未变化时 createSnapshot 内部签名去重会跳过，不会产生重复版本
+    if (r && r.errors.length === 0) {
+      await createSnapshot({ auto: true }).catch(() => null)
+    }
   } catch {
     /* 同步失败静默忽略，下个周期再试；错误在设置页手动同步时可见 */
   } finally {

@@ -169,9 +169,24 @@ export async function testConnection(
     )
   }
 
+  // 2.6) 数据版本快照表（v15 新增，缺失不影响业务表，仅「云端版本留档」不可用）
+  {
+    const head = await client.from('data_snapshots').select('id', { head: true }).limit(0)
+    tables.push(
+      head.error
+        ? {
+            table: 'data_snapshots',
+            ok: false,
+            message: '表不存在（版本仅在本地留档）。在 SQL Editor 执行 supabase/migration-v11-data-snapshots.sql 即可补上',
+          }
+        : { table: 'data_snapshots', ok: true },
+    )
+  }
+
+  /** 可选表：缺失只降级提示，不影响连接判定 */
+  const OPTIONAL_TABLES = new Set(['app_settings', 'data_snapshots'])
   const missing = tables.filter((t) => !t.ok)
-  // app_settings 缺失只降级提示（设置暂不云同步），不算连接失败
-  const critical = missing.filter((t) => t.table !== 'app_settings')
+  const critical = missing.filter((t) => !OPTIONAL_TABLES.has(t.table))
   if (critical.length > 0) {
     const names = critical.map((t) => t.table).join('、')
     return {
@@ -182,9 +197,10 @@ export async function testConnection(
     }
   }
   if (missing.length > 0) {
+    const names = missing.map((t) => t.table).join('、')
     return {
       ok: true,
-      message: '连接正常，业务表全部就绪；app_settings 缺失（设置暂不云同步），可执行 migration-v9-app-settings.sql 补上',
+      message: `连接正常，业务表全部就绪；可选表（${names}）缺失，对应增强功能暂不可用（可在 SQL Editor 执行对应 migration 脚本补上）`,
       source: r.source,
       tables,
     }
@@ -192,7 +208,7 @@ export async function testConnection(
 
   return {
     ok: true,
-    message: `连接正常，${REQUIRED_TABLES.length} 张业务表 + 设置同步表全部就绪`,
+    message: `连接正常，${REQUIRED_TABLES.length} 张业务表 + 设置同步表 + 版本快照表全部就绪`,
     source: r.source,
     tables,
   }

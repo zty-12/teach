@@ -7,6 +7,7 @@ import type {
   CourseAttendance,
   CourseFeedback,
   CourseKnowledge,
+  DataSnapshot,
   FeedbackTemplate,
   FeedbackTemplateField,
   Group,
@@ -61,6 +62,8 @@ export class EduDB extends Dexie {
   studentProfiles!: Table<StudentProfile, string>
   // v8：结构化反馈模板的字段
   feedbackTemplateFields!: Table<FeedbackTemplateField, string>
+  // v9：数据版本快照（本地滚动留存；云端另存 data_snapshots 表）
+  snapshots!: Table<DataSnapshot, string>
   settings!: Table<{ key: string; value: AppSettings }, string>
   syncMeta!: Table<SyncMeta, string>
 
@@ -142,6 +145,11 @@ export class EduDB extends Dexie {
     this.version(8).stores({
       feedbackTemplateFields:
         'id, templateId, order, updatedAt, deletedAt, dirty',
+    })
+
+    // v9：数据版本快照（本地滚动留存最近若干版；云端 data_snapshots 表另存）
+    this.version(9).stores({
+      snapshots: 'id, createdAt',
     })
   }
 }
