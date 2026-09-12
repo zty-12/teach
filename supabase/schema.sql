@@ -420,7 +420,9 @@ create table if not exists "classActivities" (
   "courseId" text,
   "groupId" text,
   "activityDate" bigint,
-  "auto" boolean not null default false,
+  -- 允许 null：v16 老数据没有该字段，PostgREST 批量 upsert 会补 null，
+  --           若强制 NOT NULL 会导致整批推送失败（前端已补全，此处兜底）
+  "auto" boolean default false,
   "sourceCourseId" text,
   "rules" jsonb not null default '[]'::jsonb,
   "note" text not null default '',
@@ -503,9 +505,13 @@ alter table "feedbackTemplates" add column if not exists kind text not null defa
 -- v17：课堂积分后期字段（若表由旧版 v12 以 snake_case 建过，这里补 camelCase 列）
 alter table "classActivities" add column if not exists "groupId" text;
 alter table "classActivities" add column if not exists "activityDate" bigint;
-alter table "classActivities" add column if not exists "auto" boolean not null default false;
+alter table "classActivities" add column if not exists "auto" boolean default false;
 alter table "classActivities" add column if not exists "sourceCourseId" text;
 alter table "classActivityRecords" add column if not exists "ledgerId" text;
+
+-- 兜底：已按旧脚本建库时 auto 带 NOT NULL 约束，这里放宽，
+--       避免历史脏数据（auto 为 null）把整表推送卡死。
+alter table "classActivities" alter column "auto" drop not null;
 
 
 -- ============================================================

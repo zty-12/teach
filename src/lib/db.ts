@@ -171,6 +171,35 @@ export class EduDB extends Dexie {
       classActivities:
         'id, title, courseId, groupId, activityDate, createdAt, updatedAt, deletedAt, dirty',
     })
+
+    // v19：纯数据迁移（schema 不变），补全 v16 老数据缺失的 v17 字段。
+    // 背景：v16 时期创建的课堂活动本地没有 auto / groupId / activityDate 等字段，
+    //       而云端 "classActivities".auto 是 NOT NULL，PostgREST 批量 upsert 时
+    //       会把数组里缺失的键补成 null → 违反 not-null 约束，整表推送失败。
+    //       这里把本地真源补全，推送自然带上默认值。
+    this.version(12).upgrade(async (tx) => {
+      await tx
+        .table('classActivities')
+        .toCollection()
+        .modify((a: Record<string, unknown>) => {
+          if (typeof a.auto !== 'boolean') a.auto = false
+          if (a.groupId === undefined) a.groupId = null
+          if (a.activityDate === undefined) a.activityDate = null
+          if (a.sourceCourseId === undefined) a.sourceCourseId = null
+          if (!Array.isArray(a.rules)) a.rules = []
+          if (typeof a.note !== 'string') a.note = ''
+          if (typeof a.title !== 'string') a.title = ''
+        })
+      await tx
+        .table('classActivityRecords')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          if (r.ledgerId === undefined) r.ledgerId = null
+          if (typeof r.pointsAwarded !== 'number') r.pointsAwarded = 0
+          if (typeof r.note !== 'string') r.note = ''
+          if (typeof r.status !== 'string') r.status = 'pending'
+        })
+    })
   }
 }
 

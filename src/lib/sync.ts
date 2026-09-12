@@ -55,6 +55,54 @@ export interface SyncResult {
   errors: string[]
 }
 
+/**
+ * 云端 NOT NULL 列在本地老数据中可能整个字段都不存在
+ * （典型：v16 时期建的课堂活动没有 v17 新增的 auto 字段）。
+ *
+ * PostgREST 批量 upsert 时，会把数组里「键不一致」的缺失键统一补成 null，
+ * 于是触发 `null value in column "auto" ... violates not-null constraint`，
+ * 导致该表整批推送失败。
+ *
+ * 这里在推送前按表补全默认值，作为本地数据迁移之外的第二道防线
+ * （其它设备 / 未跑迁移的旧数据同样受益）。
+ */
+const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
+  classActivities: {
+    auto: false,
+    rules: [],
+    note: '',
+    title: '',
+    groupId: null,
+    activityDate: null,
+    sourceCourseId: null,
+    courseId: null,
+  },
+  classActivityRecords: {
+    ledgerId: null,
+    pointsAwarded: 0,
+    note: '',
+    status: 'pending',
+  },
+}
+
+/** 对单条待推送记录补齐云端 NOT NULL 列的缺省值 */
+function applyPushDefaults(
+  table: SyncTableName,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  const defaults = PUSH_DEFAULTS[table]
+  if (!defaults) return row
+  let patched = false
+  const out: Record<string, unknown> = { ...row }
+  for (const [key, value] of Object.entries(defaults)) {
+    if (out[key] === undefined || out[key] === null) {
+      out[key] = value
+      patched = true
+    }
+  }
+  return patched ? out : row
+}
+
 /** 推送本地待同步记录到云端 */
 export async function pushAll(settings?: AppSettings): Promise<SyncResult> {
   const result: SyncResult = { pushed: 0, pulled: 0, errors: [] }
@@ -68,7 +116,9 @@ export async function pushAll(settings?: AppSettings): Promise<SyncResult> {
       if (dirty.length === 0) continue
 
       // dirty 是本地字段，不上传
-      const payload = dirty.map(({ dirty: _dirty, ...rest }) => rest)
+      const payload = dirty.map(({ dirty: _dirty, ...rest }) =>
+        applyPushDefaults(name, rest),
+      )
 
       const { error } = await client.from(name).upsert(payload, { onConflict: 'id' })
       if (error) {
