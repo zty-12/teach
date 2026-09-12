@@ -181,6 +181,8 @@ export async function visionOcrPdfAllPages(
     skipBlank?: boolean
     runner?: BatchRunner | null
     onProgress?: (p: ExtractProgress) => void
+    /** 进度延续基数：多趟识别时，让本趟的 done 从「上一趟已计页数」继续，避免进度数字从 1 复位（反复横跳） */
+    baseDone?: number
   } = {},
 ): Promise<{ text: string; blankSkipped: number }> {
   const batchSize = Math.max(1, Math.floor(opts.batchSize ?? DEFAULT_VISION_CONCURRENCY) || 1)
@@ -190,7 +192,8 @@ export async function visionOcrPdfAllPages(
   const skipBlank = opts.skipBlank ?? true
   // 按页号写入，保证最终文本仍按页序拼接（并发完成顺序是乱的）
   const perPage: string[] = new Array(total).fill('')
-  let done = 0
+  // 进度延续：若由 extractFromPdf 多趟串联调用，从上一趟已计页数继续累加
+  let done = opts.baseDone ?? 0
   let blankSkipped = 0
 
   const windows: number[][] = []

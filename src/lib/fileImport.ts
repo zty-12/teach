@@ -220,59 +220,81 @@ async function extractFromPdf(
   // 扫描 / 图片型 PDF 会落到下面的视觉 / OCR 全页识别分支。
   const textPageLimit = pageCount
 
-  // ---- 1) 文本层 ----
-  const parts: string[] = []
-  let textChars = 0
+  // 'vision' / 'ocr' 策略会对整本重新识别，文本层结果会被丢弃——没必要先跑一趟文本层。
+  // 那一趟既浪费时间，又会让进度先冲到顶再被下一趟从 1 复位，视觉上就是「反复横跳」。
+  const skipTextPrePass = strategy === 'vision' || strategy === 'ocr'
+
+  let textLayerText = ''
+  let textLayerQ = { score: 0, suspicious: false, reason: '' }
   let textPagesRead = 0
-  for (let i = 1; i <= textPageLimit; i++) {
-    if (runner) await runner.tick()
-    try {
-      const page = await pdf.getPage(i)
-      const content = await page.getTextContent()
-      const line = content.items.map((it) => ('str' in it && it.str ? it.str : '')).join(' ')
-      parts.push(line)
-      textChars += line.replace(/\s+/g, '').length
-      textPagesRead = i
-    } catch {
-      /* 单页失败跳过 */
-    }
-    onProgress?.({ phase: 'pdf-text', done: i, total: pageCount })
-    if (textChars >= MAX_TEXT_CHARS) break
-  }
-  const textLayerText = clean(parts.join('\n\n'))
-  const textLayerQ = assessTextQuality(textLayerText)
-  const textLayerOk =
-    !isPdfTextLikelyEmpty(textLayerText, Math.max(1, textPagesRead)) && !textLayerQ.suspicious
 
-  // 文本层又全又能读 → 直接用，不浪费视觉/OCR 时间
-  if (textLayerOk) {
-    return {
-      kind: 'pdf',
-      fileName: file.name,
-      text: textLayerText,
-      chars: textLayerText.length,
-      pageCount,
-      pagesRead: textPagesRead,
-      truncated: textPagesRead < pageCount,
-      quality: textLayerQ.score,
-      note: buildNote({ pagesRead: textPagesRead, pageCount, quality: textLayerQ }),
+  // ---- 1) 文本层（仅 'text' 策略需要；auto 已在上面单独走 extractHybrid）----
+  if (!skipTextPrePass) {
+    const parts: string[] = []
+    let textChars = 0
+    for (let i = 1; i <= textPageLimit; i++) {
+      if (runner) await runner.tick()
+      try {
+        const page = await pdf.getPage(i)
+        const content = await page.getTextContent()
+        const line = content.items.map((it) => ('str' in it && it.str ? it.str : '')).join(' ')
+        parts.push(line)
+        textChars += line.replace(/\s+/g, '').length
+        textPagesRead = i
+      } catch {
+        /* 单页失败跳过 */
+      }
+      onProgress?.({ phase: 'pdf-text', done: i, total: pageCount })
+      if (textChars >= MAX_TEXT_CHARS) break
+    }
+    textLayerText = clean(parts.join('\n\n'))
+    textLayerQ = assessTextQuality(textLayerText)
+    const textLayerOk =
+      !isPdfTextLikelyEmpty(textLayerText, Math.max(1, textPagesRead)) && !textLayerQ.suspicious
+
+    // 文本层又全又能读 → 直接用，不浪费视觉/OCR 时间
+    if (textLayerOk) {
+      return {
+        kind: 'pdf',
+        fileName: file.name,
+        text: textLayerText,
+        chars: textLayerText.length,
+        pageCount,
+        pagesRead: textPagesRead,
+        truncated: textPagesRead < pageCount,
+        quality: textLayerQ.score,
+        note: buildNote({ pagesRead: textPagesRead, pageCount, quality: textLayerQ }),
+      }
     }
   }
 
-  const why = textLayerQ.suspicious
-    ? `PDF 文本层疑似乱码（${textLayerQ.reason}）`
-    : 'PDF 文本层为空（疑似扫描件）'
+  const why = skipTextPrePass
+    ? strategy === 'vision'
+      ? '按所选「视觉模型」策略识别'
+      : '按所选「本地 OCR」策略识别'
+    : textLayerQ.suspicious
+      ? `PDF 文本层疑似乱码（${textLayerQ.reason}）`
+      : 'PDF 文本层为空（疑似扫描件）'
+
+  // 进度延续：'text' 策略文本层不可用时，后续识别趟从「已读页数」继续计数，
+  // total 用「两趟总页数」，避免进度数字从 1 复位（「反复横跳」）。
+  // 'vision' / 'ocr' 无预读趟：baseDone=0、grandTotal=pageCount，单趟即全程。
+  const baseDone = textPagesRead
+  const grandTotal = textPagesRead + pageCount
+
   /** 视觉模型失败时，把错误原因带过去；tesseract 路径据此给出说明 */
   let visionErrMsg: string | undefined
 
   // ---- 2) 多模态视觉识别（如果配置了视觉模型，优先走）----
   //     全页分批识别：不再限 10 页，逐页渲染并发给视觉模型；中途可暂停 / 取消。
-  if (visionCfg) {
+  if (visionCfg && strategy !== 'ocr') {
     try {
       const visionRes = await visionOcrPdfAllPages(pdf, visionCfg, {
         batchSize: DEFAULT_CONCURRENCY,
         runner,
-        onProgress,
+        baseDone,
+        // 仅覆盖 total 为两趟总页数；done 已由函数内部从 baseDone 起累加，勿再相加
+        onProgress: (p) => onProgress?.({ ...p, total: grandTotal }),
       })
       const visionText = visionRes.text
       const visionQ = assessTextQuality(visionText)
@@ -308,7 +330,9 @@ async function extractFromPdf(
     const ocrText = await ocrPdfAllPages(pdf, {
       batchSize: OCR_BATCH_SIZE,
       runner,
-      onProgress,
+      baseDone,
+      // 仅覆盖 total；done 已由函数内部从 baseDone 起累加
+      onProgress: (p) => onProgress?.({ ...p, total: grandTotal }),
     })
     const ocrQ = assessTextQuality(ocrText)
 
@@ -425,12 +449,15 @@ async function ocrPdfAllPages(
     batchSize?: number
     runner?: BatchRunner | null
     onProgress?: (p: ExtractProgress) => void
+    /** 进度延续基数：多趟识别时，让本趟的 done 从「上一趟已计页数」继续，避免进度数字从 1 复位 */
+    baseDone?: number
   } = {},
 ): Promise<string> {
   const batchSize = Math.max(1, opts.batchSize ?? OCR_BATCH_SIZE)
   const total = pdf.numPages
   const batchCount = Math.max(1, Math.ceil(total / batchSize))
   const runner = opts.runner ?? null
+  const doneBase = opts.baseDone ?? 0
   const { createWorker, PSM } = await import('tesseract.js')
   const worker = await createWorker('chi_sim+eng')
   try {
@@ -476,7 +503,7 @@ async function ocrPdfAllPages(
         }
         opts.onProgress?.({
           phase: 'ocr',
-          done: i,
+          done: doneBase + i,
           total,
           batchIndex: b,
           batchCount,
