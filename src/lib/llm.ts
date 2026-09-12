@@ -582,6 +582,26 @@ export async function testLlm(
   return raw.trim().slice(0, 120) || 'OK'
 }
 
+/** 1x1 透明 PNG，仅用于「测试视觉模型连接」时附带一张极小图，验证多模态通道可用 */
+const TINY_PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+/** 设置页「测试视觉模型连接」：用一条极短文本 + 一张极小图打一次接口，验证多模态通道 */
+export async function testVisionLlm(settings: AppSettings): Promise<string> {
+  const cfg = buildVisionCfg(settings)
+  if (!cfg) throw new Error('请先在「视觉模型」配置区填写 Base URL、API Key 与模型名，并启用视觉模型')
+  const raw = await chat(cfg, [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '请只回复"OK"两个字母。' },
+        { type: 'image_url', image_url: { url: TINY_PNG } },
+      ],
+    },
+  ])
+  return raw.trim().slice(0, 120) || 'OK'
+}
+
 // ============================================================
 // AI 知识库：知识点总结梳理
 // ============================================================

@@ -897,7 +897,7 @@ function ImportDocModal({
             </p>
           </div>
         )}
-        {!classification && settings.aiEnabled && !settings.aiVisionModel.trim() && (
+        {!classification && !(settings.aiVisionEnabled && settings.aiVisionBaseUrl.trim() && settings.aiVisionApiKey.trim() && settings.aiVisionModel.trim()) && (
           <p className="text-[12px] text-text-3">
             未配置视觉模型，将自动使用「文本层 + 本地 OCR」。如需更准的中文识别，可在「设置 → AI 辅助」填入视觉模型（如 sensenova-6.8-flash-lite）。
           </p>

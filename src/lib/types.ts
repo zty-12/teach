@@ -574,12 +574,18 @@ export interface AppSettings {
   /** Edge Function 鉴权 Token（对应 Supabase Secret LLM_PROXY_TOKEN） */
   aiProxyToken: string
   /**
-   * 视觉模型（可选）：用于把扫描版 PDF 页面图直接发给多模态大模型识别。
-   * 留空表示未配置；设置后导入图片型 PDF 时可走「视觉识别」分支，
-   * 跳过 tesseract，中文/小字/复杂排版识别率显著更高。
-   * 常用：sensenova-6.8-flash-lite、gpt-4o-mini、qwen-vl-max 等。
+   * 视觉模型（图片识别）配置 —— 与「通用 AI」完全独立的一组设置，
+   * 可指向不同的 Base URL / API Key / 中转（例如把图片识别单独走一个多模态服务）。
+   * 留空表示未配置；设置后导入图片型 PDF 时可走「视觉识别」分支。
    */
+  aiVisionEnabled: boolean
+  aiVisionBaseUrl: string
+  aiVisionApiKey: string
+  /** 视觉模型名，如 sensenova-6.8-flash-lite、gpt-4o-mini、qwen-vl-max */
   aiVisionModel: string
+  aiVisionProxyMode: 'direct' | 'proxy'
+  aiVisionProxyUrl: string
+  aiVisionProxyToken: string
   /** 设置最后修改时间戳（内部字段）：用于设置云同步的 last-write-wins 比较 */
   settingsUpdatedAt: number
 }

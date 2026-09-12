@@ -27,7 +27,7 @@ import {
   type ConnectionTestResult,
 } from '@/lib/supabase'
 import { pendingCount, syncNow } from '@/lib/sync'
-import { isAiConfigured, testLlm, LLM_PRESETS } from '@/lib/llm'
+import { isAiConfigured, testLlm, testVisionLlm, LLM_PRESETS } from '@/lib/llm'
 import { exportBackupJson, importBackupJson } from '@/lib/exporters'
 import {
   CardHeader,
@@ -67,6 +67,8 @@ export default function SettingsPage() {
     isAiConfigured(settings) ? 'ok' : 'idle',
   )
   const [aiMessage, setAiMessage] = useState('')
+  const [visionStatus, setVisionStatus] = useState<'idle' | 'testing' | 'ok' | 'err'>('idle')
+  const [visionMessage, setVisionMessage] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // settings 变化时同步到草稿（外部改也跟上）
@@ -179,6 +181,38 @@ export default function SettingsPage() {
       setAiStatus('err')
       setAiMessage(`连接失败：${String(e instanceof Error ? e.message : e)}`)
     }
+  }
+
+  async function handleTestVision() {
+    setVisionStatus('testing')
+    setVisionMessage('')
+    try {
+      const latest = useSettings.getState().settings
+      await update({
+        aiVisionEnabled: latest.aiVisionEnabled,
+        aiVisionBaseUrl: latest.aiVisionBaseUrl.trim(),
+        aiVisionApiKey: latest.aiVisionApiKey.trim(),
+        aiVisionModel: latest.aiVisionModel.trim(),
+        aiVisionProxyUrl: latest.aiVisionProxyUrl.trim(),
+        aiVisionProxyToken: latest.aiVisionProxyToken.trim(),
+      })
+      const reply = await testVisionLlm(latest)
+      setVisionStatus('ok')
+      setVisionMessage(`连接成功，模型响应：${reply}`)
+    } catch (e) {
+      setVisionStatus('err')
+      setVisionMessage(`连接失败：${String(e instanceof Error ? e.message : e)}`)
+    }
+  }
+
+  function copyAiToVision() {
+    void update({
+      aiVisionBaseUrl: settings.aiBaseUrl,
+      aiVisionApiKey: settings.aiApiKey,
+      aiVisionProxyMode: settings.aiProxyMode,
+      aiVisionProxyUrl: settings.aiProxyUrl,
+      aiVisionProxyToken: settings.aiProxyToken,
+    })
   }
 
   function applyPreset(presetIndex: number) {
@@ -429,31 +463,16 @@ export default function SettingsPage() {
             />
           </Field>
 
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="模型名">
-              <Input
-                value={settings.aiModel}
-                onChange={(e) => void update({ aiModel: e.target.value })}
-                placeholder="deepseek-chat / gpt-4o-mini"
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-              />
-            </Field>
-            <Field
-              label="视觉模型（可选）"
-              hint="用于图片型 PDF / 扫描件识别——把页面图直接发给多模态大模型。留空则用本地 tesseract。例：sensenova-6.8-flash-lite、gpt-4o-mini、qwen-vl-max"
-            >
-              <Input
-                value={settings.aiVisionModel}
-                onChange={(e) => void update({ aiVisionModel: e.target.value })}
-                placeholder="sensenova-6.8-flash-lite"
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-              />
-            </Field>
-          </div>
+          <Field label="模型名" hint="文本生成模型，用于课后反馈 / 学习报告 / 知识点总结">
+            <Input
+              value={settings.aiModel}
+              onChange={(e) => void update({ aiModel: e.target.value })}
+              placeholder="deepseek-chat / gpt-4o-mini"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+          </Field>
 
           <div className="rounded-lg border border-line-1 bg-surface-1 p-3 space-y-2">
             <div className="flex items-center justify-between">
@@ -530,6 +549,163 @@ export default function SettingsPage() {
               {aiMessage}
             </p>
           )}
+
+          <div className="my-2 border-t border-line-1" />
+
+          {/* 视觉模型（图片识别）—— 与通用 AI 完全独立的一组配置 */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[13px] font-medium text-text-1">视觉模型（图片识别）</span>
+              <span
+                className={cn(
+                  'flex items-center gap-1 text-xs',
+                  visionStatus === 'ok' && 'text-done',
+                  visionStatus === 'err' && 'text-money-due',
+                  visionStatus === 'testing' && 'text-text-2',
+                  visionStatus === 'idle' && 'text-text-3',
+                )}
+              >
+                {visionStatus === 'ok' ? (
+                  <>
+                    <CheckCircle2 size={14} /> 已连接
+                  </>
+                ) : visionStatus === 'err' ? (
+                  <>
+                    <XCircle size={14} /> 连接异常
+                  </>
+                ) : visionStatus === 'testing' ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" /> 测试中
+                  </>
+                ) : settings.aiVisionEnabled ? (
+                  <>
+                    <Cloud size={14} /> 已配置
+                  </>
+                ) : (
+                  <>
+                    <CloudOff size={14} /> 未配置
+                  </>
+                )}
+              </span>
+            </div>
+
+            <label className="flex cursor-pointer items-center gap-2 text-[13px] text-text-2">
+              <input
+                type="checkbox"
+                checked={settings.aiVisionEnabled}
+                onChange={(e) => void update({ aiVisionEnabled: e.target.checked })}
+                className="h-4 w-4 cursor-pointer accent-[var(--accent)]"
+              />
+              启用视觉模型（用于图片型 PDF / 扫描件识别）
+            </label>
+
+            <div className="flex justify-end">
+              <Button size="sm" variant="ghost" onClick={() => void copyAiToVision()}>
+                <ClipboardCopy size={13} /> 沿用通用 AI 配置
+              </Button>
+            </div>
+
+            <Field label="Base URL" hint="可与通用 AI 不同，例如独立的多模态服务地址">
+              <Input
+                value={settings.aiVisionBaseUrl}
+                onChange={(e) => void update({ aiVisionBaseUrl: e.target.value })}
+                placeholder="https://api.xxx.com/v1"
+                inputMode="url"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </Field>
+
+            <Field label="API Key" hint="存于本机设置，仅用于你的浏览器调用">
+              <Input
+                type="password"
+                value={settings.aiVisionApiKey}
+                onChange={(e) => void update({ aiVisionApiKey: e.target.value })}
+                placeholder="sk-..."
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </Field>
+
+            <Field label="模型名" hint="例：sensenova-6.8-flash-lite、gpt-4o-mini、qwen-vl-max">
+              <Input
+                value={settings.aiVisionModel}
+                onChange={(e) => void update({ aiVisionModel: e.target.value })}
+                placeholder="sensenova-6.8-flash-lite"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </Field>
+
+            <div className="rounded-lg border border-line-1 bg-surface-1 p-3 space-y-2">
+              <Field label="请求模式" hint="浏览器直连被 CORS 拦时切到 Edge Function">
+                <Select
+                  value={settings.aiVisionProxyMode}
+                  onChange={(e) => void update({ aiVisionProxyMode: e.target.value as 'direct' | 'proxy' })}
+                >
+                  <option value="direct">直连（浏览器 → API）</option>
+                  <option value="proxy">经 Supabase Edge Function 中转</option>
+                </Select>
+              </Field>
+              {settings.aiVisionProxyMode === 'proxy' && (
+                <>
+                  <Field label="Edge Function URL">
+                    <Input
+                      value={settings.aiVisionProxyUrl}
+                      onChange={(e) => void update({ aiVisionProxyUrl: e.target.value })}
+                      placeholder="https://xxx.supabase.co/functions/v1/llm-proxy"
+                      inputMode="url"
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </Field>
+                  <Field label="中转 Token">
+                    <Input
+                      type="password"
+                      value={settings.aiVisionProxyToken}
+                      onChange={(e) => void update({ aiVisionProxyToken: e.target.value })}
+                      placeholder="与 Supabase Secret LLM_PROXY_TOKEN 一致"
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </Field>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => void handleTestVision()}
+                disabled={
+                  !settings.aiVisionEnabled ||
+                  !settings.aiVisionBaseUrl.trim() ||
+                  !settings.aiVisionApiKey.trim() ||
+                  (settings.aiVisionProxyMode === 'proxy' &&
+                    (!settings.aiVisionProxyUrl.trim() || !settings.aiVisionProxyToken.trim())) ||
+                  visionStatus === 'testing'
+                }
+              >
+                {visionStatus === 'testing' ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <Sparkles size={15} />
+                )}
+                测试连接
+              </Button>
+            </div>
+
+            {visionMessage && (
+              <p className={cn('text-[13px]', visionStatus === 'ok' ? 'text-done' : 'text-money-due')}>
+                {visionMessage}
+              </p>
+            )}
+          </div>
         </div>
       </Card>
 

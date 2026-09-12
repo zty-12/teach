@@ -224,7 +224,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiProxyMode: 'direct',
   aiProxyUrl: '',
   aiProxyToken: '',
+  aiVisionEnabled: false,
+  aiVisionBaseUrl: '',
+  aiVisionApiKey: '',
   aiVisionModel: '',
+  aiVisionProxyMode: 'direct',
+  aiVisionProxyUrl: '',
+  aiVisionProxyToken: '',
   settingsUpdatedAt: 0,
 }
 

@@ -73,8 +73,16 @@ export async function pushAll(settings?: AppSettings): Promise<SyncResult> {
         continue
       }
 
-      await table.bulkPut(dirty.map((r) => ({ ...r, dirty: 0 })) as never[])
+      const pushed = dirty.map((r) => ({ ...r, dirty: 0 }))
+      await table.bulkPut(pushed as never[])
       result.pushed += dirty.length
+
+      // 软删（deletedAt 非空）记录已成功推送到云端，本地物理清除墓碑，
+      // 避免下次推送时重复上传，也回收 IndexedDB 空间（云端已留存删除标记）。
+      const tombstoneIds = (pushed as Array<Record<string, unknown>>)
+        .filter((r) => r.deletedAt)
+        .map((r) => r.id as string)
+      if (tombstoneIds.length) await table.bulkDelete(tombstoneIds)
 
       await db.syncMeta.put({
         table: name,

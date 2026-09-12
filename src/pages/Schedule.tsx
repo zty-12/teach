@@ -1005,18 +1005,19 @@ function DayViewDesktop({
                   }}
                   title={selectMode ? '点击选择/取消' : '单击查看全部排课，双击快速完成'}
                   className={cn(
-                    'absolute overflow-hidden rounded-md px-1.5 py-1 text-[11px] leading-tight',
+                    'absolute overflow-hidden rounded-md border border-line-1 px-1.5 py-1 text-[11px] leading-tight',
                     selectMode ? 'cursor-pointer' : 'cursor-pointer transition-shadow hover:shadow-md',
                     c.status === 'cancelled' && 'opacity-50',
-                    isSelected && 'ring-2 ring-white/90',
+                    isSelected && 'ring-2 ring-[var(--accent)]',
                   )}
                   style={{
                     top: top + 1,
                     height,
                     left: `calc(${insetX}px + ${leftPct}%)`,
                     width: `calc(${widthPct}% - 4px)`,
-                    background: subjectColorVar(c.colorSlot),
-                    color: '#fff',
+                    background: `${subjectColorVar(c.colorSlot)}14`,
+                    borderLeft: `3px solid ${subjectColorVar(c.colorSlot)}`,
+                    color: 'var(--text-1)',
                   }}
                 >
                   <div className="flex items-center justify-between gap-1">
