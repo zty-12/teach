@@ -20,9 +20,9 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { Badge, Button, Input, Select, StatusBadge } from '@/components/ui'
+import { Badge, Button, StatusBadge } from '@/components/ui'
 import { Avatar } from '@/components/Avatar'
-import { db, touch } from '@/lib/db'
+import { db } from '@/lib/db'
 import {
   COURSE_STATUS_LABEL,
   type Course,
@@ -33,13 +33,12 @@ import {
 } from '@/lib/types'
 import { cn, formatCourseRange, subjectColorVar } from '@/lib/utils'
 
-type Tab = 'overview' | 'courses' | 'members' | 'checkin'
+type Tab = 'overview' | 'courses' | 'members'
 
 const TAB_LABEL: Record<Tab, string> = {
   overview: '概览',
   courses: '排课',
   members: '成员',
-  checkin: '打卡',
 }
 
 export interface GroupDetailSheetProps {
@@ -154,37 +153,6 @@ export function GroupDetailSheet({
   )
 
   const [tab, setTab] = useState<Tab>('overview')
-
-  // v8：班课「课后自动打卡」配置（可在「打卡」Tab 编辑）
-  const [checkInAuto, setCheckInAuto] = useState(true)
-  const [checkInDays, setCheckInDays] = useState(7)
-  const [checkInStartOffset, setCheckInStartOffset] = useState(1)
-  const [checkInSaved, setCheckInSaved] = useState(false)
-
-  // 班课切换 / 配置变化时同步到本地表单
-  useEffect(() => {
-    if (!group) return
-    setCheckInAuto(group.checkInAuto !== false)
-    setCheckInDays(group.checkInDays ?? 7)
-    setCheckInStartOffset(group.checkInStartOffset ?? 1)
-    setCheckInSaved(false)
-  }, [group?.id, group?.checkInAuto, group?.checkInDays, group?.checkInStartOffset])
-
-  async function handleSaveCheckIn() {
-    if (!group) return
-    await db.groups.put(
-      touch({
-        ...group,
-        checkInAuto,
-        checkInDays: Math.max(1, Math.min(30, Math.floor(checkInDays) || 7)),
-        checkInStartOffset: Math.max(
-          0,
-          Math.min(30, Math.floor(checkInStartOffset) || 0),
-        ),
-      }),
-    )
-    setCheckInSaved(true)
-  }
 
   // 重置
   useEffect(() => {
@@ -447,83 +415,6 @@ export function GroupDetailSheet({
                   })}
                 </ul>
               )}
-            </div>
-          )}
-
-          {tab === 'checkin' && (
-            <div className="px-5 py-4">
-              <section className="rounded-xl border border-line-1 bg-surface-0 p-3">
-                <div className="mb-3 text-[12px] font-medium text-text-3">课后自动打卡</div>
-
-                <label className="flex items-start gap-2 text-[13px] text-text-1">
-                  <input
-                    type="checkbox"
-                    checked={checkInAuto}
-                    onChange={(e) => setCheckInAuto(e.target.checked)}
-                    className="mt-0.5 h-3.5 w-3.5 accent-accent"
-                  />
-                  <span>
-                    本班每次课完成后，自动为出勤学员生成周期打卡
-                    <span className="block text-[11px] text-text-3">
-                      关闭后需到「打卡」页手动创建任务。
-                    </span>
-                  </span>
-                </label>
-
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <span className="text-[12px] font-medium text-text-2">打卡天数</span>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={30}
-                      value={checkInDays}
-                      disabled={!checkInAuto}
-                      onChange={(e) => setCheckInDays(Number(e.target.value))}
-                    />
-                    <span className="block text-[11px] text-text-3">1 ~ 30 天</span>
-                  </div>
-                  <div className="space-y-1">
-                    <span className="text-[12px] font-medium text-text-2">起始日</span>
-                    <Select
-                      value={String(checkInStartOffset)}
-                      disabled={!checkInAuto}
-                      onChange={(e) => setCheckInStartOffset(Number(e.target.value))}
-                    >
-                      <option value="0">下课当天开始</option>
-                      <option value="1">次日起（默认）</option>
-                      <option value="2">第 3 天起</option>
-                      <option value="6">一周后起</option>
-                    </Select>
-                    <span className="block text-[11px] text-text-3">
-                      从下课日往后推
-                    </span>
-                  </div>
-                </div>
-
-                <div className="mt-3 rounded-lg bg-surface-2 p-2.5 text-[12px] text-text-3">
-                  当前设置：
-                  {checkInAuto
-                    ? `完成课程后生成 ${checkInDays} 天打卡，${
-                        checkInStartOffset === 0
-                          ? '下课当天'
-                          : `第 ${checkInStartOffset + 1} 天`
-                      }开始`
-                    : '已关闭自动打卡'}
-                </div>
-
-                <div className="mt-3 flex items-center gap-2">
-                  <Button size="sm" variant="primary" onClick={() => void handleSaveCheckIn()}>
-                    保存打卡设置
-                  </Button>
-                  {checkInSaved && (
-                    <span className="text-[12px] text-accent">已保存</span>
-                  )}
-                </div>
-                <p className="mt-2 text-[11px] text-text-3">
-                  设置只对之后完成的课程生效；已生成的打卡任务仍可在「打卡」页改日期。
-                </p>
-              </section>
             </div>
           )}
 
