@@ -607,8 +607,7 @@ export async function testLlm(
 }
 
 /** 1x1 透明 PNG，仅用于「测试视觉模型连接」时附带一张极小图，验证多模态通道可用 */
-const TINY_PNG =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const TINY_PNG = 'https://placehold.co/100x100.png'
 
 /** 设置页「测试视觉模型连接」：用一条极短文本 + 一张极小图打一次接口，验证多模态通道 */
 export async function testVisionLlm(settings: AppSettings): Promise<string> {
