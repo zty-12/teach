@@ -164,6 +164,13 @@ export class EduDB extends Dexie {
       classActivityRecords:
         'id, activityId, studentId, status, updatedAt, deletedAt, dirty',
     })
+
+    // v17：课堂积分合并进打卡页；活动增加班课归属与活动日期索引
+    // （支持「按班课排课当天自动生成」的按日去重查询）
+    this.version(11).stores({
+      classActivities:
+        'id, title, courseId, groupId, activityDate, createdAt, updatedAt, deletedAt, dirty',
+    })
   }
 }
 

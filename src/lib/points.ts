@@ -316,18 +316,19 @@ export async function adjustPoints(
   studentId: string,
   delta: number,
   reason: string,
-): Promise<void> {
-  if (!delta) return
-  await db.pointLedgers.put(
-    withSyncFields<PointLedger>({
-      studentId,
-      delta,
-      kind: 'adjust',
-      reason: reason.trim() || '手动调整',
-      taskId: null,
-      createdAt: Date.now(),
-    }),
-  )
+): Promise<string | null> {
+  if (!delta) return null
+  const ledger = withSyncFields<PointLedger>({
+    studentId,
+    delta,
+    kind: 'adjust',
+    reason: reason.trim() || '手动调整',
+    taskId: null,
+    createdAt: Date.now(),
+  })
+  await db.pointLedgers.put(ledger)
+  // 返回流水 id：课堂积分等场景据此记录来源，撤销时可精确冲销
+  return ledger.id
 }
 
 // ============================================================

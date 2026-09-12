@@ -1,5 +1,4 @@
 import {
-  Award,
   BookOpen,
   CalendarCheck,
   CalendarDays,
@@ -26,7 +25,6 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/schedule', label: '课表', icon: CalendarDays, inTab: true },
   { to: '/knowledge', label: '知识库', icon: BookOpen, inTab: true },
   { to: '/checkin', label: '打卡', icon: CalendarCheck, inTab: true },
-  { to: '/classpoints', label: '课堂积分', icon: Award, inTab: false },
   { to: '/groups', label: '班课', icon: BookOpen, inTab: false },
   { to: '/finance', label: '财务', icon: Wallet, inTab: false },
   { to: '/feedback', label: '反馈', icon: MessageSquareText, inTab: false },

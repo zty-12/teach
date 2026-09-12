@@ -523,7 +523,16 @@ export interface ClassActivityRule {
 /** 课堂活动 */
 export interface ClassActivity extends SyncFields {
   title: string
+  /** 关联课程（旧字段，保留兼容；一对一课程场景） */
   courseId: string | null
+  /** 关联班课（v17：截图里的「关联班课」下拉，取 Group.name） */
+  groupId?: string | null
+  /** 活动日期（零点时间戳，v17）：用于「按排课当天自动生成」去重与按日归类 */
+  activityDate?: number | null
+  /** 是否由排课自动生成（v17） */
+  auto?: boolean
+  /** 自动生成时的来源课程 id（v17） */
+  sourceCourseId?: string | null
   rules: ClassActivityRule[]
   note: string
   createdAt: number
@@ -538,6 +547,8 @@ export interface ClassActivityRecord extends SyncFields {
   note: string
   checkedAt: number | null
   createdAt: number
+  /** 本次加分写入的积分流水 id（v17）：撤销/改判时用于冲销，避免积分残留 */
+  ledgerId?: string | null
 }
 
 // ============================================================

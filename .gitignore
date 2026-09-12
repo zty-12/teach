@@ -25,3 +25,10 @@ npm-debug.log*
 # 一次性修复脚本（历史遗留）
 note_v13.py
 rewrite_hybrid.py
+
+# gh-pages 部署临时目录
+.gh-pages-tmp/
+
+# gh-pages 部署临时目录
+.gh-pages-tmp/
+.gh-pages-deploy/

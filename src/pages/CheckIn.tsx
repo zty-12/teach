@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { useSearchParams } from 'react-router-dom'
 import { format } from 'date-fns'
 import { eachDayOfInterval, startOfDay } from 'date-fns'
 import {
@@ -62,11 +63,17 @@ import { CHECKIN_STATUS_LABEL } from '@/lib/types'
 import { useSettings } from '@/store/useSettings'
 import { generateCheckInFeedback, isAiConfigured, LlmError } from '@/lib/llm'
 import { getOrRefreshProfileForFeedback } from '@/lib/studentProfile'
+import ClassPointsView from '@/components/ClassPointsView'
 
-type MainTab = 'tasks' | 'rules' | 'market'
+type MainTab = 'tasks' | 'class' | 'rules' | 'market'
 
 export default function CheckInPage() {
-  const [tab, setTab] = useState<MainTab>('tasks')
+  // 支持 /checkin?tab=class 直接落到指定 Tab（课堂积分旧入口重定向用）
+  const [searchParams] = useSearchParams()
+  const [tab, setTab] = useState<MainTab>(() => {
+    const t = searchParams.get('tab')
+    return t === 'class' || t === 'rules' || t === 'market' ? (t as MainTab) : 'tasks'
+  })
 
   const tasks = useLiveQuery(() => db.checkInTasks.toArray(), [])
   const records = useLiveQuery(() => db.checkInRecords.toArray(), [])
@@ -78,6 +85,7 @@ export default function CheckInPage() {
   const rewardItems = useLiveQuery(() => db.rewardItems.toArray(), [])
   const redemptions = useLiveQuery(() => db.redemptions.toArray(), [])
   const ledgers = useLiveQuery(() => db.pointLedgers.toArray(), [])
+  const classActivities = useLiveQuery(() => db.classActivities.toArray(), [])
 
   const liveTasks = (tasks ?? []).filter((t) => !t.deletedAt)
   const liveRecords = (records ?? []).filter((r) => !r.deletedAt)
@@ -88,6 +96,7 @@ export default function CheckInPage() {
   const liveRules = (rules ?? []).filter((r) => !r.deletedAt).sort((a, b) => a.order - b.order)
   const liveRewards = (rewardItems ?? []).filter((r) => !r.deletedAt)
   const liveRedemptions = (redemptions ?? []).filter((r) => !r.deletedAt)
+  const liveClassCount = (classActivities ?? []).filter((a) => !a.deletedAt).length
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
 
@@ -95,7 +104,7 @@ export default function CheckInPage() {
     <div>
       <PageHeader
         title="打卡与积分"
-        subtitle={`任务 ${liveTasks.length} · 规则 ${liveRules.length} · 奖励 ${liveRewards.length}`}
+        subtitle={`任务 ${liveTasks.length} · 课堂 ${liveClassCount} · 规则 ${liveRules.length} · 奖励 ${liveRewards.length}`}
       />
 
       <div className="mb-4">
@@ -105,6 +114,7 @@ export default function CheckInPage() {
           layout="grid"
           options={[
             { value: 'tasks', label: '打卡任务' },
+            { value: 'class', label: '课堂积分' },
             { value: 'rules', label: '积分规则' },
             { value: 'market', label: '兑换商城' },
           ]}
@@ -125,6 +135,7 @@ export default function CheckInPage() {
           students={liveStudents}
         />
       )}
+      {tab === 'class' && <ClassPointsView />}
       {tab === 'rules' && (
         <RulesView rules={liveRules} />
       )}
