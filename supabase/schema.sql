@@ -1,15 +1,25 @@
 -- ============================================================
--- 教务工作台 · Supabase 建表脚本
+-- 教务工作台 · Supabase 建表脚本（全量 / 幂等）
 --
--- 用法：在 Supabase 控制台 → SQL Editor 中粘贴执行。
+-- 用法：Supabase 控制台 → SQL Editor → New query → 粘贴 → Run
+--
+-- ✅ 新用户：一次执行即建齐全部 26 张业务表 + 2 张辅助表
+-- ✅ 老用户：可反复执行，只会「补建缺的表 / 补加缺的列」，不删数据
+--    —— 这正是修复「云端缺少数据表：groups 表缺少 checkInWeekdays 列」的方式
 --
 -- 说明：
 --   1. 列名使用驼峰（与前端字段一一对应），因此必须用双引号包裹
 --   2. updatedAt / deletedAt 为毫秒时间戳，用于 last-write-wins 冲突合并
 --   3. deletedAt 非空表示软删除，记录保留以便同步传播
+--   4. 数组 / 对象字段用 jsonb 存储（tags / days / condition / rules …）
 --
 -- ⚠️ 安全提示：本脚本为「单人自用」设计，策略允许 anon 角色全权读写。
 --    若后续接入多人协作，务必改为基于 auth.uid() 的行级隔离策略。
+-- ============================================================
+
+
+-- ============================================================
+-- 第 1 部分：建表（全部 26 张业务表 + 2 张辅助表）
 -- ============================================================
 
 -- ---------- 学生 ----------
@@ -52,7 +62,12 @@ create table if not exists groups (
   "perStudentFeeCents" integer not null default 0,
   weekday integer not null default -1,
   "startTimeMin" integer not null default -1,
-  "endTimeMin" integer not null default -1
+  "endTimeMin" integer not null default -1,
+  -- v8：班课「课后自动打卡」配置
+  "checkInAuto" boolean not null default true,
+  "checkInDays" integer not null default 7,
+  "checkInStartOffset" integer not null default 1,
+  "checkInWeekdays" jsonb not null default '[]'::jsonb
 );
 create index if not exists groups_updated_idx on groups ("updatedAt");
 create index if not exists groups_weekday_idx on groups (weekday);
@@ -84,7 +99,10 @@ create table if not exists courses (
   "feeCents" integer not null default 0,
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
-  "deletedAt" bigint
+  "deletedAt" bigint,
+  -- v7：补课标记
+  "isMakeup" boolean not null default false,
+  "makeupSourceCourseId" text
 );
 create index if not exists courses_updated_idx on courses ("updatedAt");
 create index if not exists courses_start_idx on courses ("startAt");
@@ -162,6 +180,7 @@ create index if not exists "studentTags_student_idx" on "studentTags" ("studentI
 create table if not exists payments (
   id text primary key,
   "studentId" text not null default '',
+  payer text not null default 'student',
   "amountCents" integer not null default 0,
   method text not null default '',
   "paidAt" bigint not null default 0,
@@ -188,7 +207,309 @@ create table if not exists settlements (
 create index if not exists settlements_updated_idx on settlements ("updatedAt");
 
 -- ============================================================
--- 行级安全策略：单人自用，允许 anon 全权读写
+-- v5：知识库 / 反馈模板 / 打卡 / 积分 / 兑换
+-- ============================================================
+
+-- ---------- 知识库：教材 ----------
+create table if not exists textbooks (
+  id text primary key,
+  name text not null default '',
+  subject text not null default '',
+  grade text not null default '',
+  note text not null default '',
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists textbooks_updated_idx on textbooks ("updatedAt");
+
+-- ---------- 知识库：单元 ----------
+create table if not exists "textbookUnits" (
+  id text primary key,
+  "textbookId" text not null default '',
+  name text not null default '',
+  "order" integer not null default 0,
+  note text not null default '',
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "textbookUnits_updated_idx" on "textbookUnits" ("updatedAt");
+create index if not exists "textbookUnits_textbook_idx" on "textbookUnits" ("textbookId");
+
+-- ---------- 知识库：知识点 ----------
+create table if not exists "knowledgePoints" (
+  id text primary key,
+  "unitId" text not null default '',
+  "textbookId" text not null default '',
+  title text not null default '',
+  content text not null default '',
+  summary text not null default '',
+  "summarizedAt" bigint,
+  tags jsonb not null default '[]'::jsonb,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "knowledgePoints_updated_idx" on "knowledgePoints" ("updatedAt");
+create index if not exists "knowledgePoints_textbook_idx" on "knowledgePoints" ("textbookId");
+create index if not exists "knowledgePoints_unit_idx" on "knowledgePoints" ("unitId");
+
+-- ---------- 反馈模板 ----------
+create table if not exists "feedbackTemplates" (
+  id text primary key,
+  name text not null default '',
+  body text not null default '',
+  "isDefault" boolean not null default false,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint,
+  -- v8：模板形态 text（占位符文本）/ structured（结构化字段）
+  kind text not null default 'text'
+);
+create index if not exists "feedbackTemplates_updated_idx" on "feedbackTemplates" ("updatedAt");
+
+-- ---------- 结构化反馈模板字段（v8） ----------
+create table if not exists "feedbackTemplateFields" (
+  id text primary key,
+  "templateId" text not null default '',
+  name text not null default '',
+  hint text not null default '',
+  source text not null default 'none',
+  "order" integer not null default 0,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "feedbackTemplateFields_updated_idx" on "feedbackTemplateFields" ("updatedAt");
+create index if not exists "feedbackTemplateFields_template_idx" on "feedbackTemplateFields" ("templateId");
+
+-- ---------- 课程 ↔ 知识点 覆盖关系 ----------
+create table if not exists "courseKnowledges" (
+  id text primary key,
+  "courseId" text not null default '',
+  "knowledgePointId" text not null default '',
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "courseKnowledges_updated_idx" on "courseKnowledges" ("updatedAt");
+create index if not exists "courseKnowledges_course_idx" on "courseKnowledges" ("courseId");
+
+-- ---------- 打卡任务 ----------
+create table if not exists "checkInTasks" (
+  id text primary key,
+  "courseId" text,
+  "groupId" text,
+  title text not null default '',
+  "dueAt" bigint,
+  scope text not null default 'all',
+  days jsonb not null default '[]'::jsonb,
+  "cadenceLabel" text not null default '',
+  note text not null default '',
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "checkInTasks_updated_idx" on "checkInTasks" ("updatedAt");
+
+-- ---------- 打卡记录 ----------
+create table if not exists "checkInRecords" (
+  id text primary key,
+  "taskId" text not null default '',
+  "studentId" text not null default '',
+  "dayAt" bigint,
+  status text not null default 'pending',
+  note text not null default '',
+  "aiFeedback" text not null default '',
+  "checkedAt" bigint,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "checkInRecords_updated_idx" on "checkInRecords" ("updatedAt");
+create index if not exists "checkInRecords_task_idx" on "checkInRecords" ("taskId");
+
+-- ---------- 积分规则 ----------
+create table if not exists "pointRules" (
+  id text primary key,
+  name text not null default '',
+  kind text not null default 'base',
+  points integer not null default 1,
+  condition jsonb,
+  enabled boolean not null default true,
+  "order" integer not null default 0,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "pointRules_updated_idx" on "pointRules" ("updatedAt");
+
+-- ---------- 积分流水 ----------
+create table if not exists "pointLedgers" (
+  id text primary key,
+  "studentId" text not null default '',
+  delta integer not null default 0,
+  kind text not null default 'earn',
+  reason text not null default '',
+  "taskId" text,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "pointLedgers_updated_idx" on "pointLedgers" ("updatedAt");
+create index if not exists "pointLedgers_student_idx" on "pointLedgers" ("studentId");
+
+-- ---------- 兑换商城：奖励项 ----------
+create table if not exists "rewardItems" (
+  id text primary key,
+  name text not null default '',
+  "pointsCost" integer not null default 0,
+  stock integer,
+  note text not null default '',
+  enabled boolean not null default true,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "rewardItems_updated_idx" on "rewardItems" ("updatedAt");
+
+-- ---------- 兑换记录 ----------
+create table if not exists redemptions (
+  id text primary key,
+  "studentId" text not null default '',
+  "rewardItemId" text not null default '',
+  "rewardName" text not null default '',
+  "pointsSpent" integer not null default 0,
+  status text not null default 'pending',
+  "redeemedAt" bigint not null default 0,
+  "fulfilledAt" bigint,
+  note text not null default '',
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists redemptions_updated_idx on redemptions ("updatedAt");
+create index if not exists redemptions_student_idx on redemptions ("studentId");
+
+-- ---------- 学生画像（v7，AI 汇总生成） ----------
+create table if not exists "studentProfiles" (
+  id text primary key,
+  "studentId" text not null default '',
+  summary text not null default '',
+  strengths text not null default '',
+  weaknesses text not null default '',
+  "teachingStyle" text not null default '',
+  "profileUpdatedAt" bigint not null default 0,
+  "sourceCount" integer not null default 0,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "studentProfiles_updated_idx" on "studentProfiles" ("updatedAt");
+create index if not exists "studentProfiles_student_idx" on "studentProfiles" ("studentId");
+
+-- ============================================================
+-- v16/v17：课堂积分
+-- ============================================================
+
+-- ---------- 课堂活动 ----------
+create table if not exists "classActivities" (
+  "id" text primary key,
+  "title" text not null default '',
+  "courseId" text,
+  "groupId" text,
+  "activityDate" bigint,
+  "auto" boolean not null default false,
+  "sourceCourseId" text,
+  "rules" jsonb not null default '[]'::jsonb,
+  "note" text not null default '',
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "classActivities_created_idx" on "classActivities" ("createdAt" desc);
+create index if not exists "classActivities_group_date_idx" on "classActivities" ("groupId", "activityDate");
+create index if not exists "classActivities_updated_idx" on "classActivities" ("updatedAt");
+
+-- ---------- 课堂活动记录（学生参与） ----------
+create table if not exists "classActivityRecords" (
+  "id" text primary key,
+  "activityId" text not null,
+  "studentId" text not null,
+  "status" text not null default 'pending',  -- pending | pass | fail
+  "pointsAwarded" integer not null default 0,
+  "note" text not null default '',
+  "checkedAt" bigint,
+  "ledgerId" text,
+  "createdAt" bigint not null default 0,
+  "updatedAt" bigint not null default 0,
+  "deletedAt" bigint
+);
+create index if not exists "classActivityRecords_activity_idx" on "classActivityRecords" ("activityId");
+create index if not exists "classActivityRecords_student_idx" on "classActivityRecords" ("studentId");
+create index if not exists "classActivityRecords_updated_idx" on "classActivityRecords" ("updatedAt");
+
+-- ============================================================
+-- 辅助表
+-- ============================================================
+
+-- ---------- v9：设置云同步（单行 id='app'） ----------
+create table if not exists "app_settings" (
+  "id" text primary key,
+  "value" jsonb not null,
+  "updatedAt" bigint not null default 0
+);
+
+-- ---------- v11：数据版本快照 ----------
+create table if not exists "data_snapshots" (
+  "id" text primary key,
+  "created_at" bigint not null default 0,
+  "label" text not null default '',
+  "auto" boolean not null default false,
+  "device" text not null default '',
+  "counts" jsonb not null default '{}'::jsonb,
+  "signature" text not null default '',
+  "payload" jsonb not null default '{}'::jsonb,
+  "settings_row" jsonb
+);
+create index if not exists "data_snapshots_created_idx" on "data_snapshots" ("created_at" desc);
+
+
+-- ============================================================
+-- 第 2 部分：给「已存在的旧表」补加后续版本新增的列
+-- （create table if not exists 不会动旧表，这一段才是修复缺列的关键）
+-- ============================================================
+
+-- v8：班课课后自动打卡配置
+alter table groups add column if not exists "checkInAuto" boolean not null default true;
+alter table groups add column if not exists "checkInDays" integer not null default 7;
+alter table groups add column if not exists "checkInStartOffset" integer not null default 1;
+alter table groups add column if not exists "checkInWeekdays" jsonb not null default '[]'::jsonb;
+
+-- v7：课程补课标记
+alter table courses add column if not exists "isMakeup" boolean not null default false;
+alter table courses add column if not exists "makeupSourceCourseId" text;
+
+-- 财务：付款方（student=家长 / institution=机构结算）
+alter table payments add column if not exists payer text not null default 'student';
+
+-- v6：打卡记录的 AI 家长反馈
+alter table "checkInRecords" add column if not exists "aiFeedback" text not null default '';
+
+-- v8：反馈模板形态
+alter table "feedbackTemplates" add column if not exists kind text not null default 'text';
+
+-- v17：课堂积分后期字段（若表由旧版 v12 以 snake_case 建过，这里补 camelCase 列）
+alter table "classActivities" add column if not exists "groupId" text;
+alter table "classActivities" add column if not exists "activityDate" bigint;
+alter table "classActivities" add column if not exists "auto" boolean not null default false;
+alter table "classActivities" add column if not exists "sourceCourseId" text;
+alter table "classActivityRecords" add column if not exists "ledgerId" text;
+
+
+-- ============================================================
+-- 第 3 部分：行级安全策略（单人自用：anon 全权读写）
 -- ⚠️ 多人协作场景请改为基于 auth.uid() 的隔离策略
 -- ============================================================
 
@@ -197,9 +518,22 @@ declare
   t text;
 begin
   foreach t in array array[
+    -- 基础业务
     'students', 'groups', 'groupMembers', 'courses', 'courseAttendances',
     'courseFeedbacks', 'learningReports', 'learningTags',
-    'studentTags', 'payments', 'settlements'
+    'studentTags', 'payments', 'settlements',
+    -- v5：知识库 / 模板 / 打卡 / 积分 / 兑换
+    'textbooks', 'textbookUnits', 'knowledgePoints',
+    'feedbackTemplates', 'feedbackTemplateFields', 'courseKnowledges',
+    'checkInTasks', 'checkInRecords',
+    'pointRules', 'pointLedgers',
+    'rewardItems', 'redemptions',
+    -- v7：学生画像
+    'studentProfiles',
+    -- v16/v17：课堂积分
+    'classActivities', 'classActivityRecords',
+    -- 辅助表
+    'app_settings', 'data_snapshots'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -211,15 +545,7 @@ begin
     );
   end loop;
 end $$;
--- ============================================================
--- v9 追加：设置云同步表（app_settings，单行 id='app'）
--- ============================================================
-create table if not exists "app_settings" (
-  "id" text primary key,
-  "value" jsonb not null,
-  "updatedAt" bigint not null default 0
-);
-alter table "app_settings" enable row level security;
-drop policy if exists "anon_all" on "app_settings";
-create policy "anon_all" on "app_settings"
-  for all to anon using (true) with check (true);
+
+
+-- 让 PostgREST 立即刷新 schema 缓存（否则新建的列可能仍报 PGRST204 / PGRST205）
+notify pgrst, 'reload schema';

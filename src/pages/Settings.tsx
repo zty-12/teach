@@ -139,8 +139,14 @@ export default function SettingsPage() {
         supabaseUrl: draftUrl.trim() || settings.supabaseUrl,
         supabaseAnonKey: draftKey.trim() || settings.supabaseAnonKey,
       })
-      // 检测「云端缺少表」类错误（schema 版本不一致），给出补建表引导
-      const missingTable = r.errors.find((m) => /could not find the table|schema cache|table does not exist/i.test(m))
+      // 检测「云端表结构不是最新」类错误（缺表 / 缺列，schema 版本不一致），给出补建引导
+      // 缺表：Could not find the table 'public.xxx' in the schema cache (PGRST205)
+      // 缺列：Could not find the 'checkInWeekdays' column of 'groups' in the schema cache (PGRST204)
+      const missingTable = r.errors.find((m) =>
+        /could not find the table|schema cache|table does not exist|could not find the '.*' column|column .* does not exist/i.test(
+          m,
+        ),
+      )
       const fatal = r.errors.length > 0 && r.pushed === 0 && r.pulled === 0
       if (missingTable) {
         setSyncState({ kind: 'error', message: '同步中断：云端缺少部分数据表' })
@@ -871,17 +877,17 @@ export default function SettingsPage() {
             <div className="rounded-lg border border-line-1 bg-surface-2 p-3">
               <div className="mb-2 flex items-center gap-2 text-[13px] text-text-1">
                 <AlertTriangle size={14} className="text-money-due" />
-                云端缺少数据表，同步中断
+                云端表结构不是最新，同步中断
               </div>
               <p className="text-[12px] leading-relaxed text-text-2">
-                当前 Supabase 项目是<strong>旧版本建表</strong>的，缺少最新的一张表（
+                当前 Supabase 项目是<strong>旧版本建表</strong>的，缺少最新的表或列（
                 <code className="rounded bg-surface-3 px-1">{syncSchemaHint}</code>
-                ）。请重新跑一次最新建表脚本：
+                ）。请重新跑一次最新建表脚本（幂等，不会删数据）：
               </p>
               <ol className="mt-1 list-decimal space-y-1 pl-5 text-[12px] leading-relaxed text-text-2">
                 <li>打开 Supabase 项目 → SQL Editor</li>
                 <li>新建查询，粘贴 <code className="rounded bg-surface-3 px-1">supabase/schema.sql</code> 全部内容</li>
-                <li>点 Run 执行（会补建缺失的 studentTags 表），然后回来点「立即同步」</li>
+                <li>点 Run 执行（幂等：只补建缺失的表、补加缺失的列，不动现有数据），然后回来点「立即同步」</li>
               </ol>
               <div className="mt-2">
                 <Button size="sm" variant="ghost" onClick={() => void handleCopySchema()}>
@@ -1017,10 +1023,23 @@ const SCHEMA_INSTRUCTIONS = `Supabase 建表指引（教务工作台）
 4. 点击右下角 Run 执行
 5. 回到工作台「设置 → 云端同步」点「测试连接」
 
-schema.sql 已为你创建 9 张业务表：
-- students / groups / groupMembers
-- courses / courseFeedbacks
-- learningReports / learningTags
-- payments / settlements
+schema.sql 是「全量 + 幂等」脚本，可反复执行：
+- 新库：一次建齐 26 张业务表 + 2 张辅助表
+- 老库：只补建缺失的表、补加缺失的列，不会删除现有数据
 
-并对每张表开启 RLS，anon 角色全权读写（单人自用设计）。`
+26 张业务表：
+- 基础：students / groups / groupMembers / courses / courseAttendances
+- 反馈：courseFeedbacks / feedbackTemplates / feedbackTemplateFields
+- 学情：learningReports / learningTags / studentTags / studentProfiles
+- 知识库：textbooks / textbookUnits / knowledgePoints / courseKnowledges
+- 打卡：checkInTasks / checkInRecords
+- 积分：pointRules / pointLedgers / rewardItems / redemptions
+- 课堂积分：classActivities / classActivityRecords
+
+2 张辅助表：
+- app_settings（设置云同步）
+- data_snapshots（数据版本留档）
+
+并对每张表开启 RLS，anon 角色全权读写（单人自用设计）。
+脚本末尾会执行 notify pgrst 刷新 PostgREST 缓存，
+若提示「列不存在」，等 1 分钟再点「测试连接」即可。`
