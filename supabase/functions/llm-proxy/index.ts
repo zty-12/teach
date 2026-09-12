@@ -88,9 +88,35 @@ Deno.serve(async (req) => {
     ? normalizedBase
     : `${normalizedBase}/chat/completions`
 
+  // 将 messages 中的公网图片 URL 转为 base64 data URL（部分 API 如 SenseNova 只接受 base64）
+  let resolvedMessages = messages
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i] as any
+    if (Array.isArray(msg.content)) {
+      const newContent: any[] = []
+      for (const part of msg.content) {
+        if (part.type === "image_url" && part.image_url?.url) {
+          const url: string = part.image_url.url
+          if (url.startsWith("http://") || url.startsWith("https://")) {
+            try {
+              const dataUrl = await fetchUrlToDataURL(url)
+              newContent.push({ ...part, image_url: { ...part.image_url, url: dataUrl } })
+              continue
+            } catch {
+              /* keep original URL if conversion fails */
+            }
+          }
+        }
+        newContent.push(part)
+      }
+      resolvedMessages = [...resolvedMessages]
+      ;(resolvedMessages as any)[i] = { ...msg, content: newContent }
+    }
+  }
+
   const body: Record<string, unknown> = {
     model,
-    messages,
+    messages: resolvedMessages,
     temperature: typeof temperature === "number" ? temperature : 0.7,
   }
   if (jsonMode) {
@@ -136,7 +162,7 @@ Deno.serve(async (req) => {
       },
       body: JSON.stringify({
         model,
-        messages,
+        messages: resolvedMessages,
         temperature: typeof temperature === "number" ? temperature : 0.7,
       }),
     }).catch((e) => ({ status: 502, text: async () => String(e) }))
@@ -151,6 +177,21 @@ Deno.serve(async (req) => {
   const content: string | undefined = data?.choices?.[0]?.message?.content
   return json({ content: content ?? "" })
 })
+
+/** 将公网图片 URL 下载并转为 base64 data URL */
+async function fetchUrlToDataURL(url: string): Promise<string> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Failed to fetch image: HTTP ${res.status}`)
+  const contentType = res.headers.get("content-type") ?? "image/png"
+  const buf = await res.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let binary = ""
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  const b64 = btoa(binary)
+  return `data:${contentType};base64,${b64}`
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
