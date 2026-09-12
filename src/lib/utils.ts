@@ -145,6 +145,24 @@ export function subjectColorClass(slot: number): string {
   return `bg-subject-${s}`
 }
 
+/**
+ * 科目配色的「浅色底」——与表面色混合，得到不刺眼又能看清的填充色。
+ *
+ * ⚠️ 不要写成 `${subjectColorVar(slot)}14`：subjectColorVar 返回的是 `var(--subject-N)`，
+ * 在 var() 后面再拼十六进制透明度是**非法值**，浏览器按透明处理——课程块会「看不见底色」。
+ * color-mix() 支持 var() 入参，是正确做法，且会随 --surface-0 自动兼容深色模式。
+ *
+ * @param percent 配色占比（0~100），默认 20——既能明显看出颜色，又不至于糊成实色块
+ */
+export function subjectTintVar(slot: number, percent = 20): string {
+  return `color-mix(in srgb, ${subjectColorVar(slot)} ${percent}%, var(--surface-0))`
+}
+
+/** 科目配色的描边色（与分隔线混合，避免纯色描边过艳）；percent 越大越接近纯色 */
+export function subjectBorderVar(slot: number, percent = 45): string {
+  return `color-mix(in srgb, ${subjectColorVar(slot)} ${percent}%, var(--border-1))`
+}
+
 /** 根据字符串稳定地分配一个配色槽（1-8），用于科目名散列 */
 export function slotFromString(text: string): number {
   let hash = 0

@@ -40,7 +40,9 @@ import {
   courseEnd,
   formatTime,
   getWeekDays,
+  subjectBorderVar,
   subjectColorVar,
+  subjectTintVar,
 } from '@/lib/utils'
 import { exportSchedule } from '@/lib/exporters'
 import {
@@ -688,7 +690,7 @@ function WeekView({
                       }}
                       title={selectMode ? '点击选择/取消' : '单击查看全部排课，双击快速完成'}
                       className={cn(
-                        'absolute inset-x-1 overflow-hidden rounded-md border border-line-1 px-1.5 py-1 text-[11px] leading-tight',
+                        'absolute inset-x-1 overflow-hidden rounded-md border px-1.5 py-1 text-[11px] leading-tight shadow-sm',
                         selectMode ? 'cursor-pointer' : 'cursor-pointer transition-shadow hover:shadow-md',
                         c.status === 'cancelled' && 'opacity-50',
                         isSelected && 'ring-2 ring-[var(--accent)]',
@@ -696,9 +698,11 @@ function WeekView({
                       style={{
                         top: top + 1,
                         height,
-                        // v14：与「当日时间线」视图统一——浅色底 + 左侧色条，替代整块实色
-                        background: `${subjectColorVar(c.colorSlot)}14`,
-                        borderLeft: `3px solid ${subjectColorVar(c.colorSlot)}`,
+                        // v15：明显但不刺眼——科目色浅底 + 4px 饱和色条 + 同色描边
+                        // （旧写法 `${var}14` 是非法值会被当透明，见 utils.subjectTintVar 注释）
+                        background: subjectTintVar(c.colorSlot, 22),
+                        borderColor: subjectBorderVar(c.colorSlot, 50),
+                        borderLeft: `4px solid ${subjectColorVar(c.colorSlot)}`,
                         color: 'var(--text-1)',
                       }}
                     >
@@ -760,8 +764,8 @@ function WeekView({
                           style={{
                             top: top + 1,
                             height,
-                            borderColor: subjectColorVar(g.colorSlot),
-                            background: `${subjectColorVar(g.colorSlot)}14`,
+                            borderColor: subjectBorderVar(g.colorSlot, 55),
+                            background: subjectTintVar(g.colorSlot, 12),
                             color: 'var(--text-1)',
                           }}
                         >
@@ -1007,7 +1011,7 @@ function DayViewDesktop({
                   }}
                   title={selectMode ? '点击选择/取消' : '单击查看全部排课，双击快速完成'}
                   className={cn(
-                    'absolute overflow-hidden rounded-md border border-line-1 px-1.5 py-1 text-[11px] leading-tight',
+                    'absolute overflow-hidden rounded-md border px-1.5 py-1 text-[11px] leading-tight shadow-sm',
                     selectMode ? 'cursor-pointer' : 'cursor-pointer transition-shadow hover:shadow-md',
                     c.status === 'cancelled' && 'opacity-50',
                     isSelected && 'ring-2 ring-[var(--accent)]',
@@ -1017,8 +1021,10 @@ function DayViewDesktop({
                     height,
                     left: `calc(${insetX}px + ${leftPct}%)`,
                     width: `calc(${widthPct}% - 4px)`,
-                    background: `${subjectColorVar(c.colorSlot)}14`,
-                    borderLeft: `3px solid ${subjectColorVar(c.colorSlot)}`,
+                    // v15：与「周视图」统一——科目色浅底 + 4px 饱和色条 + 同色描边
+                    background: subjectTintVar(c.colorSlot, 22),
+                    borderColor: subjectBorderVar(c.colorSlot, 50),
+                    borderLeft: `4px solid ${subjectColorVar(c.colorSlot)}`,
                     color: 'var(--text-1)',
                   }}
                 >
@@ -1082,8 +1088,8 @@ function DayViewDesktop({
                         height,
                         left: '4px',
                         width: 'calc(100% - 8px)',
-                        borderColor: subjectColorVar(g.colorSlot),
-                        background: `${subjectColorVar(g.colorSlot)}14`,
+                        borderColor: subjectBorderVar(g.colorSlot, 55),
+                        background: subjectTintVar(g.colorSlot, 12),
                         color: 'var(--text-1)',
                       }}
                     >
