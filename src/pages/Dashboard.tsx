@@ -193,7 +193,6 @@ export default function DashboardPage() {
 
   const [attendanceFor, setAttendanceFor] = useState<Course | null>(null)
   const [hoveredWeekBar, setHoveredWeekBar] = useState<number | null>(null)
-  const [todosExpanded, setTodosExpanded] = useState(false)
 
   const studentMap = useMemo(
     () => new Map((students ?? []).filter((s) => !s.deletedAt).map((s) => [s.id, s])),
@@ -381,11 +380,8 @@ export default function DashboardPage() {
         }
       />
 
-      <div className="flex flex-col gap-5 xl:grid xl:grid-cols-[minmax(0,1fr)_320px]">
-        {/* 主区 */}
-        <div className="order-2 xl:order-1 xl:col-span-2 space-y-5">
-          {/* 统计卡 */}
-          <section className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      {/* 统计卡 */}
+      <section className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <Link to="/schedule" className="group">
               <Card className="h-full p-4 transition-all hover:border-accent/30 hover:shadow-lg">
                 <div className="mb-2 flex items-center justify-between gap-3">
@@ -441,27 +437,31 @@ export default function DashboardPage() {
             </Link>
           </section>
 
-          {/* 今日日程 */}
-          <section>
-            <div className="mb-3 flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-[15px] font-semibold text-text-1">今日日程</h2>
-                <p className="mt-1 text-[12px] leading-5 text-text-2">
-                  按当前系统时间区分待确认、进行中、即将开始与稍后开始；点击可原地确认或编辑。
-                </p>
-              </div>
-              <span className="shrink-0 text-[12px] font-medium text-text-2">
-                {todayCourses.length === 0 ? '今天没有课' : `共 ${todayCourses.length} 节`}
-              </span>
+      {/* 今日：左=课程相关，右=学生相关；两栏等高、各自内部滚动 */}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        {/* 左栏：今日课程（课程相关信息） */}
+        <section className="card flex flex-col p-4 h-[460px] lg:h-[480px]">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-[15px] font-semibold text-text-1">今日课程</h2>
+              <p className="mt-1 text-[12px] leading-5 text-text-2">
+                按当前系统时间区分待确认、进行中、即将开始与稍后开始；点击可原地确认或编辑。
+              </p>
             </div>
+            <span className="shrink-0 text-[12px] font-medium text-text-2">
+              {todayCourses.length === 0 ? '今天没有课' : `共 ${todayCourses.length} 节`}
+            </span>
+          </div>
 
-            {todayCourses.length === 0 ? (
-              <Card className="px-5 py-14 text-center">
-                <div className="text-[15px] font-semibold text-text-1">今天还没有排课</div>
-                <div className="mt-1 text-[13px] leading-6 text-text-2">系统已按当前日期加载今日日程，新增课程后这里会自动按时间前后区分显示。</div>
-              </Card>
-            ) : (
-              <div className="space-y-3">
+          {todayCourses.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-line-1 bg-surface-2/40 px-5 text-center">
+              <div>
+                <div className="text-[14px] font-semibold text-text-1">今天还没有排课</div>
+                <div className="mt-1 text-[12px] leading-5 text-text-2">系统已按当前日期加载今日课程，新增课程后这里会自动按时间前后区分显示。</div>
+              </div>
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
                 {todayCourses.map((course) => {
                   const start = course.startAt
                   const end = courseEnd(course, groupMap)
@@ -535,35 +535,32 @@ export default function DashboardPage() {
                     </div>
                   )
                 })}
-              </div>
-            )}
-          </section>
-        </div>
-
-        {/* 侧区 */}
-        <aside className="order-3 space-y-5">
-          {/* 今日待处理 */}
-          <Card className="p-4">
-            <div className="mb-4 flex items-start justify-between gap-3">
-              <h2 className="text-[15px] font-semibold text-text-1">今日待处理</h2>
-              <button
-                type="button"
-                onClick={() => setTodosExpanded((v) => !v)}
-                disabled={todos.length === 0}
-                className="shrink-0 rounded-full bg-accent px-3.5 py-1 text-[12px] font-semibold text-white disabled:opacity-50"
-              >
-                {todos.length === 0 ? '今天已清空' : todosExpanded ? '收起' : `展开·共 ${todos.length} 条`}
-              </button>
             </div>
+          )}
+        </section>
 
-            {todos.length === 0 ? (
-              <div className="rounded-lg border border-line-1 bg-surface-2/40 px-4 py-8 text-center">
-                <div className="text-[13px] font-semibold text-text-1">今天没有待处理事项</div>
+        {/* 右栏：今日待处理（学生相关信息） */}
+        <Card className="flex flex-col p-4 h-[460px] lg:h-[480px]">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-[15px] font-semibold text-text-1">今日待处理</h2>
+              <p className="mt-1 text-[12px] leading-5 text-text-2">学生课时、试听转正与课后反馈等需跟进的提醒，滚动查看全部。</p>
+            </div>
+            <span className="shrink-0 rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-semibold text-accent-text">
+              {todos.length === 0 ? '已清空' : `共 ${todos.length} 条`}
+            </span>
+          </div>
+
+          {todos.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-line-1 bg-surface-2/40 px-5 text-center">
+              <div>
+                <div className="text-[14px] font-semibold text-text-1">今天没有待处理事项</div>
                 <div className="mt-1 text-[12px] leading-5 text-text-2">课程、沟通、反馈和财务动作都会在这里统一提醒。</div>
               </div>
-            ) : (
-              <div className="space-y-2">
-                {(todosExpanded ? todos : todos.slice(0, 2)).map((todo) => (
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+              {todos.map((todo) => (
                   <div
                     key={todo.id}
                     className={cn(
@@ -593,12 +590,13 @@ export default function DashboardPage() {
                     ) : null}
                   </div>
                 ))}
-              </div>
-            )}
-          </Card>
+            </div>
+          )}
+        </Card>
+      </div>
 
-          {/* 本周概览 */}
-          <Card className="p-4">
+      {/* 本周概览 */}
+      <Card className="p-4">
             <div className="mb-2 flex items-center justify-between gap-3">
               <h2 className="text-[15px] font-semibold text-text-1">本周概览</h2>
               <span className="text-[12px] font-medium text-text-2">{weeklyCourseCount} 节</span>
@@ -629,9 +627,7 @@ export default function DashboardPage() {
               variant="accent"
               onHoverChange={setHoveredWeekBar}
             />
-          </Card>
-        </aside>
-      </div>
+      </Card>
 
       <AttendanceModal
         course={attendanceFor}
