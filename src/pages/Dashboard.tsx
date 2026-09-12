@@ -181,6 +181,100 @@ function getTimeStateMeta(state: CourseTimeState): TimeStateMeta {
   }
 }
 
+// ============================================================
+// 今日待处理：按「课程信息 / 学生信息」分组的列表项
+// ============================================================
+
+/** 待处理条目 */
+type DashboardTodo = {
+  id: string
+  /** 归属栏：course = 课程信息（课后反馈等），student = 学生信息（课时/试听等） */
+  group: 'course' | 'student'
+  category: string
+  categoryClass: string
+  title: string
+  detail: string
+  actionLabel?: string
+  tone: 'warning' | 'info'
+  href: string
+}
+
+/** 单条待处理 */
+function TodoRow({ todo }: { todo: DashboardTodo }) {
+  const warn = todo.tone === 'warning'
+  return (
+    <div
+      className={cn(
+        'relative flex items-start justify-between gap-3 rounded-lg px-3 py-2.5 pl-4',
+        warn ? 'border border-leave/30 bg-leave-soft/40' : 'border border-line-1 bg-surface-0',
+      )}
+    >
+      <span className={cn('absolute bottom-3 left-0 top-3 w-0.5 rounded-full', warn ? 'bg-leave' : 'bg-accent')} />
+      <div className="flex min-w-0 gap-2.5">
+        <span className={cn('mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full', warn ? 'bg-leave' : 'bg-accent')} />
+        <div className="min-w-0">
+          <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold', todo.categoryClass)}>
+            {todo.category}
+          </span>
+          <div className="mt-1 text-[13px] font-semibold leading-snug text-text-1">{todo.title}</div>
+          <div className="mt-1 text-[11px] font-medium text-text-2">{todo.detail}</div>
+        </div>
+      </div>
+      {todo.actionLabel ? (
+        <Link
+          to={todo.href}
+          className={cn(
+            'inline-flex h-7 shrink-0 items-center rounded-full px-2.5 text-[11px] font-semibold text-white',
+            warn ? 'bg-leave' : 'bg-accent',
+          )}
+        >
+          {todo.actionLabel}
+        </Link>
+      ) : null}
+    </div>
+  )
+}
+
+/** 分栏容器：一栏为一类信息，内部超高滚动 */
+function TodoColumn({
+  title,
+  hint,
+  items,
+  divider = false,
+}: {
+  title: string
+  hint: string
+  items: DashboardTodo[]
+  /** 桌面端在左缘加分隔线（用于第二栏） */
+  divider?: boolean
+}) {
+  return (
+    <div className={cn('flex min-w-0 flex-col', divider && 'md:border-l md:border-line-1 md:pl-5')}>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+          <span className="shrink-0 text-[12px] font-semibold text-text-1">{title}</span>
+          <span className="truncate text-[11px] font-medium text-text-3">{hint}</span>
+        </div>
+        <span className="shrink-0 rounded-full border border-line-1 bg-surface-2/60 px-2 py-0.5 text-[10px] font-semibold text-text-2 tabular-nums">
+          {items.length}
+        </span>
+      </div>
+      {items.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-line-1 bg-surface-2/30 px-3 py-6 text-center text-[12px] font-medium text-text-3">
+          暂无
+        </div>
+      ) : (
+        <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
+          {items.map((t) => (
+            <TodoRow key={t.id} todo={t} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function DashboardPage() {
   const teacherName = useSettings((s) => s.settings.teacherName)
 
@@ -305,21 +399,13 @@ export default function DashboardPage() {
     void db.courses.put(touch({ ...c, status: 'cancelled' }))
   }
 
-  // 今日待处理列表（分类 + 详情 + 动作）
+  // 今日待处理列表（分类 + 详情 + 动作；group 决定落在哪一栏）
   const todos = useMemo(() => {
-    const list: {
-      id: string
-      category: string
-      categoryClass: string
-      title: string
-      detail: string
-      actionLabel?: string
-      tone: 'warning' | 'info'
-      href: string
-    }[] = []
+    const list: DashboardTodo[] = []
     data.lowBalance.forEach((s) => {
       list.push({
         id: `lb-${s.id}`,
+        group: 'student',
         category: '财务',
         categoryClass: 'bg-leave-soft text-leave',
         title: `${s.name} 课时即将耗尽`,
@@ -332,6 +418,7 @@ export default function DashboardPage() {
     data.trialOverdue.forEach((s) => {
       list.push({
         id: `trial-${s.id}`,
+        group: 'student',
         category: '学生',
         categoryClass: 'bg-pending-soft text-pending',
         title: `${s.name} 试听已超时`,
@@ -344,6 +431,7 @@ export default function DashboardPage() {
     data.pendingFeedback.forEach((c) => {
       list.push({
         id: `fb-${c.id}`,
+        group: 'course',
         category: '反馈',
         categoryClass: 'bg-accent-soft text-accent-text',
         title: `待补课后反馈 · ${courseTitle(c, studentMap, groupMap)}`,
@@ -355,6 +443,9 @@ export default function DashboardPage() {
     })
     return list
   }, [data.lowBalance, data.trialOverdue, data.pendingFeedback, studentMap, groupMap])
+
+  const courseTodos = useMemo(() => todos.filter((t) => t.group === 'course'), [todos])
+  const studentTodos = useMemo(() => todos.filter((t) => t.group === 'student'), [todos])
 
   const riskCount = data.lowBalance.length + data.trialOverdue.length
 
@@ -439,31 +530,27 @@ export default function DashboardPage() {
             </Link>
           </section>
 
-      {/* 今日：左=课程相关，右=学生相关；两栏等高、各自内部滚动 */}
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-        {/* 左栏：今日课程（课程相关信息） */}
-        <section className="card flex flex-col p-4 h-[460px] lg:h-[480px]">
-          <div className="mb-3 flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="text-[15px] font-semibold text-text-1">今日课程</h2>
-              <p className="mt-1 text-[12px] leading-5 text-text-2">
-                按当前系统时间区分待确认、进行中、即将开始与稍后开始；点击可原地确认或编辑。
-              </p>
-            </div>
-            <span className="shrink-0 text-[12px] font-medium text-text-2">
-              {todayCourses.length === 0 ? '今天没有课' : `共 ${todayCourses.length} 节`}
-            </span>
+      {/* 今日课程：保持整行通栏显示 */}
+      <section className="card p-4">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-[15px] font-semibold text-text-1">今日课程</h2>
+            <p className="mt-1 text-[12px] leading-5 text-text-2">
+              按当前系统时间区分待确认、进行中、即将开始与稍后开始；点击可原地确认或编辑。
+            </p>
           </div>
+          <span className="shrink-0 text-[12px] font-medium text-text-2">
+            {todayCourses.length === 0 ? '今天没有课' : `共 ${todayCourses.length} 节`}
+          </span>
+        </div>
 
-          {todayCourses.length === 0 ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-line-1 bg-surface-2/40 px-5 text-center">
-              <div>
-                <div className="text-[14px] font-semibold text-text-1">今天还没有排课</div>
-                <div className="mt-1 text-[12px] leading-5 text-text-2">系统已按当前日期加载今日课程，新增课程后这里会自动按时间前后区分显示。</div>
-              </div>
-            </div>
-          ) : (
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+        {todayCourses.length === 0 ? (
+          <div className="rounded-lg border border-line-1 bg-surface-2/40 px-5 py-10 text-center">
+            <div className="text-[14px] font-semibold text-text-1">今天还没有排课</div>
+            <div className="mt-1 text-[12px] leading-5 text-text-2">系统已按当前日期加载今日课程，新增课程后这里会自动按时间前后区分显示。</div>
+          </div>
+        ) : (
+          <div className="space-y-3">
                 {todayCourses.map((course) => {
                   const start = course.startAt
                   const end = courseEnd(course, groupMap)
@@ -537,65 +624,36 @@ export default function DashboardPage() {
                     </div>
                   )
                 })}
-            </div>
-          )}
-        </section>
-
-        {/* 右栏：今日待处理（学生相关信息） */}
-        <Card className="flex flex-col p-4 h-[460px] lg:h-[480px]">
-          <div className="mb-3 flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="text-[15px] font-semibold text-text-1">今日待处理</h2>
-              <p className="mt-1 text-[12px] leading-5 text-text-2">学生课时、试听转正与课后反馈等需跟进的提醒，滚动查看全部。</p>
-            </div>
-            <span className="shrink-0 rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-semibold text-accent-text">
-              {todos.length === 0 ? '已清空' : `共 ${todos.length} 条`}
-            </span>
           </div>
+        )}
+      </section>
 
-          {todos.length === 0 ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-line-1 bg-surface-2/40 px-5 text-center">
-              <div>
-                <div className="text-[14px] font-semibold text-text-1">今天没有待处理事项</div>
-                <div className="mt-1 text-[12px] leading-5 text-text-2">课程、沟通、反馈和财务动作都会在这里统一提醒。</div>
-              </div>
-            </div>
-          ) : (
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-              {todos.map((todo) => (
-                  <div
-                    key={todo.id}
-                    className={cn(
-                      'relative flex items-start justify-between gap-3 rounded-lg px-3 py-2.5 pl-4',
-                      todo.tone === 'warning' ? 'border border-leave/30 bg-leave-soft/40' : 'border border-line-1 bg-surface-0',
-                    )}
-                  >
-                    <span className={cn('absolute bottom-3 left-0 top-3 w-0.5 rounded-full', todo.tone === 'warning' ? 'bg-leave' : 'bg-accent')} />
-                    <div className="flex min-w-0 gap-2.5">
-                      <span className={cn('mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full', todo.tone === 'warning' ? 'bg-leave' : 'bg-accent')} />
-                      <div className="min-w-0">
-                        <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold', todo.categoryClass)}>{todo.category}</span>
-                        <div className="mt-1 text-[13px] font-semibold leading-snug text-text-1">{todo.title}</div>
-                        <div className="mt-1 text-[11px] font-medium text-text-2">{todo.detail}</div>
-                      </div>
-                    </div>
-                    {todo.actionLabel ? (
-                      <Link
-                        to={todo.href}
-                        className={cn(
-                          'inline-flex h-7 shrink-0 items-center rounded-full px-2.5 text-[11px] font-semibold text-white',
-                          todo.tone === 'warning' ? 'bg-leave' : 'bg-accent',
-                        )}
-                      >
-                        {todo.actionLabel}
-                      </Link>
-                    ) : null}
-                  </div>
-                ))}
-            </div>
-          )}
-        </Card>
-      </div>
+      {/* 今日待处理：整行通栏，内部按「课程信息 / 学生信息」分两栏 */}
+      <Card className="p-4">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-[15px] font-semibold text-text-1">今日待处理</h2>
+            <p className="mt-1 text-[12px] leading-5 text-text-2">
+              左栏为课后反馈等课程信息，右栏为学生课时等学生信息；滚动可查看全部。
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-semibold text-accent-text">
+            {todos.length === 0 ? '已清空' : `共 ${todos.length} 条`}
+          </span>
+        </div>
+
+        {todos.length === 0 ? (
+          <div className="rounded-lg border border-line-1 bg-surface-2/40 px-5 py-10 text-center">
+            <div className="text-[14px] font-semibold text-text-1">今天没有待处理事项</div>
+            <div className="mt-1 text-[12px] leading-5 text-text-2">课程、沟通、反馈和财务动作都会在这里统一提醒。</div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-x-5 gap-y-4 md:grid-cols-2">
+            <TodoColumn title="课程信息" hint="课后反馈 · 待补录" items={courseTodos} />
+            <TodoColumn title="学生信息" hint="课时余额 · 试听跟进" items={studentTodos} divider />
+          </div>
+        )}
+      </Card>
 
       {/* 本周概览 */}
       <Card className="p-4">
