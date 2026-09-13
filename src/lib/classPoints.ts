@@ -20,6 +20,7 @@ import type {
   ClassActivityRecord,
   ClassActivityRule,
 } from './types'
+import { CLASS_RULE_CONDITION_LABEL } from './types'
 
 /** 新建课堂活动时的默认计分规则：过关 +1，第一个过关再 +1 */
 export const DEFAULT_CLASS_RULES: ClassActivityRule[] = [
@@ -36,18 +37,69 @@ export function cloneDefaultClassRules(): ClassActivityRule[] {
 // ============================================================
 
 /**
- * 计算某名次应得积分。
- * @param rank 过关名次，从 1 开始（1 = 第一个过关）；0 或负数表示未过关
+ * 判断一条规则是否命中某学生的状态 / 名次。
+ * @param rank 过关名次（1 起）；未过关或待检查时为 0
+ * @param status 该学生的当前状态
  */
-export function awardedPoints(rules: ClassActivityRule[], rank: number): number {
-  if (rank < 1) return 0
+function condHit(
+  rule: ClassActivityRule,
+  rank: number,
+  status: 'pass' | 'fail',
+): boolean {
+  if (rule.condition === 'fail') return status === 'fail'
+  if (status !== 'pass' || rank < 1) return false
+  switch (rule.condition) {
+    case 'pass':
+      return true
+    case 'first':
+      return rank === 1
+    case 'topN':
+      return rank <= Math.max(1, rule.rankN ?? 1)
+    case 'rank':
+      return rank === Math.max(1, rule.rankN ?? 1)
+    case 'range': {
+      const from = Math.max(1, rule.rankFrom ?? 1)
+      const to = Math.max(from, rule.rankTo ?? from)
+      return rank >= from && rank <= to
+    }
+    default:
+      return false
+  }
+}
+
+/**
+ * 计算某学生在某状态 / 名次下应得积分。
+ * @param rank 过关名次，从 1 开始（1 = 第一个过关）；未过关 / 待检查传 0
+ * @param status 学生状态，默认按「过关」计算（便于预览第一个过关的得分）
+ */
+export function awardedPoints(
+  rules: ClassActivityRule[],
+  rank: number,
+  status: 'pass' | 'fail' = 'pass',
+): number {
   let total = 0
   for (const r of rules) {
     if (!r.enabled) continue
-    if (r.condition === 'pass') total += r.points
-    else if (r.condition === 'first' && rank === 1) total += r.points
+    if (condHit(r, rank, status)) total += r.points
   }
   return total
+}
+
+/** 把规则条件描述成中文短句（用于卡片上的规则标签，含名次参数） */
+export function describeRuleCondition(rule: ClassActivityRule): string {
+  switch (rule.condition) {
+    case 'topN':
+      return `前 ${Math.max(1, rule.rankN ?? 1)} 名过关`
+    case 'rank':
+      return `第 ${Math.max(1, rule.rankN ?? 1)} 名过关`
+    case 'range': {
+      const from = Math.max(1, rule.rankFrom ?? 1)
+      const to = Math.max(from, rule.rankTo ?? from)
+      return `第 ${from}~${to} 名过关`
+    }
+    default:
+      return CLASS_RULE_CONDITION_LABEL[rule.condition] ?? rule.condition
+  }
 }
 
 /** 已过关记录按「过关时间升序」排列：index 0 即第一个过关的学生 */
@@ -110,7 +162,13 @@ export async function resettleActivity(
   const updates: ClassActivityRecord[] = []
   for (const rec of siblings) {
     const rank = rankMap.get(rec.studentId) ?? 0
-    const expected = rank > 0 ? awardedPoints(activity.rules, rank) : 0
+    // 过关 → 按名次计分；未过关 → 仅「未过关者加」类条件生效；待检查 → 不计分
+    const expected =
+      rec.status === 'pass'
+        ? awardedPoints(activity.rules, rank, 'pass')
+        : rec.status === 'fail'
+          ? awardedPoints(activity.rules, 0, 'fail')
+          : 0
     const hasLedger = Boolean(rec.ledgerId)
     // 结果未变化则跳过，避免每次标记都产生新流水
     if (expected === (rec.pointsAwarded ?? 0) && (expected > 0) === hasLedger) continue

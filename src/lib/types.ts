@@ -504,12 +504,43 @@ export interface PointLedger extends SyncFields {
 // 课堂积分（v16）
 // ============================================================
 
-/** 课堂活动计分规则的条件类型 */
-export type ClassRuleCondition = 'pass' | 'first'
+/**
+ * 课堂活动计分规则的条件类型（v19 起支持自定义加分条件）。
+ * - pass  ：每个过关的学生都加（如「过关 +1」）
+ * - fail  ：未过关的学生加（如「参与鼓励 +1」）
+ * - first ：仅第 1 名过关额外加
+ * - topN  ：前 N 名过关额外加（配 rankN）
+ * - rank  ：第 N 名过关额外加（配 rankN）
+ * - range ：第 X ~ Y 名过关额外加（配 rankFrom / rankTo）
+ * 旧的 pass / first 数据继续有效，无需迁移。
+ */
+export type ClassRuleCondition = 'pass' | 'fail' | 'first' | 'topN' | 'rank' | 'range'
 
 export const CLASS_RULE_CONDITION_LABEL: Record<ClassRuleCondition, string> = {
-  pass: '过关',
-  first: '第一个过关',
+  pass: '过关者都加',
+  fail: '未过关者加',
+  first: '仅第一个过关',
+  topN: '前 N 名过关',
+  rank: '第 N 名过关',
+  range: '第 X~Y 名过关',
+}
+
+/** 各条件是否需要额外填写名次参数（用于新建弹窗按条件动态显示输入框） */
+export const CLASS_RULE_CONDITION_PARAM: Record<
+  ClassRuleCondition,
+  'none' | 'single' | 'range'
+> = {
+  pass: 'none',
+  fail: 'none',
+  first: 'none',
+  topN: 'single',
+  rank: 'single',
+  range: 'range',
+}
+
+/** 需要填写名次参数的条件（topN / rank 用 rankN，range 用 rankFrom~rankTo） */
+export function conditionNeedsRank(condition: ClassRuleCondition): 'none' | 'single' | 'range' {
+  return CLASS_RULE_CONDITION_PARAM[condition] ?? 'none'
 }
 
 /** 课堂活动内的计分规则 */
@@ -518,6 +549,12 @@ export interface ClassActivityRule {
   points: number
   condition: ClassRuleCondition
   enabled: boolean
+  /** topN / rank：名次参数（N），默认 1 */
+  rankN?: number
+  /** range：起始名次，默认 1 */
+  rankFrom?: number
+  /** range：结束名次，默认与 rankFrom 相同 */
+  rankTo?: number
 }
 
 /** 课堂活动 */

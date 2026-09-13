@@ -31,8 +31,10 @@ import { cn } from '@/lib/utils'
 import type { PointBalance } from '@/lib/points'
 import {
   addStudentsToActivity,
+  awardedPoints,
   cloneDefaultClassRules,
   deleteClassActivity,
+  describeRuleCondition,
   ensureTodayClassActivities,
   previewPassPoints,
   rankOf,
@@ -42,10 +44,11 @@ import type {
   ClassActivity,
   ClassActivityRecord,
   ClassActivityRule,
+  ClassRuleCondition,
   Group,
   Student,
 } from '@/lib/types'
-import { CLASS_RULE_CONDITION_LABEL } from '@/lib/types'
+import { CLASS_RULE_CONDITION_LABEL, conditionNeedsRank } from '@/lib/types'
 
 /**
  * 课堂积分视图（v17）
@@ -320,7 +323,7 @@ function ActivityCard({
                   {rule.points}分
                 </span>
                 <span className="text-amber-500/70">
-                  · {CLASS_RULE_CONDITION_LABEL[rule.condition]}
+                  · {describeRuleCondition(rule)}
                 </span>
               </div>
             ))}
@@ -442,6 +445,9 @@ function ActivityCard({
                       <>
                         <span className="flex items-center gap-1 text-[12px] text-money-due">
                           <XCircle size={13} /> 未过关
+                          {rec.pointsAwarded > 0 && (
+                            <span className="font-medium text-done">+{rec.pointsAwarded} 分</span>
+                          )}
                         </span>
                         <Button
                           variant="ghost"
@@ -571,6 +577,20 @@ function CreateActivityModal({
     setRules(next)
   }
 
+  /** 切换条件时补齐名次参数的默认值，保证保存出的规则字段完整 */
+  function changeCondition(idx: number, condition: ClassRuleCondition) {
+    const next = [...rules]
+    const rule = { ...next[idx]!, condition } as ClassActivityRule
+    if (conditionNeedsRank(condition) === 'single') {
+      rule.rankN = rule.rankN ?? 1
+    } else if (conditionNeedsRank(condition) === 'range') {
+      rule.rankFrom = rule.rankFrom ?? 1
+      rule.rankTo = rule.rankTo ?? rule.rankFrom
+    }
+    next[idx] = rule
+    setRules(next)
+  }
+
   return (
     <Modal open={open} onClose={onClose} title="新建课堂活动" size="xl">
       <div className="space-y-4">
@@ -650,18 +670,55 @@ function CreateActivityModal({
                 </div>
                 <Select
                   value={rule.condition}
-                  onChange={(e) =>
-                    updateRule(
-                      idx,
-                      'condition',
-                      e.target.value as ClassActivityRule['condition'],
-                    )
-                  }
+                  onChange={(e) => changeCondition(idx, e.target.value as ClassRuleCondition)}
                   className="w-36 shrink-0"
                 >
-                  <option value="pass">过关者都加</option>
-                  <option value="first">仅第一个过关</option>
+                  {(Object.keys(CLASS_RULE_CONDITION_LABEL) as ClassRuleCondition[]).map((c) => (
+                    <option key={c} value={c}>
+                      {CLASS_RULE_CONDITION_LABEL[c]}
+                    </option>
+                  ))}
                 </Select>
+                {conditionNeedsRank(rule.condition) === 'single' && (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <span className="text-[12px] text-text-3">第</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={rule.rankN ?? 1}
+                      onChange={(e) =>
+                        updateRule(idx, 'rankN', Math.max(1, Number(e.target.value) || 1))
+                      }
+                      className="w-14"
+                    />
+                    <span className="text-[12px] text-text-3">名</span>
+                  </div>
+                )}
+                {conditionNeedsRank(rule.condition) === 'range' && (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <span className="text-[12px] text-text-3">第</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={rule.rankFrom ?? 1}
+                      onChange={(e) =>
+                        updateRule(idx, 'rankFrom', Math.max(1, Number(e.target.value) || 1))
+                      }
+                      className="w-14"
+                    />
+                    <span className="text-[12px] text-text-3">~</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={rule.rankTo ?? rule.rankFrom ?? 1}
+                      onChange={(e) =>
+                        updateRule(idx, 'rankTo', Math.max(1, Number(e.target.value) || 1))
+                      }
+                      className="w-14"
+                    />
+                    <span className="text-[12px] text-text-3">名</span>
+                  </div>
+                )}
                 <button
                   type="button"
                   onClick={() => removeRule(idx)}
@@ -675,12 +732,21 @@ function CreateActivityModal({
           <div className="mt-2 space-y-0.5 text-[11px] text-text-3">
             <div>
               <span className="font-medium text-text-2">过关者都加</span>
-              ：每个过关的学生都能拿到该分（如「过关 +1」）
+              ：每个过关的学生都加（如「过关 +1」）
             </div>
             <div>
-              <span className="font-medium text-text-2">仅第一个过关</span>
-              ：只给第一个过关的学生额外加（如「第一个额外 +1」，
-              第一名合计 {rules.reduce((s, r) => s + (r.enabled ? r.points : 0), 0)} 分）
+              <span className="font-medium text-text-2">未过关者加</span>
+              ：未过关的学生也加（如「参与鼓励 +1」）
+            </div>
+            <div>
+              <span className="font-medium text-text-2">按名次加</span>
+              ：仅第一个 / 前 N 名 / 第 N 名 / 第 X~Y 名，名次可自定义
+            </div>
+            <div className="pt-0.5">
+              示例：第 1 名过关合计{' '}
+              <span className="font-medium text-text-2">{awardedPoints(rules, 1, 'pass')}</span> 分
+              · 未过关合计{' '}
+              <span className="font-medium text-text-2">{awardedPoints(rules, 0, 'fail')}</span> 分
             </div>
           </div>
         </div>
