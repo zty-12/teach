@@ -67,6 +67,11 @@ export interface SyncResult {
  * （其它设备 / 未跑迁移的旧数据同样受益）。
  */
 const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
+  // pointRules.kind 云端是 NOT NULL DEFAULT 'base'，而 v20 起新规则不再写该字段；
+  // PostgREST 批量 upsert 会把缺失键补成 null → 违反非空约束，这里兜底补 'base'。
+  pointRules: {
+    kind: 'base',
+  },
   classActivities: {
     auto: false,
     rules: [],

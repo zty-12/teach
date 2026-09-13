@@ -13,11 +13,75 @@ import type {
   CheckInRecord,
   CheckInTask,
   PointLedger,
+  PointRule,
   PointRuleCondition,
   Redemption,
   Student,
 } from './types'
 import { startOfDay } from 'date-fns'
+
+// ============================================================
+// 打卡规则解析（v20：任务引用规则库；旧任务回退为「全部启用规则」）
+// ============================================================
+
+/** 归一化后的打卡规则 */
+export interface ResolvedCheckInRule {
+  /** 库规则 id */
+  id: string
+  name: string
+  points: number
+  mode: 'auto' | 'tier'
+  /** 度量条件（连续天数 / 准时率等）；null = 无条件（所有已打卡学生都加） */
+  condition: PointRuleCondition | null
+  enabled: boolean
+}
+
+/** 规则是否属于打卡范围（旧数据没有 scope，按打卡处理） */
+export function isCheckinRule(r: PointRule): boolean {
+  return (r.scope ?? 'checkin') === 'checkin'
+}
+
+/**
+ * 解析一个打卡任务实际生效的规则。
+ *  - 有 ruleIds → 从规则库取（保持任务里的顺序）
+ *  - 无 ruleIds → 回退到「所有启用的打卡规则」（旧数据行为不变）
+ */
+export function resolveCheckInRules(
+  task: CheckInTask,
+  lib: PointRule[],
+): ResolvedCheckInRule[] {
+  const live = lib.filter((r) => !r.deletedAt)
+  const toResolved = (r: PointRule): ResolvedCheckInRule => ({
+    id: r.id,
+    name: r.name,
+    points: r.points,
+    mode: r.mode ?? 'auto',
+    // 旧版 base 规则无 condition；bonus 规则带 condition —— 两者都按自动累加处理
+    condition: r.condition ?? null,
+    enabled: r.enabled,
+  })
+  const ids = task.ruleIds
+  if (ids && ids.length > 0) {
+    const map = new Map(live.map((r) => [r.id, r]))
+    const out: ResolvedCheckInRule[] = []
+    for (const id of ids) {
+      const r = map.get(id)
+      if (!r) continue
+      out.push(toResolved(r))
+    }
+    return out
+  }
+  return live.filter(isCheckinRule).sort((a, b) => a.order - b.order).map(toResolved)
+}
+
+/** 取启用中的打卡规则 id 列表（新建打卡任务时的默认适用范围） */
+export async function defaultCheckInRuleIds(): Promise<string[]> {
+  const all = await db.pointRules.toArray()
+  return all
+    .filter((r) => !r.deletedAt && isCheckinRule(r) && r.enabled)
+    .sort((a, b) => a.order - b.order)
+    .map((r) => r.id)
+}
 
 // ============================================================
 // 余额查询
@@ -194,9 +258,7 @@ export async function recomputeTaskPoints(taskId: string): Promise<number> {
     db.pointRules.toArray(),
   ])
   const records = allRecords.filter((r) => !r.deletedAt && r.taskId === taskId)
-  const rules = allRules
-    .filter((r) => !r.deletedAt && r.enabled)
-    .sort((a, b) => a.order - b.order)
+  const rules = resolveCheckInRules(task, allRules)
 
   // 1) 清除该批次已生成的 earn 流水（幂等的关键）
   const oldLedgers = (await db.pointLedgers.toArray()).filter(
@@ -206,39 +268,29 @@ export async function recomputeTaskPoints(taskId: string): Promise<number> {
     await db.pointLedgers.bulkDelete(oldLedgers.map((l) => l.id))
   }
 
-  // 2) 重新生成
+  // 2) 重新生成：自动累加规则直接生效；带条件规则按条件判定；档位规则按选中项生效
   const now = Date.now()
   const rows: PointLedger[] = []
   for (const rec of records) {
     if (rec.status !== 'done') continue
     for (const rule of rules) {
-      if (rule.kind === 'base') {
-        if (rule.points <= 0) continue
-        rows.push(
-          withSyncFields<PointLedger>({
-            studentId: rec.studentId,
-            delta: rule.points,
-            kind: 'earn',
-            reason: `${task.title} · ${rule.name}`,
-            taskId: task.id,
-            createdAt: now,
-          }),
-        )
-      } else {
-        if (!rule.condition || rule.points <= 0) continue
+      if (!rule.enabled || rule.points === 0) continue
+      if (rule.mode === 'tier') {
+        if (rec.selectedRuleId !== rule.id) continue
+      } else if (rule.condition) {
         const hit = await evaluateCondition(rule.condition, rec.studentId, records)
         if (!hit) continue
-        rows.push(
-          withSyncFields<PointLedger>({
-            studentId: rec.studentId,
-            delta: rule.points,
-            kind: 'earn',
-            reason: `${task.title} · ${rule.name}`,
-            taskId: task.id,
-            createdAt: now,
-          }),
-        )
       }
+      rows.push(
+        withSyncFields<PointLedger>({
+          studentId: rec.studentId,
+          delta: rule.points,
+          kind: 'earn',
+          reason: `${task.title} · ${rule.name}`,
+          taskId: task.id,
+          createdAt: now,
+        }),
+      )
     }
   }
   if (rows.length > 0) await db.pointLedgers.bulkPut(rows)
@@ -353,6 +405,8 @@ export async function createCheckInTask(input: {
   memberIds: string[]
   /** 打卡日零点时间戳；缺省时用 dueAt 所在日 */
   days: number[]
+  /** 本任务适用的打卡规则 id（v20）；缺省时不写，按「全部启用规则」处理 */
+  ruleIds?: string[]
   /** all 模式下的在读学生列表 */
   activeStudents?: Student[]
 }): Promise<{ task: CheckInTask; created: number }> {
@@ -373,6 +427,7 @@ export async function createCheckInTask(input: {
     days: daySet,
     cadenceLabel: input.cadenceLabel.trim() || '单次打卡',
     note: input.note.trim(),
+    ...(input.ruleIds ? { ruleIds: input.ruleIds } : {}),
     createdAt: now,
   })
   await db.checkInTasks.put(task)
@@ -423,7 +478,7 @@ export function formatCadenceLabel(days: number[]): string {
 export async function updateCheckInTaskDays(
   task: CheckInTask,
   nextDays: number[],
-  patch?: { title?: string; note?: string },
+  patch?: { title?: string; note?: string; ruleIds?: string[] },
 ): Promise<void> {
   const days = Array.from(
     new Set(nextDays.map((d) => startOfDay(new Date(d)).getTime())),
@@ -434,6 +489,7 @@ export async function updateCheckInTaskDays(
       ...task,
       ...(patch?.title !== undefined ? { title: patch.title.trim() || task.title } : {}),
       ...(patch?.note !== undefined ? { note: patch.note.trim() } : {}),
+      ...(patch?.ruleIds !== undefined ? { ruleIds: patch.ruleIds } : {}),
       days,
       cadenceLabel: formatCadenceLabel(days),
     }),
@@ -561,10 +617,14 @@ export async function ensureAutoCheckInTask(input: {
   return { created: true }
 }
 
-/** 更新单条打卡记录（状态 / 备注），并幂等重算该批次积分 */
+/** 更新单条打卡记录（状态 / 备注 / 计分档位），并幂等重算该批次积分 */
 export async function updateCheckInRecord(
   record: CheckInRecord,
-  patch: { status?: CheckInRecord['status']; note?: string },
+  patch: {
+    status?: CheckInRecord['status']
+    note?: string
+    selectedRuleId?: string | null
+  },
 ): Promise<void> {
   // 显式比较 status 是否在合法集合里，避免 'pending' 这种"真值字符串但语义陷阱"的写法
   const statusNext =
@@ -575,6 +635,9 @@ export async function updateCheckInRecord(
     ...record,
     ...(statusNext ? { status: statusNext } : {}),
     ...(patch.note !== undefined ? { note: patch.note } : {}),
+    ...(patch.selectedRuleId !== undefined
+      ? { selectedRuleId: patch.selectedRuleId }
+      : {}),
     checkedAt:
       statusNext === 'done'
         ? record.checkedAt ?? Date.now()

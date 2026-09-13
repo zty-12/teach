@@ -307,6 +307,7 @@ create table if not exists "checkInTasks" (
   days jsonb not null default '[]'::jsonb,
   "cadenceLabel" text not null default '',
   note text not null default '',
+  "ruleIds" jsonb not null default '[]'::jsonb,
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
   "deletedAt" bigint
@@ -323,6 +324,7 @@ create table if not exists "checkInRecords" (
   note text not null default '',
   "aiFeedback" text not null default '',
   "checkedAt" bigint,
+  "selectedRuleId" text,
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
   "deletedAt" bigint
@@ -337,6 +339,9 @@ create table if not exists "pointRules" (
   kind text not null default 'base',
   points integer not null default 1,
   condition jsonb,
+  scope text not null default 'checkin',
+  mode text not null default 'auto',
+  "classCondition" jsonb,
   enabled boolean not null default true,
   "order" integer not null default 0,
   "createdAt" bigint not null default 0,
@@ -425,6 +430,7 @@ create table if not exists "classActivities" (
   "auto" boolean default false,
   "sourceCourseId" text,
   "rules" jsonb not null default '[]'::jsonb,
+  "ruleIds" jsonb not null default '[]'::jsonb,
   "note" text not null default '',
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
@@ -444,6 +450,7 @@ create table if not exists "classActivityRecords" (
   "note" text not null default '',
   "checkedAt" bigint,
   "ledgerId" text,
+  "selectedRuleId" text,
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
   "deletedAt" bigint
@@ -512,6 +519,17 @@ alter table "classActivityRecords" add column if not exists "ledgerId" text;
 -- 兜底：已按旧脚本建库时 auto 带 NOT NULL 约束，这里放宽，
 --       避免历史脏数据（auto 为 null）把整表推送卡死。
 alter table "classActivities" alter column "auto" drop not null;
+
+-- v20：积分规则库（打卡/课堂两套）+ 活动对规则的引用（ruleIds）
+--       与逐人档位选择（selectedRuleId）。旧版内嵌规则（classActivities.rules）
+--       保留兼容，新数据均走规则库引用。
+alter table "pointRules" add column if not exists scope text not null default 'checkin';
+alter table "pointRules" add column if not exists mode text not null default 'auto';
+alter table "pointRules" add column if not exists "classCondition" jsonb;
+alter table "checkInTasks" add column if not exists "ruleIds" jsonb not null default '[]'::jsonb;
+alter table "checkInRecords" add column if not exists "selectedRuleId" text;
+alter table "classActivities" add column if not exists "ruleIds" jsonb not null default '[]'::jsonb;
+alter table "classActivityRecords" add column if not exists "selectedRuleId" text;
 
 
 -- ============================================================

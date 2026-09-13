@@ -328,7 +328,7 @@ export async function ensureDefaultFeedbackTemplate(): Promise<void> {
   await db.feedbackTemplates.put(tpl)
 }
 
-/** 默认积分规则：每次打卡 +1；连续打卡 7 天额外 +5；本批次全部完成 +3 */
+/** 默认打卡积分规则：每次打卡 +1；连续打卡 7 天额外 +5；本批次全部完成 +3 */
 export async function ensureDefaultPointRules(): Promise<void> {
   const all = await db.pointRules.toArray()
   if (all.some((r) => !r.deletedAt)) return
@@ -336,27 +336,33 @@ export async function ensureDefaultPointRules(): Promise<void> {
   const seeds = [
     withSyncFields<PointRule>({
       name: '完成一次打卡',
-      kind: 'base',
       points: 1,
+      scope: 'checkin',
+      mode: 'auto',
       condition: null,
+      classCondition: null,
       enabled: true,
       order: 0,
       createdAt: now,
     }),
     withSyncFields<PointRule>({
       name: '连续打卡 7 天',
-      kind: 'bonus',
       points: 5,
+      scope: 'checkin',
+      mode: 'auto',
       condition: { metric: 'consecutive_days', operator: '>=', value: 7 },
+      classCondition: null,
       enabled: true,
       order: 1,
       createdAt: now,
     }),
     withSyncFields<PointRule>({
       name: '批次全部完成',
-      kind: 'bonus',
       points: 3,
+      scope: 'checkin',
+      mode: 'auto',
       condition: { metric: 'all_done', operator: '==', value: 1 },
+      classCondition: null,
       enabled: true,
       order: 2,
       createdAt: now,

@@ -400,6 +400,11 @@ export interface CheckInTask extends SyncFields {
   cadenceLabel: string
   /** 额外说明（打卡要求） */
   note: string
+  /**
+   * 本任务适用的打卡规则 id（v20，引用 pointRules 中 scope='checkin' 的规则）。
+   * 空数组 / undefined = 兼容旧数据：沿用所有启用的打卡规则。
+   */
+  ruleIds?: string[]
   createdAt: number
 }
 
@@ -423,6 +428,8 @@ export interface CheckInRecord extends SyncFields {
   /** AI 生成的给家长看的反馈（可选，由「AI 生成家长反馈」按钮写入，可再次编辑） */
   aiFeedback: string
   checkedAt: number | null
+  /** 手动档位规则选中的规则 id（v20）：mode='tier' 的规则据此计分 */
+  selectedRuleId?: string | null
   createdAt: number
 }
 
@@ -451,8 +458,44 @@ export interface StudentProfile extends SyncFields {
 // 积分
 // ============================================================
 
-/** 积分规则类型：base=每次打卡基础分；bonus=满足条件额外奖励 */
+/** 积分规则类型：base=每次打卡基础分；bonus=满足条件额外奖励（v20 起仅作旧数据兼容） */
 export type PointRuleKind = 'base' | 'bonus'
+
+/**
+ * 规则适用范围（v20）
+ *  - checkin：打卡规则，用于打卡任务
+ *  - class  ：课堂规则，用于课堂积分活动
+ * 两套规则各自独立维护，互不干扰。
+ */
+export type RuleScope = 'checkin' | 'class'
+
+export const RULE_SCOPE_LABEL: Record<RuleScope, string> = {
+  checkin: '打卡规则',
+  class: '课堂规则',
+}
+
+export const RULE_SCOPE_HINT: Record<RuleScope, string> = {
+  checkin: '用于「打卡任务」，如「提交作业 +2」「连续打卡 7 天 +5」',
+  class: '用于「课堂积分」活动，如「背诵熟练 +1」「第一个过关额外 +1」',
+}
+
+/**
+ * 规则计分方式（v20）
+ *  - auto：自动累加 —— 达标学生自动加分（如「提交作业 +2」，所有完成的学生都加）
+ *  - tier：手动档位 —— 标记学生时从该活动的档位规则里选一条（如「熟练 +1 / 不熟练 +0.5」）
+ * 两种方式可在同一个活动里混用。
+ */
+export type RuleMode = 'auto' | 'tier'
+
+export const RULE_MODE_LABEL: Record<RuleMode, string> = {
+  auto: '自动累加',
+  tier: '手动档位',
+}
+
+export const RULE_MODE_HINT: Record<RuleMode, string> = {
+  auto: '达标学生自动加，无需手动选',
+  tier: '标记学生时手动选一条（如 熟练 +1 / 不熟练 +0.5）',
+}
 
 /** 加分条件的度量维度 */
 export type PointMetric =
@@ -474,18 +517,30 @@ export interface PointRuleCondition {
   value: number
 }
 
-/** 积分规则 */
+/**
+ * 积分规则（规则库，v20 起统一维护打卡与课堂两套规则）
+ *
+ * 一条规则 = 名称 + 分值 + 适用范围 + 计分方式 +（可选）条件。
+ * 规则只在这里定义；打卡任务 / 课堂活动通过 ruleIds 引用，可在活动内增减。
+ */
 export interface PointRule extends SyncFields {
   name: string
-  kind: PointRuleKind
-  /** 奖励积分数（base 默认 1） */
+  /** 分值（可为小数，如 0.5；也可为负用于扣分） */
   points: number
-  /** bonus 时必填；base 时为 null */
+  /** 适用范围：打卡 / 课堂 */
+  scope: RuleScope
+  /** 计分方式：自动累加 / 手动档位 */
+  mode: RuleMode
+  /** 打卡范围的条件（如连续打卡 7 天）；null = 无条件（所有已打卡学生都加） */
   condition: PointRuleCondition | null
+  /** 课堂范围的名次/状态条件（如第一个过关、前 3 名）；null = 无条件（所有过关学生都加） */
+  classCondition: ClassRuleConditionSpec | null
   enabled: boolean
   /** 排序（从小到大生效） */
   order: number
   createdAt: number
+  /** 旧字段（v4~v19）：规则类型，保留兼容，新数据不再写入 */
+  kind?: PointRuleKind
 }
 
 /** 积分流水（ earn / spend / adjust ） */
@@ -543,6 +598,42 @@ export function conditionNeedsRank(condition: ClassRuleCondition): 'none' | 'sin
   return CLASS_RULE_CONDITION_PARAM[condition] ?? 'none'
 }
 
+/**
+ * 课堂规则的条件描述（v20）：条件 + 名次参数。
+ * 与旧版 ClassActivityRule 的字段形状一致，描述函数可同时接受两者。
+ */
+export interface ClassRuleConditionSpec {
+  condition: ClassRuleCondition
+  /** topN / rank：名次参数 N */
+  rankN?: number
+  /** range：起始名次 */
+  rankFrom?: number
+  /** range：结束名次 */
+  rankTo?: number
+}
+
+/** 把课堂规则条件描述成中文短句（含名次参数），用于规则标签 */
+export function describeClassRuleCondition(spec: {
+  condition: ClassRuleCondition
+  rankN?: number
+  rankFrom?: number
+  rankTo?: number
+}): string {
+  switch (spec.condition) {
+    case 'topN':
+      return `前 ${Math.max(1, spec.rankN ?? 1)} 名过关`
+    case 'rank':
+      return `第 ${Math.max(1, spec.rankN ?? 1)} 名过关`
+    case 'range': {
+      const from = Math.max(1, spec.rankFrom ?? 1)
+      const to = Math.max(from, spec.rankTo ?? from)
+      return `第 ${from}~${to} 名过关`
+    }
+    default:
+      return CLASS_RULE_CONDITION_LABEL[spec.condition] ?? spec.condition
+  }
+}
+
 /** 课堂活动内的计分规则 */
 export interface ClassActivityRule {
   name: string
@@ -570,7 +661,13 @@ export interface ClassActivity extends SyncFields {
   auto?: boolean
   /** 自动生成时的来源课程 id（v17） */
   sourceCourseId?: string | null
-  rules: ClassActivityRule[]
+  /**
+   * 本活动适用的课堂规则 id（v20，引用 pointRules 中 scope='class' 的规则）。
+   * 用于新建/自动生成的活动；为空时回退到下面的内嵌 rules（旧数据）。
+   */
+  ruleIds?: string[]
+  /** 旧版内嵌计分规则（v16~v19），仅用于兼容历史活动 */
+  rules?: ClassActivityRule[]
   note: string
   createdAt: number
 }
@@ -586,6 +683,8 @@ export interface ClassActivityRecord extends SyncFields {
   createdAt: number
   /** 本次加分写入的积分流水 id（v17）：撤销/改判时用于冲销，避免积分残留 */
   ledgerId?: string | null
+  /** 手动档位规则选中的规则 id（v20）：mode='tier' 的规则据此计分 */
+  selectedRuleId?: string | null
 }
 
 // ============================================================

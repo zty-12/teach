@@ -8,7 +8,6 @@ import {
   CalendarRange,
   CheckCircle2,
   Clock,
-  Coins,
   Gift,
   Loader2,
   Pencil,
@@ -38,11 +37,14 @@ import { Avatar } from '@/components/Avatar'
 import {
   adjustPoints,
   createCheckInTask,
+  defaultCheckInRuleIds,
   deleteCheckInTask,
   formatCadenceLabel,
   recomputeTaskPoints,
+  resolveCheckInRules,
   updateCheckInTaskDays,
   type PointBalance,
+  type ResolvedCheckInRule,
   updateCheckInRecord,
 } from '@/lib/points'
 import type {
@@ -53,7 +55,6 @@ import type {
   Group,
   GroupMember,
   PointRule,
-  PointRuleCondition,
   Redemption,
   RewardItem,
   Student,
@@ -64,6 +65,8 @@ import { useSettings } from '@/store/useSettings'
 import { generateCheckInFeedback, isAiConfigured, LlmError } from '@/lib/llm'
 import { getOrRefreshProfileForFeedback } from '@/lib/studentProfile'
 import ClassPointsView from '@/components/ClassPointsView'
+import RuleLibraryView from '@/components/RuleLibraryView'
+import { RuleChips, RulePicker } from '@/components/RulePicker'
 
 type MainTab = 'tasks' | 'class' | 'rules' | 'market'
 
@@ -133,12 +136,11 @@ export default function CheckInPage() {
           groupMembers={(groupMembers ?? []).filter((m) => !m.deletedAt)}
           courses={Array.from(cMap.values())}
           students={liveStudents}
+          rules={liveRules}
         />
       )}
       {tab === 'class' && <ClassPointsView />}
-      {tab === 'rules' && (
-        <RulesView rules={liveRules} />
-      )}
+      {tab === 'rules' && <RuleLibraryView />}
       {tab === 'market' && (
         <MarketView
           rewardItems={liveRewards}
@@ -166,6 +168,7 @@ function TasksView({
   groupMembers,
   courses,
   students,
+  rules,
 }: {
   tasks: CheckInTask[]
   records: CheckInRecord[]
@@ -177,6 +180,7 @@ function TasksView({
   groupMembers: GroupMember[]
   courses: Course[]
   students: Student[]
+  rules: PointRule[]
 }) {
   const [newTaskOpen, setNewTaskOpen] = useState(false)
   const [editTask, setEditTask] = useState<CheckInTask | null>(null)
@@ -187,6 +191,23 @@ function TasksView({
         .filter((r) => r.taskId === activeTask.id)
         .sort((a, b) => a.createdAt - b.createdAt)
     : []
+
+  /** 任务引用的规则；未指定时按「全部启用的打卡规则」 */
+  function rulesOfTask(t: CheckInTask): PointRule[] {
+    const ids = t.ruleIds
+    if (ids && ids.length > 0) {
+      const map = new Map(rules.map((r) => [r.id, r]))
+      return ids.map((id) => map.get(id)).filter((r): r is PointRule => Boolean(r))
+    }
+    return rules
+      .filter((r) => (r.scope ?? 'checkin') === 'checkin')
+      .sort((a, b) => a.order - b.order)
+  }
+
+  /** 当前任务里的「手动档位」规则 */
+  function tierRulesOfTask(t: CheckInTask): ResolvedCheckInRule[] {
+    return resolveCheckInRules(t, rules).filter((r) => r.mode === 'tier' && r.enabled)
+  }
 
   async function handleDeleteTask(t: CheckInTask) {
     if (!confirm(`删除打卡任务「${t.title}」？会同时清除其记录与积分流水。`)) return
@@ -261,7 +282,14 @@ function TasksView({
                           {t.cadenceLabel || format(t.createdAt, 'yyyy-MM-dd HH:mm')}
                           {total > 0 && ` · ${done}/${total} 次已打卡`}
                           {c && ` · 关联：${c.subject}`}
+                          {` · ${rulesOfTask(t).length} 条规则`}
                         </p>
+                        <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                          <RuleChips
+                            rules={rulesOfTask(t)}
+                            emptyText="未引用规则（按全部启用的打卡规则计分）"
+                          />
+                        </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
                         <button
@@ -323,6 +351,7 @@ function TasksView({
               task={activeTask}
               records={recordsOfActive}
               studentMap={studentMap}
+              tierRules={tierRulesOfTask(activeTask)}
             />
           ) : (
             <ul className="divide-y divide-line-1">
@@ -331,6 +360,7 @@ function TasksView({
                   key={r.id}
                   record={r}
                   student={studentMap.get(r.studentId)}
+                  tierRules={tierRulesOfTask(activeTask)}
                   onUpdate={(patch) => void updateCheckInRecord(r, patch)}
                 />
               ))}
@@ -367,6 +397,8 @@ function EditCheckInTaskModal({
   const [addDate, setAddDate] = useState('')
   const [rangeFrom, setRangeFrom] = useState('')
   const [rangeTo, setRangeTo] = useState('')
+  // v20：本任务适用的打卡规则
+  const [ruleIds, setRuleIds] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -377,6 +409,13 @@ function EditCheckInTaskModal({
     setAddDate('')
     setRangeFrom('')
     setRangeTo('')
+    const ids = task.ruleIds
+    if (ids && ids.length > 0) {
+      setRuleIds(ids)
+    } else {
+      // 旧任务未指定 → 默认全选启用中的打卡规则（行为与旧版一致）
+      void defaultCheckInRuleIds().then(setRuleIds)
+    }
   }, [task])
 
   function removeDay(d: number) {
@@ -406,7 +445,7 @@ function EditCheckInTaskModal({
     if (!task || days.length === 0) return
     setSaving(true)
     try {
-      await updateCheckInTaskDays(task, days, { title, note })
+      await updateCheckInTaskDays(task, days, { title, note, ruleIds })
       onClose()
     } finally {
       setSaving(false)
@@ -487,6 +526,12 @@ function EditCheckInTaskModal({
               当前节奏：{formatCadenceLabel(days)}。移除日期会同时删除该天的打卡记录，新增日期会为参与学生补上待打卡记录。
             </p>
           </Field>
+          <Field label="适用规则">
+            <RulePicker scope="checkin" value={ruleIds} onChange={setRuleIds} />
+            <p className="mt-1 text-[11px] text-text-3">
+              规则统一在「积分规则 → 打卡规则」里维护，这里只做引用增减。
+            </p>
+          </Field>
           <Field label="备注">
             <Textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} />
           </Field>
@@ -499,11 +544,18 @@ function EditCheckInTaskModal({
 function CheckInRow({
   record,
   student,
+  tierRules,
   onUpdate,
 }: {
   record: CheckInRecord
   student: Student | undefined
-  onUpdate: (patch: { status?: CheckInStatus; note?: string }) => void
+  /** 该任务里的手动档位规则（为空则不显示档位选择） */
+  tierRules: ResolvedCheckInRule[]
+  onUpdate: (patch: {
+    status?: CheckInStatus
+    note?: string
+    selectedRuleId?: string | null
+  }) => void
 }) {
   return (
     <li className="px-4 py-3">
@@ -537,6 +589,24 @@ function CheckInRow({
             placeholder="备注打卡内容（可空）"
             className="mt-1.5 w-full rounded-md border border-line-1 bg-surface-0 px-2 py-1 text-[13px] text-text-1 placeholder:text-text-3 focus:border-accent focus:outline-none"
           />
+          {tierRules.length > 0 && record.status === 'done' && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-text-3">计分档位</span>
+              <Select
+                value={record.selectedRuleId ?? ''}
+                onChange={(e) => onUpdate({ selectedRuleId: e.target.value || null })}
+                className="w-48"
+              >
+                <option value="">不选（仅按自动规则）</option>
+                {tierRules.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name} {r.points > 0 ? '+' : ''}
+                    {r.points}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 gap-1">
           <Button
@@ -577,10 +647,13 @@ function CheckInMatrix({
   task,
   records,
   studentMap,
+  tierRules,
 }: {
   task: CheckInTask
   records: CheckInRecord[]
   studentMap: Map<string, Student>
+  /** 该任务里的手动档位规则（为空则不显示档位选择） */
+  tierRules: ResolvedCheckInRule[]
 }) {
   const days = useMemo(
     () => Array.from(new Set((task.days ?? []).map((d) => startOfDay(d).getTime())))
@@ -689,51 +762,72 @@ function CheckInMatrix({
                   return (
                     <td key={d} className="px-1.5 py-1.5 text-center">
                       {rec ? (
-                        <button
-                          type="button"
-                          title={
-                            noteText
-                              ? `${CHECKIN_STATUS_LABEL[status]} · ${noteText}`
-                              : CHECKIN_STATUS_LABEL[status]
-                          }
-                          onClick={() => {
-                            const nextStatus = next(status)
-                            void updateCheckInRecord(rec, { status: nextStatus })
-                            if (nextStatus === 'done') {
-                              setQuickNote({
-                                studentId: sid,
-                                studentName: studentMap.get(sid)?.name ?? '已删学生',
-                                day: d,
-                                recordId: rec.id,
-                                existingNote: rec.note ?? '',
-                                existingAiFeedback: rec.aiFeedback ?? '',
-                              })
+                        <div className="flex flex-col items-center gap-1">
+                          <button
+                            type="button"
+                            title={
+                              noteText
+                                ? `${CHECKIN_STATUS_LABEL[status]} · ${noteText}`
+                                : CHECKIN_STATUS_LABEL[status]
                             }
-                          }}
-                          className={cn(
-                            'relative mx-auto flex h-6 w-6 items-center justify-center rounded-md border transition-colors',
-                            status === 'done' &&
-                              'border-done bg-done-soft text-done',
-                            status === 'missed' &&
-                              'border-leave bg-leave-soft text-leave',
-                            status === 'pending' &&
-                              'border-line-1 text-text-3 hover:border-accent',
+                            onClick={() => {
+                              const nextStatus = next(status)
+                              void updateCheckInRecord(rec, { status: nextStatus })
+                              if (nextStatus === 'done') {
+                                setQuickNote({
+                                  studentId: sid,
+                                  studentName: studentMap.get(sid)?.name ?? '已删学生',
+                                  day: d,
+                                  recordId: rec.id,
+                                  existingNote: rec.note ?? '',
+                                  existingAiFeedback: rec.aiFeedback ?? '',
+                                })
+                              }
+                            }}
+                            className={cn(
+                              'relative mx-auto flex h-6 w-6 items-center justify-center rounded-md border transition-colors',
+                              status === 'done' &&
+                                'border-done bg-done-soft text-done',
+                              status === 'missed' &&
+                                'border-leave bg-leave-soft text-leave',
+                              status === 'pending' &&
+                                'border-line-1 text-text-3 hover:border-accent',
+                            )}
+                          >
+                            {status === 'done' ? (
+                              <CheckCircle2 size={13} />
+                            ) : status === 'missed' ? (
+                              <XCircle size={13} />
+                            ) : (
+                              <span className="text-[10px]">—</span>
+                            )}
+                            {noteText.trim() && (
+                              <span
+                                aria-label="有备注"
+                                className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-accent ring-1 ring-white"
+                              />
+                            )}
+                          </button>
+                          {tierRules.length > 0 && status === 'done' && (
+                            <select
+                              value={rec.selectedRuleId ?? ''}
+                              onChange={(e) =>
+                                void updateCheckInRecord(rec, {
+                                  selectedRuleId: e.target.value || null,
+                                })
+                              }
+                              title="计分档位"
+                              className="w-[72px] rounded border border-line-1 bg-surface-0 px-0.5 py-0.5 text-[10px] text-text-2"
+                            >
+                              <option value="">档位</option>
+                              {tierRules.map((r) => (
+                                <option key={r.id} value={r.id}>
+                                  {r.name}
+                                </option>
+                              ))}
+                            </select>
                           )}
-                        >
-                          {status === 'done' ? (
-                            <CheckCircle2 size={13} />
-                          ) : status === 'missed' ? (
-                            <XCircle size={13} />
-                          ) : (
-                            <span className="text-[10px]">—</span>
-                          )}
-                          {noteText.trim() && (
-                            <span
-                              aria-label="有备注"
-                              className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-accent ring-1 ring-white"
-                            />
-                          )}
-                        </button>
+                        </div>
                       ) : (
                         <span className="text-text-3">·</span>
                       )}
@@ -1111,6 +1205,8 @@ function NewCheckInTaskModal({
   // 自定义：选中的天（yyyy-MM-dd）
   const [selectedDays, setSelectedDays] = useState<Set<string>>(new Set())
   const [note, setNote] = useState('')
+  // v20：本任务适用的打卡规则（默认全选启用项）
+  const [ruleIds, setRuleIds] = useState<string[]>([])
 
   useMemo(() => {
     if (!open) return
@@ -1125,6 +1221,11 @@ function NewCheckInTaskModal({
     setToText('')
     setSelectedDays(new Set())
     setNote('')
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    void defaultCheckInRuleIds().then(setRuleIds)
   }, [open])
 
   const rangeDays: Date[] = useMemo(() => {
@@ -1201,6 +1302,7 @@ function NewCheckInTaskModal({
       cadenceLabel,
       memberIds,
       days,
+      ruleIds,
       activeStudents: students,
     })
     onClose()
@@ -1275,6 +1377,12 @@ function NewCheckInTaskModal({
               { value: 'course', label: '指定课程' },
             ]}
           />
+        </Field>
+        <Field label="适用规则">
+          <RulePicker scope="checkin" value={ruleIds} onChange={setRuleIds} />
+          <p className="mt-1 text-[11px] text-text-3">
+            规则统一在「积分规则 → 打卡规则」里维护，这里只做引用增减。
+          </p>
         </Field>
         {scope === 'group' && (
           <Field label="选择班课">
@@ -1375,256 +1483,6 @@ function NewCheckInTaskModal({
             rows={3}
           />
         </Field>
-      </div>
-    </Modal>
-  )
-}
-
-// ============================================================
-// 规则视图
-// ============================================================
-
-const METRIC_LABEL: Record<PointRuleCondition['metric'], string> = {
-  checkin_count: '累计打卡次数',
-  consecutive_days: '连续打卡天数',
-  on_time_rate: '准时率(%)',
-  all_done: '本批次全部完成',
-}
-const OP_LABEL: Record<PointRuleCondition['operator'], string> = {
-  '>=': '≥',
-  '>': '>',
-  '==': '=',
-}
-
-function RulesView({ rules }: { rules: PointRule[] }) {
-  const [newOpen, setNewOpen] = useState(false)
-  const [editing, setEditing] = useState<PointRule | null>(null)
-
-  function openNew() {
-    setEditing(null)
-    setNewOpen(true)
-  }
-  function openEdit(r: PointRule) {
-    setEditing(r)
-    setNewOpen(true)
-  }
-  async function handleToggle(r: PointRule) {
-    await db.pointRules.put(touch({ ...r, enabled: !r.enabled }))
-  }
-  async function handleDelete(r: PointRule) {
-    if (!confirm(`删除规则「${r.name}」？`)) return
-    await db.pointRules.put(markDeleted(r))
-  }
-
-  return (
-    <Card>
-      <CardHeader
-        title="积分规则"
-        subtitle="基础分（每次打卡奖励）+ 条件奖励（满足条件时额外加分）"
-        action={
-          <Button variant="primary" size="sm" onClick={openNew}>
-            <Plus size={13} /> 新建规则
-          </Button>
-        }
-      />
-      {rules.length === 0 ? (
-        <EmptyState
-          icon={<Coins size={22} />}
-          title="还没有积分规则"
-          description="先建一个「基础分」规则，默认奖励 1 积分"
-          action={
-            <Button onClick={openNew}>
-              <Plus size={13} /> 新建规则
-            </Button>
-          }
-        />
-      ) : (
-        <ul className="divide-y divide-line-1">
-          {rules.map((r) => (
-            <li
-              key={r.id}
-              className={cn(
-                'group flex items-start gap-3 px-4 py-3',
-                !r.enabled && 'opacity-60',
-              )}
-            >
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-accent">
-                <Coins size={16} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-text-1">{r.name}</span>
-                  <Badge variant={r.kind === 'base' ? 'primary' : 'success'}>
-                    {r.kind === 'base' ? '基础分' : '条件加分'}
-                  </Badge>
-                  <Badge>+{r.points}</Badge>
-                  {!r.enabled && <Badge variant="warning">已停用</Badge>}
-                </div>
-                <p className="mt-1 text-[12px] text-text-2">
-                  {r.kind === 'base'
-                    ? `每次「已打卡」自动加 ${r.points} 积分`
-                    : r.condition
-                      ? `当 ${METRIC_LABEL[r.condition.metric]} ${OP_LABEL[r.condition.operator]} ${r.condition.value} 时额外加 ${r.points} 积分`
-                      : '条件未配置'}
-                </p>
-              </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <Button size="sm" variant="ghost" onClick={() => void handleToggle(r)}>
-                  {r.enabled ? '停用' : '启用'}
-                </Button>
-                <button
-                  type="button"
-                  onClick={() => openEdit(r)}
-                  className="hidden h-7 w-7 items-center justify-center rounded-md text-text-3 hover:bg-surface-2 hover:text-text-1 group-hover:flex"
-                  title="编辑"
-                >
-                  <Pencil size={13} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleDelete(r)}
-                  className="hidden h-7 w-7 items-center justify-center rounded-md text-text-3 hover:bg-money-out/10 hover:text-money-out group-hover:flex"
-                  title="删除"
-                >
-                  <Trash2 size={13} />
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <RuleModal
-        open={newOpen}
-        rule={editing}
-        onClose={() => setNewOpen(false)}
-      />
-    </Card>
-  )
-}
-
-function RuleModal({
-  open,
-  rule,
-  onClose,
-}: {
-  open: boolean
-  rule: PointRule | null
-  onClose: () => void
-}) {
-  const [name, setName] = useState('')
-  const [kind, setKind] = useState<'base' | 'bonus'>('base')
-  const [points, setPoints] = useState('1')
-  const [metric, setMetric] = useState<PointRuleCondition['metric']>('checkin_count')
-  const [op, setOp] = useState<PointRuleCondition['operator']>('>=')
-  const [value, setValue] = useState('5')
-
-  useMemo(() => {
-    if (!open) return
-    setName(rule?.name ?? '')
-    setKind(rule?.kind ?? 'base')
-    setPoints(String(rule?.points ?? 1))
-    if (rule?.condition) {
-      setMetric(rule.condition.metric)
-      setOp(rule.condition.operator)
-      setValue(String(rule.condition.value))
-    } else {
-      setMetric('checkin_count')
-      setOp('>=')
-      setValue('5')
-    }
-  }, [open, rule])
-
-  async function handleSave() {
-    const payload = {
-      name: name.trim() || (kind === 'base' ? '基础分' : '条件加分'),
-      kind,
-      points: Number(points) || 0,
-      enabled: rule?.enabled ?? true,
-      order: rule?.order ?? 100,
-      condition:
-        kind === 'bonus'
-          ? {
-              metric,
-              operator: op,
-              value: Number(value) || 0,
-            }
-          : null,
-    }
-    if (rule) {
-      await db.pointRules.put(touch({ ...rule, ...payload }))
-    } else {
-      await db.pointRules.put(withSyncFields<PointRule>({ ...payload, createdAt: Date.now() }))
-    }
-    onClose()
-  }
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title={rule ? '编辑规则' : '新建规则'}
-      footer={
-        <>
-          <Button onClick={onClose}>取消</Button>
-          <Button variant="primary" onClick={() => void handleSave()}>
-            保存
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <Field label="规则名称">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：基础分 / 全勤奖" />
-        </Field>
-        <Field label="类型">
-          <SegmentedControl
-            value={kind}
-            onChange={(v) => setKind(v as 'base' | 'bonus')}
-            options={[
-              { value: 'base', label: '基础分（每次打卡）' },
-              { value: 'bonus', label: '条件加分（额外）' },
-            ]}
-          />
-        </Field>
-        <Field label="加分">
-          <Input
-            type="number"
-            value={points}
-            onChange={(e) => setPoints(e.target.value)}
-          />
-        </Field>
-        {kind === 'bonus' && (
-          <>
-            <Field label="条件指标">
-              <Select value={metric} onChange={(e) => setMetric(e.target.value as PointRuleCondition['metric'])}>
-                {Object.entries(METRIC_LABEL).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="比较方式">
-                <Select value={op} onChange={(e) => setOp(e.target.value as PointRuleCondition['operator'])}>
-                  {Object.entries(OP_LABEL).map(([k, v]) => (
-                    <option key={k} value={k}>
-                      {v}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field label="阈值">
-                <Input
-                  type="number"
-                  value={value}
-                  onChange={(e) => setValue(e.target.value)}
-                />
-              </Field>
-            </div>
-          </>
-        )}
       </div>
     </Modal>
   )

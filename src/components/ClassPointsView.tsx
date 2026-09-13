@@ -31,35 +31,40 @@ import { cn } from '@/lib/utils'
 import type { PointBalance } from '@/lib/points'
 import {
   addStudentsToActivity,
-  awardedPoints,
-  cloneDefaultClassRules,
+  defaultClassRuleIds,
   deleteClassActivity,
-  describeRuleCondition,
   ensureTodayClassActivities,
   previewPassPoints,
   rankOf,
+  resolveClassRules,
   setActivityStatus,
+  setActivityTier,
+  tierRules,
+  type ResolvedClassRule,
 } from '@/lib/classPoints'
 import type {
   ClassActivity,
   ClassActivityRecord,
-  ClassActivityRule,
-  ClassRuleCondition,
   Group,
+  PointRule,
   Student,
 } from '@/lib/types'
-import { CLASS_RULE_CONDITION_LABEL, conditionNeedsRank } from '@/lib/types'
+import { describeClassRuleCondition, RULE_MODE_LABEL } from '@/lib/types'
+import { RulePicker } from '@/components/RulePicker'
 
 /**
- * 课堂积分视图（v17）
+ * 课堂积分视图（v20）
  * ------------------------------------------------------------
- * 从独立页面合并进「打卡与积分」，作为第四个 Tab。
+ * 从独立页面合并进「打卡与积分」，作为「课堂积分」Tab。
  * 相对旧版的改动：
- *  - 关联对象由「课程」改为「班课」（下拉展示班课名，不再是重复的科目名）
- *  - 修复「第一个过关额外加分」永不生效的计分 bug（名次恒为 0）
- *  - 学生列表按加入顺序稳定排列，已过关的原地标记名次，不跳动
- *  - 支持撤销/改判，撤销后名次自动前移、额外分补发给新的第一名
- *  - 按班课排课时间，当天自动生成活动（含学生名单与上次的规则）
+ *  - 计分规则全部集中在「积分规则 → 课堂规则」页维护，活动只通过 ruleIds 引用；
+ *    新建活动不再内嵌可编辑的规则表单，改为引用规则库（可多选）。
+ *  - 规则支持两种模式并存：
+ *      · auto（自动累加）：过关/未过关/名次达标的学生自动加分
+ *      · tier（手动档位）：逐人判档，如「背诵熟练 +1 / 不熟练 +0.5」
+ *  - 学生行在「已过/未过」状态下出现档位下拉，选中即记分到 selectedRuleId。
+ *  - 名次仅用于展示与名次类规则，不再作为唯一计分依据。
+ *  - 按班课排课时间，当天自动生成活动（沿用当前启用的课堂规则）。
  */
 export default function ClassPointsView() {
   const activities = useLiveQuery(() => db.classActivities.toArray(), [])
@@ -68,6 +73,7 @@ export default function ClassPointsView() {
   const groups = useLiveQuery(() => db.groups.toArray(), [])
   const groupMembers = useLiveQuery(() => db.groupMembers.toArray(), [])
   const ledgers = useLiveQuery(() => db.pointLedgers.toArray(), [])
+  const pointRules = useLiveQuery(() => db.pointRules.toArray(), [])
 
   const [showCreate, setShowCreate] = useState(false)
   const autoRan = useRef(false)
@@ -99,6 +105,10 @@ export default function ClassPointsView() {
     () => (groups ?? []).filter((g) => !g.deletedAt),
     [groups],
   )
+  const liveRules: PointRule[] = useMemo(
+    () => (pointRules ?? []).filter((r) => !r.deletedAt),
+    [pointRules],
+  )
 
   const studentMap = useMemo(
     () => new Map(liveStudents.map((s) => [s.id, s])),
@@ -118,6 +128,13 @@ export default function ClassPointsView() {
     }
     return map
   }, [groupMembers])
+
+  // 每个活动解析出的规则（库规则引用 or 旧版内嵌规则），供计分与展示共用
+  const ruleMap = useMemo(() => {
+    const m = new Map<string, ResolvedClassRule[]>()
+    for (const a of liveActivities) m.set(a.id, resolveClassRules(a, liveRules))
+    return m
+  }, [liveActivities, liveRules])
 
   // 积分余额：直接由流水汇总，避免逐学生异步查询
   const balances = useMemo(() => {
@@ -153,7 +170,15 @@ export default function ClassPointsView() {
     record: ClassActivityRecord,
     status: 'pending' | 'pass' | 'fail',
   ) {
-    await setActivityStatus(activity, record, status, liveRecords)
+    await setActivityStatus(activity, record, status, liveRecords, ruleMap.get(activity.id) ?? [])
+  }
+
+  async function handleTier(
+    activity: ClassActivity,
+    record: ClassActivityRecord,
+    ruleId: string | null,
+  ) {
+    await setActivityTier(activity, record, ruleId, liveRecords, ruleMap.get(activity.id) ?? [])
   }
 
   async function handleAddStudents(activity: ClassActivity) {
@@ -183,7 +208,7 @@ export default function ClassPointsView() {
       <Card>
         <CardHeader
           title="课堂积分"
-          subtitle="课上检查背诵等场景，按自定义规则记录积分"
+          subtitle="课上检查背诵等场景，按「积分规则 → 课堂规则」记录积分"
           action={
             <Button variant="primary" size="sm" onClick={() => setShowCreate(true)}>
               <Plus size={13} /> 新建活动
@@ -192,7 +217,7 @@ export default function ClassPointsView() {
         />
         <div className="px-4 pb-3 text-[12px] text-text-3 flex items-center gap-1.5">
           <Zap size={12} className="text-accent" />
-          班课有排课时会按当天自动生成活动（沿用该班课上一次的计分规则），也可手动新建
+          班课有排课时会按当天自动生成活动（沿用当前启用的课堂规则），也可手动新建
         </div>
       </Card>
 
@@ -208,11 +233,13 @@ export default function ClassPointsView() {
             key={activity.id}
             activity={activity}
             records={recordsOf(activity.id)}
+            rules={ruleMap.get(activity.id) ?? []}
             studentMap={studentMap}
             groupMap={groupMap}
             balances={balances}
             isToday={activity.activityDate === todayStart}
             onStatus={handleStatus}
+            onTier={handleTier}
             onAddStudents={handleAddStudents}
             onDelete={handleDelete}
           />
@@ -236,16 +263,19 @@ export default function ClassPointsView() {
 function ActivityCard({
   activity,
   records,
+  rules,
   studentMap,
   groupMap,
   balances,
   isToday,
   onStatus,
+  onTier,
   onAddStudents,
   onDelete,
 }: {
   activity: ClassActivity
   records: ClassActivityRecord[]
+  rules: ResolvedClassRule[]
   studentMap: Map<string, Student>
   groupMap: Map<string, Group>
   balances: Map<string, PointBalance>
@@ -255,12 +285,18 @@ function ActivityCard({
     record: ClassActivityRecord,
     status: 'pending' | 'pass' | 'fail',
   ) => void
+  onTier: (
+    activity: ClassActivity,
+    record: ClassActivityRecord,
+    ruleId: string | null,
+  ) => void
   onAddStudents: (activity: ClassActivity) => void
   onDelete: (activity: ClassActivity) => void
 }) {
   const group = activity.groupId ? groupMap.get(activity.groupId) : null
   const passed = records.filter((r) => r.status === 'pass')
   const totalAwarded = records.reduce((s, r) => s + (r.pointsAwarded || 0), 0)
+  const tiers = tierRules(rules)
 
   return (
     <Card>
@@ -298,36 +334,51 @@ function ActivityCard({
         </div>
       </div>
 
-      {/* 计分规则 */}
+      {/* 计分规则（来自规则库引用） */}
       <div className="px-4 pb-3">
         <div className="rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/30 p-3">
           <div className="mb-2 flex items-center gap-1.5">
             <Sparkles size={12} className="text-amber-600" />
             <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
-              计分规则
+              计分规则（引用「积分规则 → 课堂规则」）
             </span>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {activity.rules.map((rule, i) => (
-              <div
-                key={i}
-                className={cn(
-                  'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium',
-                  rule.enabled
-                    ? 'border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/30 dark:text-amber-300'
-                    : 'border-line-1 bg-surface-2 text-text-3 line-through',
-                )}
-              >
-                <span>{rule.name}</span>
-                <span className="text-amber-600 dark:text-amber-400">
-                  {rule.points}分
-                </span>
-                <span className="text-amber-500/70">
-                  · {describeRuleCondition(rule)}
-                </span>
-              </div>
-            ))}
-          </div>
+          {rules.length === 0 ? (
+            <p className="text-[11px] text-text-3">
+              未引用任何规则，请到「积分规则」页新建课堂规则，或在编辑/新建活动处引用。
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {rules.map((r) => (
+                <div
+                  key={r.id}
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium',
+                    r.enabled
+                      ? 'border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/30 dark:text-amber-300'
+                      : 'border-line-1 bg-surface-2 text-text-3 line-through',
+                  )}
+                  title={RULE_MODE_LABEL[r.mode ?? 'auto']}
+                >
+                  <span>{r.name}</span>
+                  <span className="text-amber-600 dark:text-amber-400">{r.points}分</span>
+                  <span className="text-amber-500/70">
+                    · {describeClassRuleCondition({
+                      condition: r.condition ?? 'pass',
+                      rankN: r.rankN,
+                      rankFrom: r.rankFrom,
+                      rankTo: r.rankTo,
+                    })}
+                  </span>
+                  {r.mode === 'tier' && (
+                    <span className="rounded bg-amber-200 px-1 text-[9px] text-amber-800 dark:bg-amber-800/50 dark:text-amber-200">
+                      档位
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -355,7 +406,7 @@ function ActivityCard({
               const rank = isPass ? rankOf(records, rec.studentId) : 0
               const preview =
                 rec.status === 'pending'
-                  ? previewPassPoints(activity, records, rec.studentId)
+                  ? previewPassPoints(activity, rules, records, rec.studentId)
                   : 0
 
               return (
@@ -400,7 +451,7 @@ function ActivityCard({
                     </div>
                   </div>
 
-                  <div className="flex shrink-0 items-center gap-1.5">
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
                     {rec.status === 'pending' && (
                       <>
                         {preview > 0 && (
@@ -423,6 +474,25 @@ function ActivityCard({
                           <XCircle size={13} /> 未过关
                         </Button>
                       </>
+                    )}
+
+                    {/* 手动档位选择：已过关/未过关时显示 */}
+                    {tiers.length > 0 && rec.status !== 'pending' && (
+                      <Select
+                        value={rec.selectedRuleId ?? ''}
+                        onChange={(e) =>
+                          onTier(activity, rec, e.target.value || null)
+                        }
+                        className="h-7 w-28 text-[12px]"
+                        title="选择计分档位"
+                      >
+                        <option value="">选择档位</option>
+                        {tiers.map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.name} +{t.points}
+                          </option>
+                        ))}
+                      </Select>
                     )}
 
                     {isPass && (
@@ -479,7 +549,7 @@ function ActivityCard({
 }
 
 // ============================================================
-// 新建活动弹窗
+// 新建活动弹窗（v20：引用规则库，不再内嵌编辑规则）
 // ============================================================
 
 function CreateActivityModal({
@@ -496,7 +566,8 @@ function CreateActivityModal({
   const [title, setTitle] = useState('')
   const [note, setNote] = useState('')
   const [groupId, setGroupId] = useState('')
-  const [rules, setRules] = useState<ClassActivityRule[]>(cloneDefaultClassRules())
+  // v20：本活动引用的课堂规则（默认全选启用项）
+  const [ruleIds, setRuleIds] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -504,7 +575,7 @@ function CreateActivityModal({
     setTitle('')
     setNote('')
     setGroupId('')
-    setRules(cloneDefaultClassRules())
+    void defaultClassRuleIds().then(setRuleIds)
   }, [open])
 
   // 选班课时，若还没填名称，自动带上班课名
@@ -531,9 +602,9 @@ function CreateActivityModal({
         activityDate: startOfDay(new Date()).getTime(),
         auto: false,
         sourceCourseId: null,
-        rules: rules
-          .filter((r) => r.name.trim() && r.points > 0)
-          .map((r) => ({ ...r, name: r.name.trim() })),
+        // 新活动只引用规则库，不再内嵌可编辑规则
+        ruleIds,
+        rules: [],
         note: note.trim(),
         createdAt: now,
       })
@@ -553,6 +624,7 @@ function CreateActivityModal({
               checkedAt: null,
               createdAt: now,
               ledgerId: null,
+              selectedRuleId: null,
             }),
           ),
         )
@@ -561,34 +633,6 @@ function CreateActivityModal({
     } finally {
       setSaving(false)
     }
-  }
-
-  function addRule() {
-    setRules([...rules, { name: '', points: 1, condition: 'pass', enabled: true }])
-  }
-
-  function removeRule(idx: number) {
-    setRules(rules.filter((_, i) => i !== idx))
-  }
-
-  function updateRule(idx: number, field: keyof ClassActivityRule, value: unknown) {
-    const next = [...rules]
-    next[idx] = { ...next[idx]!, [field]: value } as ClassActivityRule
-    setRules(next)
-  }
-
-  /** 切换条件时补齐名次参数的默认值，保证保存出的规则字段完整 */
-  function changeCondition(idx: number, condition: ClassRuleCondition) {
-    const next = [...rules]
-    const rule = { ...next[idx]!, condition } as ClassActivityRule
-    if (conditionNeedsRank(condition) === 'single') {
-      rule.rankN = rule.rankN ?? 1
-    } else if (conditionNeedsRank(condition) === 'range') {
-      rule.rankFrom = rule.rankFrom ?? 1
-      rule.rankTo = rule.rankTo ?? rule.rankFrom
-    }
-    next[idx] = rule
-    setRules(next)
   }
 
   return (
@@ -624,132 +668,12 @@ function CreateActivityModal({
           />
         </Field>
 
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-[13px] font-medium text-text-1">计分规则</span>
-            <Button variant="ghost" size="sm" onClick={addRule}>
-              <Plus size={13} /> 添加规则
-            </Button>
-          </div>
-          <div className="space-y-2">
-            {rules.map((rule, idx) => (
-              <div
-                key={idx}
-                className="flex flex-wrap items-center gap-2 rounded-lg border border-line-1 bg-surface-0 p-2.5"
-              >
-                <button
-                  type="button"
-                  onClick={() => updateRule(idx, 'enabled', !rule.enabled)}
-                  title={rule.enabled ? '已启用，点击停用' : '已停用，点击启用'}
-                  className={cn(
-                    'flex h-6 w-6 shrink-0 items-center justify-center rounded-md border',
-                    rule.enabled
-                      ? 'border-done/40 bg-done/10 text-done'
-                      : 'border-line-1 bg-surface-1 text-text-3',
-                  )}
-                >
-                  <CheckCircle2 size={13} />
-                </button>
-                <Input
-                  value={rule.name}
-                  onChange={(e) => updateRule(idx, 'name', e.target.value)}
-                  placeholder="规则名称"
-                  className={cn('min-w-[110px] flex-1', !rule.enabled && 'opacity-60')}
-                />
-                <div className="flex shrink-0 items-center gap-1">
-                  <Input
-                    type="number"
-                    min={0}
-                    value={rule.points}
-                    onChange={(e) =>
-                      updateRule(idx, 'points', Number(e.target.value))
-                    }
-                    className="w-16"
-                  />
-                  <span className="text-[12px] text-text-3">分</span>
-                </div>
-                <Select
-                  value={rule.condition}
-                  onChange={(e) => changeCondition(idx, e.target.value as ClassRuleCondition)}
-                  className="w-36 shrink-0"
-                >
-                  {(Object.keys(CLASS_RULE_CONDITION_LABEL) as ClassRuleCondition[]).map((c) => (
-                    <option key={c} value={c}>
-                      {CLASS_RULE_CONDITION_LABEL[c]}
-                    </option>
-                  ))}
-                </Select>
-                {conditionNeedsRank(rule.condition) === 'single' && (
-                  <div className="flex shrink-0 items-center gap-1">
-                    <span className="text-[12px] text-text-3">第</span>
-                    <Input
-                      type="number"
-                      min={1}
-                      value={rule.rankN ?? 1}
-                      onChange={(e) =>
-                        updateRule(idx, 'rankN', Math.max(1, Number(e.target.value) || 1))
-                      }
-                      className="w-14"
-                    />
-                    <span className="text-[12px] text-text-3">名</span>
-                  </div>
-                )}
-                {conditionNeedsRank(rule.condition) === 'range' && (
-                  <div className="flex shrink-0 items-center gap-1">
-                    <span className="text-[12px] text-text-3">第</span>
-                    <Input
-                      type="number"
-                      min={1}
-                      value={rule.rankFrom ?? 1}
-                      onChange={(e) =>
-                        updateRule(idx, 'rankFrom', Math.max(1, Number(e.target.value) || 1))
-                      }
-                      className="w-14"
-                    />
-                    <span className="text-[12px] text-text-3">~</span>
-                    <Input
-                      type="number"
-                      min={1}
-                      value={rule.rankTo ?? rule.rankFrom ?? 1}
-                      onChange={(e) =>
-                        updateRule(idx, 'rankTo', Math.max(1, Number(e.target.value) || 1))
-                      }
-                      className="w-14"
-                    />
-                    <span className="text-[12px] text-text-3">名</span>
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={() => removeRule(idx)}
-                  className="shrink-0 text-text-3 hover:text-money-due"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
-          <div className="mt-2 space-y-0.5 text-[11px] text-text-3">
-            <div>
-              <span className="font-medium text-text-2">过关者都加</span>
-              ：每个过关的学生都加（如「过关 +1」）
-            </div>
-            <div>
-              <span className="font-medium text-text-2">未过关者加</span>
-              ：未过关的学生也加（如「参与鼓励 +1」）
-            </div>
-            <div>
-              <span className="font-medium text-text-2">按名次加</span>
-              ：仅第一个 / 前 N 名 / 第 N 名 / 第 X~Y 名，名次可自定义
-            </div>
-            <div className="pt-0.5">
-              示例：第 1 名过关合计{' '}
-              <span className="font-medium text-text-2">{awardedPoints(rules, 1, 'pass')}</span> 分
-              · 未过关合计{' '}
-              <span className="font-medium text-text-2">{awardedPoints(rules, 0, 'fail')}</span> 分
-            </div>
-          </div>
-        </div>
+        <Field label="计分规则">
+          <RulePicker scope="class" value={ruleIds} onChange={setRuleIds} />
+          <p className="mt-1 text-[11px] text-text-3">
+            规则统一在「积分规则 → 课堂规则」里维护，这里只做引用增减。
+          </p>
+        </Field>
 
         <div className="flex items-center justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>

@@ -1,16 +1,20 @@
 /**
- * 课堂积分业务逻辑（v17）
+ * 课堂积分业务逻辑（v20）
  * ------------------------------------------------------------
- * 场景：课上检查背诵/听写等，教师点「过关 / 未过关」，按自定义规则自动计分。
+ * 场景：课上检查背诵/听写等，教师标记「过关 / 未过关」，按规则自动计分。
  *
  * 设计要点：
- *  1) 计分复用 pointLedgers 流水（与打卡积分同一账户体系），
- *     每条课堂加分都记下 ledgerId，撤销/改判时精确冲销，不留残分。
- *  2) 名次与积分「整体重算」：任何一次标记/改判/撤销后，
- *     调用 resettleActivity 按过关时间升序重排名次并重算所有人得分，
- *     保证「第一个过关额外加分」始终落在真正的第一名身上。
- *  3) 自动生成：班课按每周固定时段（Group.weekday/startTimeMin）或当天已排课程，
- *     在当天首次进入课堂积分页时自动建好活动与学生名单。
+ *  1) **规则集中在「积分规则」页**（pointRules，scope='class'）。活动通过 ruleIds 引用，
+ *     同一活动可混用「自动累加」与「手动档位」两类规则：
+ *       - auto：达标学生自动加分（如「过关 +1」「第一个过关额外 +1」「前 3 名 +2」）
+ *       - tier：标记学生时手动选一条（如「背诵熟练 +1 / 不熟练 +0.5」），
+ *               选择结果记在 ClassActivityRecord.selectedRuleId 上
+ *  2) 计分复用 pointLedgers 流水（与打卡积分同一账户体系），
+ *     每条课堂加分都记下 ledgerId，撤销/改判/换档时精确冲销，不留残分。
+ *  3) 名次与积分「整体重算」：任何一次标记/改判/撤销后调用 resettleActivity，
+ *     按过关时间升序重排名次并重算所有人得分（名次仅用于展示与名次类规则）。
+ *  4) 兼容旧数据：没有 ruleIds 的历史活动仍按内嵌 rules 计分，行为完全不变。
+ *  5) 自动生成：班课按排课当天自动建活动（用当前启用的课堂规则）。
  */
 import { startOfDay } from 'date-fns'
 import { db, markDeleted, touch, withSyncFields } from './db'
@@ -18,18 +22,84 @@ import { adjustPoints } from './points'
 import type {
   ClassActivity,
   ClassActivityRecord,
-  ClassActivityRule,
+  ClassRuleCondition,
+  ClassRuleConditionSpec,
+  PointRule,
 } from './types'
-import { CLASS_RULE_CONDITION_LABEL } from './types'
 
-/** 新建课堂活动时的默认计分规则：过关 +1，第一个过关再 +1 */
-export const DEFAULT_CLASS_RULES: ClassActivityRule[] = [
-  { name: '过关', points: 1, condition: 'pass', enabled: true },
-  { name: '第一个额外', points: 1, condition: 'first', enabled: true },
+/** 归一化后的课堂规则：库规则引用 or 旧版内嵌规则，引擎只认这个形状 */
+export interface ResolvedClassRule {
+  /** 库规则 id；旧版内嵌规则用 `legacy:<index>` */
+  id: string
+  name: string
+  points: number
+  mode: 'auto' | 'tier'
+  /** 状态/名次条件；null = 所有过关学生都加 */
+  condition: ClassRuleCondition | null
+  rankN?: number
+  rankFrom?: number
+  rankTo?: number
+  enabled: boolean
+  /** 是否来自规则库（false = 旧版内嵌规则） */
+  fromLibrary: boolean
+}
+
+/** 新建课堂活动时的默认计分规则（库为空时补齐用） */
+export const DEFAULT_CLASS_RULES: ClassRuleConditionSpec[] = [
+  { condition: 'pass' },
+  { condition: 'first' },
 ]
+export const DEFAULT_CLASS_RULE_NAMES = ['过关', '第一个额外']
 
-export function cloneDefaultClassRules(): ClassActivityRule[] {
-  return DEFAULT_CLASS_RULES.map((r) => ({ ...r }))
+/**
+ * 解析一个活动实际生效的规则列表。
+ *  - 有 ruleIds → 从规则库取（保持活动里的顺序，缺失/已删的跳过）
+ *  - 无 ruleIds → 回退到旧版内嵌 rules（历史活动兼容）
+ */
+export function resolveClassRules(
+  activity: ClassActivity,
+  lib: PointRule[],
+): ResolvedClassRule[] {
+  const ids = activity.ruleIds
+  if (ids && ids.length > 0) {
+    const map = new Map(lib.map((r) => [r.id, r]))
+    const out: ResolvedClassRule[] = []
+    for (const id of ids) {
+      const r = map.get(id)
+      if (!r || r.deletedAt) continue
+      const spec = r.classCondition
+      out.push({
+        id: r.id,
+        name: r.name,
+        points: r.points,
+        mode: r.mode ?? 'auto',
+        condition: spec?.condition ?? null,
+        rankN: spec?.rankN,
+        rankFrom: spec?.rankFrom,
+        rankTo: spec?.rankTo,
+        enabled: r.enabled,
+        fromLibrary: true,
+      })
+    }
+    return out
+  }
+  return (activity.rules ?? []).map((r, i) => ({
+    id: `legacy:${i}`,
+    name: r.name,
+    points: r.points,
+    mode: 'auto' as const,
+    condition: r.condition,
+    rankN: r.rankN,
+    rankFrom: r.rankFrom,
+    rankTo: r.rankTo,
+    enabled: r.enabled,
+    fromLibrary: false,
+  }))
+}
+
+/** 取活动里所有处于「手动档位」模式的启用规则 */
+export function tierRules(rules: ResolvedClassRule[]): ResolvedClassRule[] {
+  return rules.filter((r) => r.mode === 'tier' && r.enabled)
 }
 
 // ============================================================
@@ -37,15 +107,12 @@ export function cloneDefaultClassRules(): ClassActivityRule[] {
 // ============================================================
 
 /**
- * 判断一条规则是否命中某学生的状态 / 名次。
+ * 判断一条「自动累加」规则是否命中某学生的状态 / 名次。
  * @param rank 过关名次（1 起）；未过关或待检查时为 0
- * @param status 该学生的当前状态
  */
-function condHit(
-  rule: ClassActivityRule,
-  rank: number,
-  status: 'pass' | 'fail',
-): boolean {
+function condHit(rule: ResolvedClassRule, rank: number, status: 'pass' | 'fail'): boolean {
+  // 无条件：所有过关学生都加
+  if (rule.condition === null) return status === 'pass'
   if (rule.condition === 'fail') return status === 'fail'
   if (status !== 'pass' || rank < 1) return false
   switch (rule.condition) {
@@ -70,36 +137,27 @@ function condHit(
 /**
  * 计算某学生在某状态 / 名次下应得积分。
  * @param rank 过关名次，从 1 开始（1 = 第一个过关）；未过关 / 待检查传 0
- * @param status 学生状态，默认按「过关」计算（便于预览第一个过关的得分）
+ * @param status 学生状态，默认按「过关」计算
+ * @param selectedRuleId 该学生选中的档位规则 id（mode='tier' 的规则据此计分）
  */
 export function awardedPoints(
-  rules: ClassActivityRule[],
+  rules: ResolvedClassRule[],
   rank: number,
   status: 'pass' | 'fail' = 'pass',
+  selectedRuleId?: string | null,
 ): number {
   let total = 0
   for (const r of rules) {
     if (!r.enabled) continue
+    if (r.mode === 'tier') {
+      // 档位规则：老师选中的那条生效（待检查不计分）
+      if (status !== 'pass' && status !== 'fail') continue
+      if (selectedRuleId && selectedRuleId === r.id) total += r.points
+      continue
+    }
     if (condHit(r, rank, status)) total += r.points
   }
   return total
-}
-
-/** 把规则条件描述成中文短句（用于卡片上的规则标签，含名次参数） */
-export function describeRuleCondition(rule: ClassActivityRule): string {
-  switch (rule.condition) {
-    case 'topN':
-      return `前 ${Math.max(1, rule.rankN ?? 1)} 名过关`
-    case 'rank':
-      return `第 ${Math.max(1, rule.rankN ?? 1)} 名过关`
-    case 'range': {
-      const from = Math.max(1, rule.rankFrom ?? 1)
-      const to = Math.max(from, rule.rankTo ?? from)
-      return `第 ${from}~${to} 名过关`
-    }
-    default:
-      return CLASS_RULE_CONDITION_LABEL[rule.condition] ?? rule.condition
-  }
 }
 
 /** 已过关记录按「过关时间升序」排列：index 0 即第一个过关的学生 */
@@ -116,22 +174,23 @@ export function rankOf(records: ClassActivityRecord[], studentId: string): numbe
 }
 
 /**
- * 预览：若此刻把某学生标为「过关」，他能拿多少分。
+ * 预览：若此刻把某学生标为「过关」，他能拿多少分（不含档位选择）。
  * 用于学生行上的「+N 分」提示，避免老师误判规则。
  */
 export function previewPassPoints(
   activity: ClassActivity,
+  rules: ResolvedClassRule[],
   records: ClassActivityRecord[],
   studentId: string,
 ): number {
   const siblings = records.filter(
     (r) => r.activityId === activity.id && !r.deletedAt && r.studentId !== studentId,
   )
-  return awardedPoints(activity.rules, passedOrder(siblings).length + 1)
+  return awardedPoints(rules, passedOrder(siblings).length + 1, 'pass', null)
 }
 
 // ============================================================
-// 写入：标记 / 撤销 / 重算
+// 写入：标记 / 撤销 / 换档 / 重算
 // ============================================================
 
 /** 冲销一条积分流水（软删，随同步传播） */
@@ -147,39 +206,47 @@ async function revokeLedger(ledgerId: string | null | undefined): Promise<void> 
  * 先冲销旧流水再按新结果写入（幂等）。
  *
  * @param allRecords 该活动的最新记录集合（调用方负责含刚写入的那条）
+ * @param opts.force   需要强制重算的记录 id（如换档后，即使分值相同也重建流水事由）
  */
 export async function resettleActivity(
   activity: ClassActivity,
   allRecords: ClassActivityRecord[],
+  opts: { rules: ResolvedClassRule[]; force?: Set<string> },
 ): Promise<void> {
+  const rules = opts.rules
   const siblings = allRecords.filter(
     (r) => r.activityId === activity.id && !r.deletedAt,
   )
   const rankMap = new Map(
     passedOrder(siblings).map((r, i) => [r.studentId, i + 1]),
   )
+  const tierName = new Map(tierRules(rules).map((r) => [r.id, r.name]))
 
   const updates: ClassActivityRecord[] = []
   for (const rec of siblings) {
     const rank = rankMap.get(rec.studentId) ?? 0
-    // 过关 → 按名次计分；未过关 → 仅「未过关者加」类条件生效；待检查 → 不计分
+    // 过关 → 按名次计分；未过关 → 仅「未过关者加」/已选档位生效；待检查 → 不计分
     const expected =
       rec.status === 'pass'
-        ? awardedPoints(activity.rules, rank, 'pass')
+        ? awardedPoints(rules, rank, 'pass', rec.selectedRuleId)
         : rec.status === 'fail'
-          ? awardedPoints(activity.rules, 0, 'fail')
+          ? awardedPoints(rules, 0, 'fail', rec.selectedRuleId)
           : 0
     const hasLedger = Boolean(rec.ledgerId)
+    const forced = opts.force?.has(rec.id) ?? false
     // 结果未变化则跳过，避免每次标记都产生新流水
-    if (expected === (rec.pointsAwarded ?? 0) && (expected > 0) === hasLedger) continue
+    if (!forced && expected === (rec.pointsAwarded ?? 0) && (expected > 0) === hasLedger) {
+      continue
+    }
 
     await revokeLedger(rec.ledgerId)
+    const suffix = rec.selectedRuleId ? tierName.get(rec.selectedRuleId) : undefined
     const ledgerId =
-      expected > 0
+      expected !== 0
         ? await adjustPoints(
             rec.studentId,
             expected,
-            `课堂积分 · ${activity.title}`,
+            `课堂积分 · ${activity.title}${suffix ? ` · ${suffix}` : ''}`,
           )
         : null
     updates.push(touch({ ...rec, pointsAwarded: expected, ledgerId }))
@@ -189,13 +256,14 @@ export async function resettleActivity(
 
 /**
  * 设置某学生的状态（过关 / 未过关 / 待检查），随后整体重算名次与积分。
- * 撤销（→ pending）后，后面学生的名次会自动前移，第一名额外分补发给新的第一名。
+ * 撤销（→ pending）后，后面学生的名次会自动前移。
  */
 export async function setActivityStatus(
   activity: ClassActivity,
   record: ClassActivityRecord,
   status: 'pending' | 'pass' | 'fail',
   allRecords: ClassActivityRecord[],
+  rules: ResolvedClassRule[],
 ): Promise<void> {
   const updated: ClassActivityRecord = {
     ...record,
@@ -209,7 +277,35 @@ export async function setActivityStatus(
     ...allRecords.filter((r) => r.id !== record.id && !r.deletedAt),
     updated,
   ]
-  await resettleActivity(activity, merged)
+  await resettleActivity(activity, merged, {
+    rules,
+    force: new Set([updated.id]),
+  })
+}
+
+/**
+ * 设置某学生的「手动档位」（选中的 tier 规则 id；null = 不选），随后重算。
+ * 用于「背诵熟练 +1 / 不熟练 +0.5」这类需要老师逐人判档的场景。
+ */
+export async function setActivityTier(
+  activity: ClassActivity,
+  record: ClassActivityRecord,
+  ruleId: string | null,
+  allRecords: ClassActivityRecord[],
+  rules: ResolvedClassRule[],
+): Promise<void> {
+  const updated: ClassActivityRecord = { ...record, selectedRuleId: ruleId }
+  await db.classActivityRecords.put(touch(updated))
+  // 未标记状态时选档位：视为「过关」，方便先选档再确认
+  if (updated.status === 'pending') {
+    await setActivityStatus(activity, updated, 'pass', allRecords, rules)
+    return
+  }
+  const merged = [
+    ...allRecords.filter((r) => r.id !== record.id && !r.deletedAt),
+    updated,
+  ]
+  await resettleActivity(activity, merged, { rules, force: new Set([updated.id]) })
 }
 
 /** 学生名单：把给定学生加入活动（已存在则跳过），返回新增条数 */
@@ -236,6 +332,7 @@ export async function addStudentsToActivity(
         checkedAt: null,
         createdAt: now,
         ledgerId: null,
+        selectedRuleId: null,
       }),
     )
   if (rows.length > 0) await db.classActivityRecords.bulkPut(rows)
@@ -262,6 +359,43 @@ export async function deleteClassActivity(
 }
 
 // ============================================================
+// 规则库：默认课堂规则补齐
+// ============================================================
+
+/** 课堂规则库为空时补齐默认规则（过关 +1 / 第一个过关额外 +1），保证开箱可用 */
+export async function ensureDefaultClassRules(): Promise<number> {
+  const all = await db.pointRules.toArray()
+  const hasClass = all.some((r) => !r.deletedAt && (r.scope ?? 'checkin') === 'class')
+  if (hasClass) return 0
+  const now = Date.now()
+  const rows = DEFAULT_CLASS_RULES.map((spec, i) =>
+    withSyncFields<PointRule>({
+      name: DEFAULT_CLASS_RULE_NAMES[i] ?? `规则 ${i + 1}`,
+      points: i === 0 ? 1 : 1,
+      scope: 'class',
+      mode: 'auto',
+      condition: null,
+      classCondition: spec,
+      enabled: true,
+      order: i,
+      createdAt: now,
+    }),
+  )
+  await db.pointRules.bulkPut(rows)
+  return rows.length
+}
+
+/** 取当前启用且启用的课堂规则 id 列表（新建活动时的默认适用范围） */
+export async function defaultClassRuleIds(): Promise<string[]> {
+  await ensureDefaultClassRules()
+  const all = await db.pointRules.toArray()
+  return all
+    .filter((r) => !r.deletedAt && (r.scope ?? 'checkin') === 'class' && r.enabled)
+    .sort((a, b) => a.order - b.order)
+    .map((r) => r.id)
+}
+
+// ============================================================
 // 按排课自动生成
 // ============================================================
 
@@ -279,10 +413,7 @@ export interface EnsureClassActivityResult {
  *  1) 已排课程：courses 中 startAt 落在今天、关联班课、状态非 cancelled；
  *  2) 兜底：班课设了每周固定时段且 weekday === 今天（课程还没物化时也能生成）。
  *
- * 去重：同一班课同一天只生成一次；被手动删除过的活动也不再重生
- * （软删记录仍保留 activityDate，作为「已处理」标记）。
- *
- * @param dayAt 以哪一天为准，默认今天
+ * 去重：同一班课同一天只生成一次；被手动删除过的活动也不再重生。
  */
 export async function ensureTodayClassActivities(
   dayAt: number = Date.now(),
@@ -316,6 +447,10 @@ export async function ensureTodayClassActivities(
     if (scheduled.has(g.id)) continue
     if (g.weekday === weekdayToday && g.startTimeMin >= 0) scheduled.add(g.id)
   }
+  if (scheduled.size === 0) return { created: 0, titles: [] }
+
+  // 新建活动使用的规则：当前启用的课堂规则（库为空时补齐默认规则）
+  const ruleIds = await defaultClassRuleIds()
 
   const titles: string[] = []
   for (const gid of scheduled) {
@@ -332,14 +467,6 @@ export async function ensureTodayClassActivities(
       .map((m) => m.studentId)
     if (studentIds.length === 0) continue
 
-    // 规则沿用该班课最近一次活动，确保老师的自定义规则不会被重置
-    const last = activities
-      .filter((a) => a.groupId === gid && !a.deletedAt && a.rules.length > 0)
-      .sort((a, b) => b.createdAt - a.createdAt)[0]
-    const rules = last
-      ? last.rules.map((r) => ({ ...r }))
-      : cloneDefaultClassRules()
-
     const course = courseByGroup.get(gid)
     const now = Date.now()
     const activity = withSyncFields<ClassActivity>({
@@ -349,7 +476,8 @@ export async function ensureTodayClassActivities(
       activityDate: dayStart,
       auto: true,
       sourceCourseId: course?.id ?? null,
-      rules,
+      ruleIds,
+      rules: [],
       note: '',
       createdAt: now,
     })
@@ -365,6 +493,7 @@ export async function ensureTodayClassActivities(
           checkedAt: null,
           createdAt: now,
           ledgerId: null,
+          selectedRuleId: null,
         }),
       ),
     )
