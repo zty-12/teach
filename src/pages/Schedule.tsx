@@ -47,6 +47,7 @@ import {
 import { exportSchedule } from '@/lib/exporters'
 import { revertCompletion, summarizeRevert } from '@/lib/courseCompletion'
 import {
+  completeCoursesWithAttendance,
   completeCourseWithAttendance,
   computePlannedGroupSlots,
   courseTitle,
@@ -100,6 +101,12 @@ export default function SchedulePage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [defaultStart, setDefaultStart] = useState<number | null>(null)
   const [attendanceFor, setAttendanceFor] = useState<Course | null>(null)
+  /**
+   * 批量完成：侧拉 Sheet 里一次选中多节「标为完成」时，
+   * 先弹一次出席选择（这些课同属一个学生 / 班课），确认后套用到全部所选课节。
+   * 单节完成时为 null。
+   */
+  const [batchCompleteFor, setBatchCompleteFor] = useState<Course[] | null>(null)
 
   // 单个课程「一键查看」侧拉 Sheet
   const [courseViewFor, setCourseViewFor] = useState<Course | null>(null)
@@ -470,8 +477,10 @@ export default function SchedulePage() {
         groups={Array.from(groupMap.values())}
         onClose={() => setModalOpen(false)}
         onComplete={async (c) => {
-          await completeCourse(c)
+          // 完成一律先弹「出席选择」：由 AttendanceModal 按实际出席结算
+          setBatchCompleteFor(null)
           setModalOpen(false)
+          setAttendanceFor(c)
         }}
         prefillStudentId={createPrefill.studentId}
         prefillGroupId={createPrefill.groupId}
@@ -489,6 +498,12 @@ export default function SchedulePage() {
           openCreate(start, { studentId, groupId })
         }}
         onToggleDone={(c) => toggleDone(c)}
+        onBatchComplete={(courses) => {
+          // 批量「标为完成」→ 先弹一次出席选择，再统一结算（保留侧拉 Sheet，完成后可见状态刷新）
+          if (courses.length === 0) return
+          setBatchCompleteFor(courses)
+          setAttendanceFor(courses[0])
+        }}
         onOpenGroup={(gid) => setGroupDetailFor(gid)}
       />
 
@@ -522,17 +537,38 @@ export default function SchedulePage() {
 
       <AttendanceModal
         course={attendanceFor}
+        batchCount={batchCompleteFor?.length ?? 1}
         students={Array.from(studentMap.values())}
         groupMembers={liveMembers}
         groups={Array.from(groupMap.values())}
         attendances={liveAttendances}
-        onClose={() => setAttendanceFor(null)}
+        onClose={() => {
+          setAttendanceFor(null)
+          setBatchCompleteFor(null)
+        }}
         onSave={async (courseId, atts) => {
           await persistAttendance(courseId, atts)
         }}
         onComplete={async (course) => {
-          await completeCourse(course)
+          const batch = batchCompleteFor
+          if (batch && batch.length > 1) {
+            // 批量：以「代表课节」刚保存的出席为准，套用到全部所选课节
+            const rep = (await db.courseAttendances.toArray()).filter(
+              (a) => !a.deletedAt && a.courseId === course.id,
+            )
+            const presentByStudent = new Map(rep.map((a) => [a.studentId, a.present]))
+            await completeCoursesWithAttendance(
+              batch,
+              presentByStudent,
+              liveMembers,
+              studentMap,
+              groupMap,
+            )
+          } else {
+            await completeCourse(course)
+          }
           setAttendanceFor(null)
+          setBatchCompleteFor(null)
         }}
       />
     </div>

@@ -26,9 +26,14 @@ npm-debug.log*
 note_v13.py
 rewrite_hybrid.py
 
-# gh-pages 部署临时目录
-.gh-pages-tmp/
-
 # gh-pages 部署临时目录（含 .gh-pages-deploy-v21 这类带后缀的变体）
 .gh-pages-tmp/
 .gh-pages-deploy*/
+
+# 本地调试脚本与构建中转产物（不入库）
+scripts/
+.tmp/
+tmp/
+
+# 工作区本地数据（编辑器/助手缓存，不参与版本管理）
+.workbuddy/

@@ -141,14 +141,22 @@ export async function applyCompletion(
   input: CompletionInput,
 ): Promise<CompletionBreakdown> {
   // 自动补齐班课成员的 student 对象（调用方无需传 allStudents）
-  let { allStudents } = input
+  let { allStudents, student } = input
+  // 1对1：从库里取「最新」学生对象再算。
+  // 调用方常传的是内存快照（如 useLiveQuery 的 studentMap），批量/连续结算时
+  // 第 2 节起会拿到「上一节扣减前」的余额，导致课时只扣一次 —— 这里统一以库为准，
+  // 与班课路径（下面 bulkGet 取最新）保持一致。
+  if (student) {
+    const fresh = await db.students.get(student.id)
+    if (fresh) student = fresh
+  }
   if (!allStudents && input.course.groupId && input.groupMembers.length > 0) {
     const ids = input.groupMembers.map((m) => m.studentId)
     const found = await db.students.bulkGet(ids)
     allStudents = found.filter((s): s is Student => !!s && !s.deletedAt)
   }
 
-  const breakdown = calculateCompletion({ ...input, allStudents })
+  const breakdown = calculateCompletion({ ...input, student, allStudents })
 
   // 1) 更新 Course.feeCents + status='done'
   //    注意：status 一并置为 done，避免调用方再用旧 course 对象覆盖掉刚算好的课酬。
@@ -249,11 +257,14 @@ export async function revertCompletion(courseId: string): Promise<RevertResult> 
 
   // ---------- 1) 归还课时 ----------
   let restoredHours = 0
-  const snapshot = Array.isArray(course.deductedHours) ? course.deductedHours : null
+  // v21 起完成时会写入 deductedHours（可能是空数组：如余额已 0、无预付学生）。
+  // 「字段存在」即代表该课由 v21 之后的逻辑结算过 —— 此时快照就是唯一事实，
+  // 绝不能因为「快照为空」而误走旧数据兜底（否则余额 0 的学生会被白送 1 课时）。
+  const deductionsSnapshot = course.deductedHours
 
-  if (snapshot && snapshot.length > 0) {
-    // 精确路径：按完成时记录的实际扣减量加回
-    for (const d of snapshot) {
+  if (Array.isArray(deductionsSnapshot)) {
+    // 精确路径：按完成时记录的实际扣减量加回（可能为 0）
+    for (const d of deductionsSnapshot) {
       if (!d || !d.studentId || !(d.hours > 0)) continue
       const s = await db.students.get(d.studentId)
       if (!s) continue
@@ -261,7 +272,7 @@ export async function revertCompletion(courseId: string): Promise<RevertResult> 
       restoredHours += d.hours
     }
   } else {
-    // 兼容旧数据（无快照）：按出席重算。
+    // 兼容旧数据（无快照字段）：按出席重算。
     // ⚠ 旧实现用 `before - max(0, before-1)` 求扣减量，会把「余额正好扣到 0」的课
     //   返还成 0 课时 —— 这正是「取消完成没返还课时」的根因。
     //   这里改为「每位出席的预付学生各返还 1 课时」，与扣减口径一致。

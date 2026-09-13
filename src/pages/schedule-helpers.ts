@@ -263,3 +263,54 @@ export async function completeCourseWithAttendance(
     // 课堂活动创建失败不影响课程完成
   }
 }
+
+/**
+ * 批量完成：把「同一次出席选择」套用到多节课，并逐节做完整结算。
+ *
+ * 适用前提：这些课属于同一学生或同一班课（侧拉 Sheet 的批量标记即满足），
+ * 因此出席名单一致 —— 老师在出席弹窗里勾一次，即可套用到全部所选课节。
+ *
+ * 每节课都会：
+ *  1. 按本次选择落库出席（保留既有记录 id，仅翻转 present）；
+ *  2. 走 completeCourseWithAttendance（扣课时 + 写结算 + 自动打卡 + 自动课堂活动）。
+ *
+ * @param presentByStudent studentId → 是否出席；名单中未出现的按「出席」处理
+ * @returns 实际完成并结算的课节数
+ */
+export async function completeCoursesWithAttendance(
+  courses: Course[],
+  presentByStudent: Map<string, boolean>,
+  liveMembers: GroupMember[],
+  studentMap: Map<string, Student>,
+  groupMap: Map<string, Group>,
+): Promise<number> {
+  let done = 0
+  for (const c of courses) {
+    const rosterIds = c.groupId
+      ? liveMembers.filter((m) => m.groupId === c.groupId).map((m) => m.studentId)
+      : c.studentId
+        ? [c.studentId]
+        : []
+    const existing = (await db.courseAttendances.toArray()).filter(
+      (a) => !a.deletedAt && a.courseId === c.id,
+    )
+    const byStudent = new Map(existing.map((a) => [a.studentId, a]))
+    const atts: CourseAttendance[] = rosterIds.map((sid) => {
+      const present = presentByStudent.get(sid) ?? true
+      const prev = byStudent.get(sid)
+      return prev
+        ? touch({ ...prev, present })
+        : withSyncFields<CourseAttendance>({
+            courseId: c.id,
+            studentId: sid,
+            present,
+            attendAt: null,
+            createdAt: Date.now(),
+          })
+    })
+    if (atts.length > 0) await persistAttendance(c.id, atts)
+    await completeCourseWithAttendance(c, liveMembers, studentMap, groupMap)
+    done++
+  }
+  return done
+}

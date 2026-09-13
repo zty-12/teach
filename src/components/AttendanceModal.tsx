@@ -28,6 +28,7 @@ export function AttendanceModal({
   onClose,
   onSave,
   onComplete,
+  batchCount = 1,
 }: {
   course: Course | null
   students: Student[]
@@ -37,6 +38,11 @@ export function AttendanceModal({
   onClose: () => void
   onSave: (courseId: string, atts: CourseAttendance[]) => Promise<void>
   onComplete: (course: Course) => Promise<void>
+  /**
+   * 批量模式：同一次出席选择将套用到 N 节课（这些课同属一个学生 / 班课）。
+   * 默认 1（单节）。>1 时会显示批量提示，并隐藏「仅保存」（批量只保存一节没意义）。
+   */
+  batchCount?: number
 }) {
   const [draft, setDraft] = useState<CourseAttendance[]>([])
   const [error, setError] = useState('')
@@ -129,11 +135,13 @@ export function AttendanceModal({
       footer={
         <>
           <Button onClick={onClose}>取消</Button>
-          <Button variant="secondary" onClick={() => void handleSave()}>
-            仅保存
-          </Button>
+          {batchCount <= 1 && (
+            <Button variant="secondary" onClick={() => void handleSave()}>
+              仅保存
+            </Button>
+          )}
           <Button variant="primary" onClick={() => void handleComplete()}>
-            保存 + 标记完成
+            {batchCount > 1 ? `保存 + 完成 ${batchCount} 节` : '保存 + 标记完成'}
           </Button>
         </>
       }
@@ -142,6 +150,13 @@ export function AttendanceModal({
         {error && (
           <div className="rounded-lg bg-leave-soft px-3 py-2 text-[13px] text-leave">
             {error}
+          </div>
+        )}
+
+        {batchCount > 1 && (
+          <div className="rounded-lg bg-accent-soft px-3 py-2 text-[13px] text-accent-text">
+            批量完成：本次的出席选择将套用到 <span className="font-semibold">{batchCount}</span> 节课
+            （同属一个学生 / 班课）。下方只预览第 1 节，确认后其余课节按同一出席一并结算。
           </div>
         )}
 

@@ -43,6 +43,11 @@ export interface CourseScheduleSheetProps {
   onCreate: (studentId: string | null, groupId: string | null) => void
   /** 快速标记完成（先选出席） */
   onToggleDone: (c: Course) => void
+  /**
+   * 批量「标为完成」：把这些课交给上层弹一次「出席选择」再统一结算。
+   * （本组件不自行结算，避免绕过出席选择）
+   */
+  onBatchComplete: (courses: Course[]) => void
   /** 打开班课详情（仅班课范围可用；学生范围可忽略） */
   onOpenGroup?: (groupId: string) => void
 }
@@ -75,6 +80,7 @@ export function CourseScheduleSheet({
   onEdit,
   onCreate,
   onToggleDone,
+  onBatchComplete,
   onOpenGroup,
 }: CourseScheduleSheetProps) {
   const open = course !== null
@@ -185,8 +191,9 @@ export function CourseScheduleSheet({
   async function batchSetStatus(status: CourseStatus) {
     if (!scope || selected.size === 0) return
     const targets = scope.list.filter((c) => selected.has(c.id))
-    // 撤销完成：先归还课时 / 撤销结算 / 回收自动生成的打卡与课堂活动，再改状态
-    // （不能直接 bulkPut 覆盖，否则课时与自动任务不会回滚）
+
+    // 1) 撤销完成（done → 非 done）：归还课时 / 撤销结算 / 回收自动生成的打卡与课堂活动
+    //    （不能直接 bulkPut 覆盖，否则课时与自动任务不会回滚）
     const reverts = targets.filter((c) => c.status === 'done' && status !== 'done')
     const total: RevertResult = {
       restoredHours: 0,
@@ -201,15 +208,27 @@ export function CourseScheduleSheet({
       total.removedCheckInTasks += r.removedCheckInTasks
       total.removedClassActivities += r.removedClassActivities
     }
-    const rest = targets.filter((c) => !(c.status === 'done' && status !== 'done'))
+
+    // 2) 标记完成（非 done → done）：不在这里直接结算，而是交给上层
+    //    弹一次「出席选择」，按实际出席统一结算（与单节完成同一套流程）
+    const completions = status === 'done' ? targets.filter((c) => c.status !== 'done') : []
+
+    // 3) 其余目标直接改状态（如 pending/cancelled/leave，或本来就已完成）
+    const handled = new Set([...reverts, ...completions].map((c) => c.id))
+    const rest = targets.filter((c) => !handled.has(c.id))
     if (rest.length > 0) {
       const now = Date.now()
       await db.courses.bulkPut(rest.map((c) => ({ ...c, status, updatedAt: now, dirty: 1 })))
     }
+
     setSelected(new Set())
     setSelectMode(false)
+
+    // 先汇报「取消完成」的回滚结果（完成则交由出席弹窗确认，无需再弹提示）
     const msg = summarizeRevert(total)
     if (msg) window.alert(msg)
+
+    if (completions.length > 0) onBatchComplete(completions)
   }
 
   /** 批量彻底删除 */

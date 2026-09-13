@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { addDays, format } from 'date-fns'
 import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { revertCompletion } from '@/lib/courseCompletion'
 import { getHolidayInfo } from '@/lib/holidays'
 import {
   BILLING_RULE_LABEL,
@@ -502,8 +503,37 @@ export function CourseScheduleModal({
     setSaving(true)
     try {
       if (course) {
-        const saved = { ...course, ...buildPayload(form.date, form) }
-        await db.courses.put(touch(saved))
+        const target = form.status
+        const payload = buildPayload(form.date, form)
+        const completing = target === 'done' && course.status !== 'done'
+        const reverting = course.status === 'done' && target !== 'done'
+        // 其余字段先落库；「完成 / 取消完成」不由表单直接改状态 ——
+        // 完成交给上层弹「出席选择」按实际出席结算，取消完成走「归还课时 / 撤销结算」。
+        const saved = touch({ ...course, ...payload, status: course.status })
+        await db.courses.put(saved)
+
+        if (completing) {
+          setSaving(false)
+          if (onComplete) {
+            await onComplete(saved)
+          } else {
+            // 无完成回调（只读场景）：退回直接置为已完成
+            await db.courses.put(touch({ ...saved, status: 'done' }))
+            onClose()
+          }
+          return
+        }
+
+        if (reverting) {
+          await revertCompletion(saved.id)
+          if (target !== 'pending') {
+            const fresh = await db.courses.get(saved.id)
+            if (fresh) await db.courses.put(touch({ ...fresh, status: target }))
+          }
+          onClose()
+          return
+        }
+
         onClose()
         return
       }
@@ -551,8 +581,21 @@ export function CourseScheduleModal({
 
   async function handleMarkDone() {
     if (!course || !onComplete) return
-    await handleSave()
-    await onComplete(course)
+    if (!isBulkValid) {
+      setError('请填写完整信息，并确保起止时间有效')
+      return
+    }
+    setSaving(true)
+    try {
+      // 先落库表单字段（状态保持不变），再由上层弹「出席选择」按实际出席结算
+      const saved = touch({ ...course, ...buildPayload(form.date, form), status: course.status })
+      await db.courses.put(saved)
+      setSaving(false)
+      await onComplete(saved)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存失败')
+      setSaving(false)
+    }
   }
 
   const sectionTitle = 'mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-3'
