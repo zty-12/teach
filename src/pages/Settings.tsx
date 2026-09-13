@@ -18,6 +18,9 @@ import {
   Sparkles,
   Sun,
   Upload,
+  User,
+  History,
+  Database,
   XCircle,
 } from 'lucide-react'
 import { useSettings } from '@/store/useSettings'
@@ -52,6 +55,16 @@ type SyncState =
   | { kind: 'success'; message: string }
   | { kind: 'error'; message: string }
 
+type SectionId = 'appearance' | 'personal' | 'ai' | 'sync' | 'versions' | 'data'
+const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
+  { id: 'appearance', label: '外观', icon: Palette },
+  { id: 'personal', label: '个人', icon: User },
+  { id: 'ai', label: 'AI 辅助', icon: Sparkles },
+  { id: 'sync', label: '云端同步', icon: Cloud },
+  { id: 'versions', label: '数据版本', icon: History },
+  { id: 'data', label: '数据', icon: Database },
+]
+
 export default function SettingsPage() {
   const settings = useSettings((s) => s.settings)
   const update = useSettings((s) => s.update)
@@ -74,6 +87,7 @@ export default function SettingsPage() {
   const [visionStatus, setVisionStatus] = useState<'idle' | 'testing' | 'ok' | 'err'>('idle')
   const [visionMessage, setVisionMessage] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [activeTab, setActiveTab] = useState<SectionId>('appearance')
 
   // settings 变化时同步到草稿（外部改也跟上）
   useEffect(() => {
@@ -282,8 +296,37 @@ export default function SettingsPage() {
   const SyncIcon = syncIndicator.icon
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="mx-auto max-w-5xl">
+      <div className="flex flex-col gap-4 md:flex-row md:gap-6">
+        {/* 分栏导航：移动端顶部横向滚动，桌面端左侧固定 */}
+        <nav className="shrink-0 md:sticky md:top-4 md:self-start md:w-44">
+          <div className="flex gap-1 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
+            {SECTIONS.map((item) => {
+              const ItemIcon = item.icon
+              const active = activeTab === item.id
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setActiveTab(item.id)}
+                  className={cn(
+                    'flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-sm transition-colors',
+                    active
+                      ? 'bg-surface-2 font-medium text-text-1'
+                      : 'text-text-2 hover:bg-surface-1',
+                  )}
+                >
+                  <ItemIcon size={16} />
+                  {item.label}
+                </button>
+              )
+            })}
+          </div>
+        </nav>
+
+        <div className="min-w-0 flex-1 space-y-4">
       {/* 外观 */}
+      {activeTab === 'appearance' && (
       <Card>
         <CardHeader title="外观" subtitle="主题与配色" />
 
@@ -347,8 +390,10 @@ export default function SettingsPage() {
           </Field>
         </div>
       </Card>
+      )}
 
       {/* 个人 */}
+      {activeTab === 'personal' && (
       <Card>
         <CardHeader title="个人" subtitle="显示名称与默认参数" />
         <div className="space-y-3 p-4">
@@ -399,8 +444,10 @@ export default function SettingsPage() {
           </div>
         </div>
       </Card>
+      )}
 
       {/* AI 辅助 */}
+      {activeTab === 'ai' && (
       <Card>
         <CardHeader
           title="AI 辅助"
@@ -737,8 +784,10 @@ export default function SettingsPage() {
           </div>
         </div>
       </Card>
+      )}
 
       {/* 云端同步 */}
+      {activeTab === 'sync' && (
       <Card>
         <CardHeader
           title="云端同步"
@@ -928,8 +977,10 @@ export default function SettingsPage() {
           )}
         </div>
       </Card>
+      )}
 
       {/* 数据版本（同步后自动留档，可回滚到历史版本） */}
+      {activeTab === 'versions' && (
       <VersionHistoryCard
         refreshKey={versionRefresh}
         hasCloud={hasSavedConfig}
@@ -938,8 +989,10 @@ export default function SettingsPage() {
           setPending(await pendingCount())
         }}
       />
+      )}
 
       {/* 数据 */}
+      {activeTab === 'data' && (
       <Card>
         <CardHeader title="数据" subtitle="备份与迁移" />
         <div className="p-4">
@@ -970,6 +1023,9 @@ export default function SettingsPage() {
           </p>
         </div>
       </Card>
+      )}
+        </div>
+      </div>
     </div>
   )
 }
