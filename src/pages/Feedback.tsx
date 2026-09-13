@@ -41,6 +41,11 @@ import {
 } from '@/lib/llm'
 import { extractTextFromFile } from '@/lib/fileImport'
 import {
+  getCourseKnowledgeIds,
+  setCourseKnowledges,
+  softDeleteCourseKnowledges,
+} from '@/lib/courseKnowledge'
+import {
   analyzeTemplateImageToFields,
   analyzeTemplateToFields,
   generateStructuredFeedback,
@@ -51,7 +56,6 @@ import {
 import type {
   Course,
   CourseFeedback,
-  CourseKnowledge,
   FeedbackTemplate,
   FeedbackTemplateField,
   FieldSourceKind,
@@ -114,10 +118,8 @@ export default function FeedbackPage() {
   async function handleDelete(fb: CourseFeedback) {
     if (!confirm('确定删除这条反馈吗？')) return
     await db.courseFeedbacks.put(markDeleted(fb))
-    // 同步清理 CourseKnowledge
-    const allCks = await db.courseKnowledges.toArray()
-    const ids = allCks.filter((k) => k.courseId === fb.courseId).map((k) => k.id)
-    if (ids.length > 0) await db.courseKnowledges.bulkDelete(ids)
+    // 同步清理 CourseKnowledge（软删留墓碑，实现见 lib/courseKnowledge.ts）
+    await softDeleteCourseKnowledges(fb.courseId)
   }
   async function togglePublish(fb: CourseFeedback) {
     await db.courseFeedbacks.put(
@@ -327,6 +329,8 @@ function FeedbackModal({
   const [templateId, setTemplateId] = useState<string | null>(null)
   const [selectedKps, setSelectedKps] = useState<Set<string>>(new Set())
   const [recommending, setRecommending] = useState(false)
+  /** 保存中锁：防止双击写入两条同课程的反馈（v26 审查：P2） */
+  const [saving, setSaving] = useState(false)
 
   const textbooks = useLiveQuery(() => db.textbooks.toArray(), [])
   const units = useLiveQuery(() => db.textbookUnits.toArray(), [])
@@ -355,8 +359,7 @@ function FeedbackModal({
   useEffect(() => {
     if (!open || !course) return
     void (async () => {
-      const cks = await db.courseKnowledges.toArray()
-      setSelectedKps(new Set(cks.filter((k) => k.courseId === course.id).map((k) => k.knowledgePointId)))
+      setSelectedKps(new Set(await getCourseKnowledgeIds(course.id)))
     })()
   }, [open, course?.id])
 
@@ -610,42 +613,36 @@ function FeedbackModal({
   }
 
   async function handleSave() {
-    if (!course) return
-    const payload = {
-      summary: summary.trim(),
-      content: content.trim(),
-      isDraft,
-      publishedAt: isDraft ? null : feedback?.publishedAt ?? Date.now(),
-      aiGenerated: feedback?.aiGenerated ?? false,
+    if (!course || saving) return
+    setSaving(true)
+    try {
+      const payload = {
+        summary: summary.trim(),
+        content: content.trim(),
+        isDraft,
+        publishedAt: isDraft ? null : feedback?.publishedAt ?? Date.now(),
+        aiGenerated: feedback?.aiGenerated ?? false,
+      }
+      let savedFbId: string
+      if (feedback) {
+        await db.courseFeedbacks.put(touch({ ...feedback, ...payload }))
+        savedFbId = feedback.id
+      } else {
+        const newFb = withSyncFields<CourseFeedback>({
+          courseId: course.id,
+          createdAt: Date.now(),
+          ...payload,
+        })
+        await db.courseFeedbacks.put(newFb)
+        savedFbId = newFb.id
+      }
+      // 保存本次勾选的知识点（软删取消的 + 新增勾选的，差分实现见 lib/courseKnowledge.ts）
+      await setCourseKnowledges(course.id, selectedKps)
+      void savedFbId
+      onClose()
+    } finally {
+      setSaving(false)
     }
-    let savedFbId: string
-    if (feedback) {
-      await db.courseFeedbacks.put(touch({ ...feedback, ...payload }))
-      savedFbId = feedback.id
-    } else {
-      const newFb = withSyncFields<CourseFeedback>({
-        courseId: course.id,
-        createdAt: Date.now(),
-        ...payload,
-      })
-      await db.courseFeedbacks.put(newFb)
-      savedFbId = newFb.id
-    }
-    // 保存本次覆盖的知识点（先删旧的）
-    const allCks = await db.courseKnowledges.toArray()
-    const oldIds = allCks.filter((k) => k.courseId === course.id).map((k) => k.id)
-    if (oldIds.length > 0) await db.courseKnowledges.bulkDelete(oldIds)
-    const now = Date.now()
-    const newCks: CourseKnowledge[] = Array.from(selectedKps).map((kpId) =>
-      withSyncFields<CourseKnowledge>({
-        courseId: course.id,
-        knowledgePointId: kpId,
-        createdAt: now,
-      }),
-    )
-    if (newCks.length > 0) await db.courseKnowledges.bulkPut(newCks)
-    void savedFbId
-    onClose()
   }
 
   return (
@@ -656,9 +653,11 @@ function FeedbackModal({
       size="xl"
       footer={
         <>
-          <Button onClick={onClose}>取消</Button>
-          <Button variant="primary" onClick={() => void handleSave()}>
-            保存
+          <Button onClick={onClose} disabled={saving}>
+            取消
+          </Button>
+          <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
+            {saving ? '保存中…' : '保存'}
           </Button>
         </>
       }
@@ -937,10 +936,17 @@ function TemplateManagerModal({
     await db.feedbackTemplates.put(markDeleted(t))
   }
   async function handleSetDefault(t: FeedbackTemplate) {
+    // ⚠ 不复用 bulkPut 全表 touch：那会把「值没变」的行也标 dirty 触发整表推送，
+    //   且会改写已软删模板的 isDefault（v26 审查：P3）。
     const all = await db.feedbackTemplates.toArray()
-    await db.feedbackTemplates.bulkPut(
-      all.map((x) => touch({ ...x, isDefault: x.id === t.id })),
-    )
+    const stale = all.filter((x) => !x.deletedAt && x.id !== t.id && x.isDefault)
+    for (const x of stale) {
+      await db.feedbackTemplates.put(touch({ ...x, isDefault: false }))
+    }
+    const row = await db.feedbackTemplates.get(t.id)
+    if (row && !row.deletedAt && !row.isDefault) {
+      await db.feedbackTemplates.put(touch({ ...row, isDefault: true }))
+    }
   }
 
   return (
@@ -1075,6 +1081,8 @@ function TemplateEditModal({
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
   const [isDefault, setIsDefault] = useState(false)
+  /** 保存中锁：防止双击写入两套模板（v26 审查：P2） */
+  const [saving, setSaving] = useState(false)
 
   useMemo(() => {
     if (!template) return
@@ -1089,23 +1097,35 @@ function TemplateEditModal({
       body: body.trim(),
       isDefault,
     }
-    if (!payload.name || !payload.body) return
-    if (template) {
-      await db.feedbackTemplates.put(touch({ ...template, ...payload }))
-    } else {
-      await db.feedbackTemplates.put(
-        withSyncFields<FeedbackTemplate>({ ...payload, createdAt: Date.now() }),
-      )
+    if (!payload.name || !payload.body || saving) return
+    setSaving(true)
+    try {
+      // 用写库对象自身的 id 作为 newId ——
+      // ⚠ 不能用 `all[all.length - 1]?.id` 猜新行：toArray 按 UUID 主键排序，新行位置随机，
+      //   「设为默认」会标到别的模板上（v26 审查：P2）。
+      let newId: string
+      if (template) {
+        const next = touch({ ...template, ...payload })
+        await db.feedbackTemplates.put(next)
+        newId = next.id
+      } else {
+        const created = withSyncFields<FeedbackTemplate>({ ...payload, createdAt: Date.now() })
+        await db.feedbackTemplates.put(created)
+        newId = created.id
+      }
+      // 设为默认 → 取消其它模板的默认标记。
+      // ⚠ 只处理**未软删**的行，且只写「值确实变化」的行，避免无谓的 dirty 推送（v26 审查：P3）。
+      if (payload.isDefault) {
+        const all = await db.feedbackTemplates.toArray()
+        const stale = all.filter((x) => !x.deletedAt && x.id !== newId && x.isDefault)
+        for (const x of stale) {
+          await db.feedbackTemplates.put(touch({ ...x, isDefault: false }))
+        }
+      }
+      onClose()
+    } finally {
+      setSaving(false)
     }
-    // 如果设为默认，把其它模板的默认标记去掉
-    if (payload.isDefault) {
-      const all = await db.feedbackTemplates.toArray()
-      const newId = template?.id ?? all[all.length - 1]?.id
-      await db.feedbackTemplates.bulkPut(
-        all.map((x) => touch({ ...x, isDefault: x.id === newId })),
-      )
-    }
-    onClose()
   }
 
   return (
@@ -1116,9 +1136,11 @@ function TemplateEditModal({
       size="xl"
       footer={
         <>
-          <Button onClick={onClose}>取消</Button>
-          <Button variant="primary" onClick={() => void handleSave()}>
-            保存
+          <Button onClick={onClose} disabled={saving}>
+            取消
+          </Button>
+          <Button variant="primary" onClick={() => void handleSave()} disabled={saving}>
+            {saving ? '保存中…' : '保存'}
           </Button>
         </>
       }

@@ -41,6 +41,7 @@ import {
   deleteCheckInTask,
   formatCadenceLabel,
   recomputeTaskPoints,
+  redeemReward,
   resolveCheckInRules,
   updateCheckInTaskDays,
   type PointBalance,
@@ -51,6 +52,7 @@ import type {
   CheckInRecord,
   CheckInStatus,
   CheckInTask,
+  CheckInTaskSnapshot,
   Course,
   Group,
   GroupMember,
@@ -694,6 +696,8 @@ function CheckInMatrix({
     studentName: string
     day: number
     recordId: string
+    taskId: string
+    taskSnapshot?: CheckInTaskSnapshot
     existingNote: string
     existingAiFeedback: string
   } | null>(null)
@@ -774,14 +778,16 @@ function CheckInMatrix({
                               const nextStatus = next(status)
                               void updateCheckInRecord(rec, { status: nextStatus })
                               if (nextStatus === 'done') {
-                                setQuickNote({
-                                  studentId: sid,
-                                  studentName: studentMap.get(sid)?.name ?? '已删学生',
-                                  day: d,
-                                  recordId: rec.id,
-                                  existingNote: rec.note ?? '',
-                                  existingAiFeedback: rec.aiFeedback ?? '',
-                                })
+                              setQuickNote({
+                                studentId: sid,
+                                studentName: studentMap.get(sid)?.name ?? '已删学生',
+                                day: d,
+                                recordId: rec.id,
+                                taskId: rec.taskId,
+                                taskSnapshot: rec.taskSnapshot,
+                                existingNote: rec.note ?? '',
+                                existingAiFeedback: rec.aiFeedback ?? '',
+                              })
                               }
                             }}
                             className={cn(
@@ -885,6 +891,8 @@ function CheckInMatrix({
           studentId={quickNote.studentId}
           studentName={quickNote.studentName}
           day={quickNote.day}
+          task={task}
+          taskSnapshot={quickNote.taskSnapshot}
           existingNote={quickNote.existingNote}
           existingAiFeedback={quickNote.existingAiFeedback}
           onSave={(note, aiFeedback) => {
@@ -1004,6 +1012,8 @@ function QuickNoteModal({
   day,
   existingNote,
   existingAiFeedback,
+  task,
+  taskSnapshot,
   onSave,
   onClose,
 }: {
@@ -1012,6 +1022,8 @@ function QuickNoteModal({
   day: number
   existingNote: string
   existingAiFeedback: string
+  task?: CheckInTask
+  taskSnapshot?: CheckInTaskSnapshot
   onSave: (note: string, aiFeedback: string) => void
   onClose: () => void
 }) {
@@ -1025,6 +1037,17 @@ function QuickNoteModal({
   const [profileSnapshot, setProfileSnapshot] = useState<
     { summary: string; strengths: string; weaknesses: string; teachingStyle: string; profileUpdatedAt: number; sourceCount: number } | null
   >(null)
+
+  // 解析本次打卡对应的任务内容（优先固化快照，回退关联任务），供 AI 生成备注时判断完成度
+  const taskContext = useMemo(() => {
+    if (taskSnapshot && (taskSnapshot.title || taskSnapshot.note)) {
+      return { title: taskSnapshot.title, note: taskSnapshot.note, cadenceLabel: taskSnapshot.cadenceLabel }
+    }
+    if (task && (task.title || task.note)) {
+      return { title: task.title, note: task.note, cadenceLabel: task.cadenceLabel }
+    }
+    return undefined
+  }, [taskSnapshot, task])
 
   const aiReady = isAiConfigured(settings) && text.trim().length >= 5
 
@@ -1060,7 +1083,7 @@ function QuickNoteModal({
         profileSnapshot ??
         (await getOrRefreshProfileForFeedback(settings, studentId, studentName).catch(() => undefined))
       if (snapshot) setProfileSnapshot(snapshot)
-      const fb = await generateCheckInFeedback(settings, text, studentName, snapshot)
+      const fb = await generateCheckInFeedback(settings, text, studentName, snapshot, taskContext)
       setAiFeedback(fb)
     } catch (e) {
       setAiError(e instanceof LlmError ? e.message : `AI 生成失败：${String(e)}`)
@@ -1106,6 +1129,20 @@ function QuickNoteModal({
       }
     >
       <div className="space-y-3">
+        {taskContext && (
+          <div className="rounded-md border border-line-1 bg-surface-2 px-3 py-2">
+            <div className="mb-0.5 text-[11px] font-medium text-text-3">当天任务</div>
+            {taskContext.title && (
+              <div className="text-[13px] font-medium text-text-1">{taskContext.title}</div>
+            )}
+            {taskContext.note && (
+              <div className="mt-0.5 text-[12px] leading-snug text-text-2">{taskContext.note}</div>
+            )}
+            {taskContext.cadenceLabel && (
+              <div className="mt-1 text-[11px] text-text-3">节奏：{taskContext.cadenceLabel}</div>
+            )}
+          </div>
+        )}
         <p className="text-[13px] text-text-2">
           记录本次打卡视频暴露的问题或表现亮点。此备注可作为后续
           <strong> 学习报告 </strong>的数据源。
@@ -1208,7 +1245,10 @@ function NewCheckInTaskModal({
   // v20：本任务适用的打卡规则（默认全选启用项）
   const [ruleIds, setRuleIds] = useState<string[]>([])
 
-  useMemo(() => {
+  // 打开弹窗时重置表单。
+  // 必须用 useEffect：在 useMemo 里 setState 属于「渲染期副作用」，
+  // React 严格模式会告警，并发渲染下行为也不可预期（v24 审查：P4）。
+  useEffect(() => {
     if (!open) return
     setTitle('')
     setScope('all')
@@ -1506,6 +1546,10 @@ function MarketView({
   const [newOpen, setNewOpen] = useState(false)
   const [editing, setEditing] = useState<RewardItem | null>(null)
   const [search, setSearch] = useState('')
+  /** 正在兑换/核销中的记录或学生 id —— 防止连点重复扣分 / 重复退分 */
+  const [busyId, setBusyId] = useState<string | null>(null)
+  /** 打开「兑换」弹窗的目标学生（null = 关闭） */
+  const [redeemFor, setRedeemFor] = useState<Student | null>(null)
 
   const balances = useMemo(() => {
     // 同步计算（数据量小，实时算即可；不阻塞 UI）
@@ -1544,14 +1588,37 @@ function MarketView({
     await db.rewardItems.put(touch({ ...r, enabled: !r.enabled }))
   }
   async function handleFulfill(r: Redemption) {
-    await db.redemptions.put(
-      touch({ ...r, status: 'fulfilled', fulfilledAt: Date.now() }),
-    )
+    if (busyId) return
+    setBusyId(r.id)
+    try {
+      await db.redemptions.put(touch({ ...r, status: 'fulfilled', fulfilledAt: Date.now() }))
+    } finally {
+      setBusyId(null)
+    }
   }
   async function handleRevoke(r: Redemption) {
-    if (!confirm(`撤销该兑换？会退还 ${r.pointsSpent} 积分给学生。`)) return
-    await db.redemptions.put(touch({ ...r, status: 'cancelled' }))
-    await adjustPoints(r.studentId, r.pointsSpent, `撤销兑换：${r.rewardName}`)
+    if (busyId) return
+    if (
+      !confirm(
+        `撤销该兑换？会退还 ${r.pointsSpent} 积分给学生` +
+          `${r.status === 'fulfilled' ? '（奖励已发放，请确认已收回）' : ''}。`,
+      )
+    ) {
+      return
+    }
+    setBusyId(r.id)
+    try {
+      await db.redemptions.put(touch({ ...r, status: 'cancelled' }))
+      await adjustPoints(r.studentId, r.pointsSpent, `撤销兑换：${r.rewardName}`)
+      // 退回库存：兑换时 stock 减过 1，撤销必须加回去，否则库存会「凭空蒸发」。
+      // 重新读一次库内最新值再写，避免用列表里的旧快照覆盖别人刚做的改动。
+      const item = await db.rewardItems.get(r.rewardItemId)
+      if (item && !item.deletedAt && item.stock !== null) {
+        await db.rewardItems.put(touch({ ...item, stock: item.stock + 1 }))
+      }
+    } finally {
+      setBusyId(null)
+    }
   }
 
   return (
@@ -1695,6 +1762,13 @@ function MarketView({
           reward={editing}
           onClose={() => setNewOpen(false)}
         />
+
+        <RedeemModal
+          student={redeemFor}
+          rewardItems={rewardItems}
+          balance={redeemFor ? balances.get(redeemFor.id)?.balance ?? 0 : 0}
+          onClose={() => setRedeemFor(null)}
+        />
       </Card>
 
       {/* 积分余额排行 */}
@@ -1734,12 +1808,127 @@ function MarketView({
                 </span>
                 <Badge variant="primary">余额 {balance}</Badge>
                 <span className="text-[11px] text-text-3">+{earned}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!!busyId}
+                  onClick={() => setRedeemFor(student)}
+                >
+                  兑换
+                </Button>
               </li>
             ))}
           </ul>
         )}
       </Card>
     </div>
+  )
+}
+
+// ============================================================
+// 兑换弹窗（选学生 → 选奖励 → 扣积分 + 扣库存 + 建兑换记录）
+//
+// 背景：redeemReward 早已实现，但全库没有任何调用点，导致「积分商城」
+// 只能增删改奖励项、永远兑换不出去（redemptions 恒为空）。这里补上入口。
+// ============================================================
+
+function RedeemModal({
+  student,
+  rewardItems,
+  balance,
+  onClose,
+}: {
+  student: Student | null
+  rewardItems: RewardItem[]
+  balance: number
+  onClose: () => void
+}) {
+  const open = !!student
+  const [itemId, setItemId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  // 只列出「已上架且有库存」的奖励项
+  const available = useMemo(
+    () => rewardItems.filter((r) => r.enabled && (r.stock === null || r.stock > 0)),
+    [rewardItems],
+  )
+
+  useEffect(() => {
+    if (!open) return
+    setItemId('')
+    setError('')
+    setBusy(false)
+  }, [open, student])
+
+  const item = available.find((r) => r.id === itemId) ?? null
+  const affordable = item ? balance >= item.pointsCost : false
+
+  async function handleConfirm() {
+    if (!student || !item || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      // redeemReward 内部会再校验一次积分与库存，并写 spend 流水 + 兑换记录 + 扣库存
+      const res = await redeemReward(student.id, item.id)
+      if (res.ok) onClose()
+      else setError(res.message)
+    } catch (e) {
+      setError(`兑换失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`兑换积分 · ${student?.name ?? ''}`}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            取消
+          </Button>
+          <Button
+            variant="primary"
+            onClick={() => void handleConfirm()}
+            disabled={busy || !item || !affordable}
+          >
+            {busy ? '处理中…' : '确认兑换'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {error && (
+          <div className="rounded-lg bg-leave-soft px-3 py-2 text-[13px] text-leave">{error}</div>
+        )}
+        <div className="rounded-lg bg-surface-2 px-3 py-2 text-[13px] text-text-2">
+          当前积分余额 <span className="font-medium text-text-1">{balance}</span>
+        </div>
+        <Field label="选择奖励">
+          <Select value={itemId} onChange={(e) => setItemId(e.target.value)}>
+            <option value="">请选择…</option>
+            {available.map((r) => (
+              <option key={r.id} value={r.id} disabled={r.pointsCost > balance}>
+                {r.name} · {r.pointsCost} 分{r.stock !== null ? ` · 库存 ${r.stock}` : ''}
+                {r.pointsCost > balance ? '（积分不足）' : ''}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {available.length === 0 && (
+          <p className="text-[13px] text-text-3">暂无「已上架且有库存」的奖励项。</p>
+        )}
+        {item && (
+          <p className="text-[13px] text-text-2">
+            将扣除 <span className="font-medium text-text-1">{item.pointsCost}</span> 分，兑换后余额{' '}
+            <span className="font-medium text-text-1">{balance - item.pointsCost}</span> 分。
+          </p>
+        )}
+      </div>
+    </Modal>
   )
 }
 
@@ -1757,7 +1946,8 @@ function RewardItemModal({
   const [stockText, setStockText] = useState('')
   const [noteText, setNoteText] = useState('')
 
-  useMemo(() => {
+  // 同理：不能在 useMemo 里 setState（渲染期副作用）
+  useEffect(() => {
     if (!open) return
     setName(reward?.name ?? '')
     setCost(String(reward?.pointsCost ?? 20))

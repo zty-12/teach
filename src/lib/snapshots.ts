@@ -318,6 +318,7 @@ export async function restoreSnapshot(
   await createSnapshot({ auto: false, label: '恢复前自动备份', force: true }).catch(() => null)
 
   let rows = 0
+  const now = Date.now()
   for (const name of SYNC_TABLES) {
     // 快照未包含该表（理论上不会，collectPayload 会补空数组）→ 不动本地，避免误清空
     if (!(name in snap.payload)) continue
@@ -325,13 +326,33 @@ export async function restoreSnapshot(
     const list = (
       Array.isArray(snap.payload[name]) ? snap.payload[name] : []
     ) as Array<Record<string, unknown>>
-    const valid = list
+    const snapshotRows = list
       .filter((r) => !!r && typeof r.id === 'string')
-      .map((r) => ({ ...r, dirty: 1 }))
-    await table.clear()
-    if (valid.length) {
-      await table.bulkPut(valid as never[])
-      rows += valid.length
+      .map((r) => ({ ...r, updatedAt: now, dirty: 1 as const }) as Record<string, unknown>)
+    const keepIds = new Set(snapshotRows.map((r) => r.id as string))
+
+    // ① 快照中不存在、而本地当前仍是「活行」的记录 → 留墓碑（软删），而不是 table.clear()。
+    //    物理清空没有墓碑：pushAll 无行可推 → 云端仍保留这些行 → 下一轮 pullAll 会把
+    //    「本地没有且远端非墓碑」的行原样写回，恢复被悄悄撤销（v24 已实证）。
+    //    留墓碑后，删除随 pushAll 传播到云端，成功推送后由 sync.ts 自行回收本地墓碑。
+    const existing = (await table.toArray()) as Array<Record<string, unknown>>
+    const tombstoneIds = new Set(
+      existing.filter((r) => !keepIds.has(r.id as string) && !r.deletedAt).map((r) => r.id as string),
+    )
+    if (tombstoneIds.size > 0) {
+      await table.bulkPut(
+        existing
+          .filter((r) => tombstoneIds.has(r.id as string))
+          .map((r) => ({ ...r, deletedAt: now, updatedAt: now, dirty: 1 })) as never[],
+      )
+    }
+
+    // ② 恢复的行统一把 updatedAt 刷成 now：让 LWW 判定它们「更新」，
+    //    从而覆盖云端旧副本并传播到其它设备。沿用快照里的旧 updatedAt 的话，
+    //    其它设备的同步水位早已越过它（gt('updatedAt', watermark-5min)）→ 永远拉不到。
+    if (snapshotRows.length) {
+      await table.bulkPut(snapshotRows as never[])
+      rows += snapshotRows.length
     }
   }
 

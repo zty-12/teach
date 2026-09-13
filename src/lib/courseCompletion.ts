@@ -44,10 +44,27 @@ export interface CompletionBreakdown {
   absent: Array<{ student: Student }>
   /** 总课酬（分） */
   feeCents: number
+  /**
+   * 本次结算使用的「单位课酬基准」（分）：
+   *  - 班课 = 人均课酬；1对1 = 每课时单价。
+   *  该值优先取 `course.feeUnitCents` 快照，缺省才回退当前单价。
+   *  applyCompletion 会把它固化回课程，作为这节课的定价基准（不再随单价变更漂移）。
+   */
+  unitCents: number
   /** 课时扣减 */
   deductions: Array<{ studentId: string; before: number; after: number }>
   /** 余量预警名单 */
   lowBalance: Array<{ student: Student; remaining: number }>
+}
+
+/**
+ * 读取课程上的「单位课酬基准」快照。
+ * 返回 null 表示无有效快照（旧数据 / 未结算过）→ 调用方回退到当前单价。
+ * 0 是合法值（单价 0 元），与 undefined 语义不同，故用 typeof + isFinite 判定。
+ */
+function readFeeUnitSnapshot(course: Course): number | null {
+  const v = course.feeUnitCents
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
 }
 
 /**
@@ -84,13 +101,17 @@ export function calculateCompletion(input: CompletionInput): CompletionBreakdown
         if (s) absent.push({ student: s })
       }
     }
-    // 注意：上面 studentById 还未填所有成员，下面要补齐
   }
 
   // 课酬
+  // 单位单价优先取「课程自身的快照」：保证历史课酬不随班课 / 学生单价后续变更而被追溯改写
+  // （v24 审查 P2：已完成课程再结算会按当前单价静默覆盖历史结算）。
   let feeCents = 0
+  let unitCents = 0
+  const snapshotUnit = readFeeUnitSnapshot(course)
   if (course.groupId && group) {
-    feeCents = group.perStudentFeeCents * present.length
+    unitCents = snapshotUnit ?? group.perStudentFeeCents
+    feeCents = unitCents * present.length
   } else if (course.studentId && student) {
     // 1对1：出席则计 1 课时课酬（先判定出席，再据出席算 fee）
     const attended = attendances.some(
@@ -102,13 +123,11 @@ export function calculateCompletion(input: CompletionInput): CompletionBreakdown
         attend: attendances.find((a) => a.studentId === student.id)!,
       })
     }
-    // 补课按「一课时」计：优先用排课时显式写入的 feeCents（＝原班课人均单价），
-    // 否则回退到该学生的 1对1 单价 hourlyFeeCents。
-    const unit =
-      course.isMakeup && course.feeCents > 0
-        ? course.feeCents
-        : student.hourlyFeeCents
-    feeCents = unit * (attended ? 1 : 0)
+    // 单价优先序：课程快照 → 补课排课时写入的课酬（＝原班课人均单价）→ 该生的 1对1 单价。
+    unitCents =
+      snapshotUnit ??
+      (course.isMakeup && course.feeCents > 0 ? course.feeCents : student.hourlyFeeCents)
+    feeCents = unitCents * (attended ? 1 : 0)
   }
 
   // 预付扣减
@@ -125,7 +144,7 @@ export function calculateCompletion(input: CompletionInput): CompletionBreakdown
     }
   }
 
-  return { present, absent, feeCents, deductions, lowBalance }
+  return { present, absent, feeCents, unitCents, deductions, lowBalance }
 }
 
 /**
@@ -140,6 +159,18 @@ export function calculateCompletion(input: CompletionInput): CompletionBreakdown
 export async function applyCompletion(
   input: CompletionInput,
 ): Promise<CompletionBreakdown> {
+  // ---------- 幂等前置：先还原上一轮结算的课时扣减 ----------
+  // 否则重复调用（双击「保存 + 标记完成」、响应式重放等）会二次扣减：
+  // 10→9 后再次调用算出 8，而 deductedHours 快照被覆盖成 1 → 撤销时净丢 1 课时。
+  // 先把上一轮快照加回去，本次计算即基于「未扣减」的余额，重复调用净额为 0。
+  const prevRow = await db.courses.get(input.course.id)
+  const prevSnapshot = Array.isArray(prevRow?.deductedHours) ? prevRow!.deductedHours! : []
+  for (const d of prevSnapshot) {
+    if (!d || !d.studentId || !(d.hours > 0)) continue
+    const s = await db.students.get(d.studentId)
+    if (s) await db.students.put(touch({ ...s, remainingHours: s.remainingHours + d.hours }))
+  }
+
   // 自动补齐班课成员的 student 对象（调用方无需传 allStudents）
   let { allStudents, student } = input
   // 1对1：从库里取「最新」学生对象再算。
@@ -150,7 +181,9 @@ export async function applyCompletion(
     const fresh = await db.students.get(student.id)
     if (fresh) student = fresh
   }
-  if (!allStudents && input.course.groupId && input.groupMembers.length > 0) {
+  if (input.course.groupId && input.groupMembers.length > 0) {
+    // 与上面 1对1 同理：统一以库为准。上面的「快照还原」刚改过余额，
+    // 若沿用调用方传入的内存快照会拿到还原前的旧值，导致重复结算仍多扣。
     const ids = input.groupMembers.map((m) => m.studentId)
     const found = await db.students.bulkGet(ids)
     allStudents = found.filter((s): s is Student => !!s && !s.deletedAt)
@@ -166,6 +199,10 @@ export async function applyCompletion(
       ...input.course,
       feeCents: breakdown.feeCents,
       status: 'done',
+      // v26：固化「单位课酬基准」。breakdown.unitCents 本身已是「快照优先」的结果，
+      // 因此重复结算写入相同值；首次结算则把当时的单价固定下来，
+      // 之后班课 / 学生单价再变也不会改写这节课的历史课酬。
+      feeUnitCents: breakdown.unitCents,
       deductedHours: breakdown.deductions
         .map((d) => ({ studentId: d.studentId, hours: Math.max(0, d.before - d.after) }))
         .filter((d) => d.hours > 0),
@@ -180,11 +217,11 @@ export async function applyCompletion(
   }
 
   // 3) 写 Settlement（仅当 feeCents > 0 且不存在）
+  const existingSettlement = (await db.settlements.toArray()).find(
+    (s) => s.courseId === input.course.id && !s.deletedAt,
+  )
   if (breakdown.feeCents > 0) {
-    const existing = (await db.settlements.toArray()).find(
-      (s) => s.courseId === input.course.id && !s.deletedAt,
-    )
-    if (!existing) {
+    if (!existingSettlement) {
       const settlement = withSyncFields<Settlement>({
         courseId: input.course.id,
         studentId: input.course.studentId,
@@ -199,12 +236,16 @@ export async function applyCompletion(
       // 已存在则更新金额（保持幂等）
       await db.settlements.put(
         touch({
-          ...existing,
+          ...existingSettlement,
           amountCents: breakdown.feeCents,
           note: `出席 ${breakdown.present.length} 人`,
         }),
       )
     }
+  } else if (existingSettlement) {
+    // 重算后课酬归 0（典型案例：已完成 → 重新打开把出席全部改判为请假）。
+    // 此时必须撤销既有结算，否则财务仍按旧金额计入课酬（v24 实证：残留 2000 分）。
+    await db.settlements.put(markDeleted(existingSettlement))
   }
 
   return breakdown
@@ -252,8 +293,28 @@ export async function revertCompletion(courseId: string): Promise<RevertResult> 
     removedCheckInTasks: 0,
     removedClassActivities: 0,
   }
+  // 并发重入守卫：同一节课的撤销正在执行时，第二次调用直接返回空结果。
+  // 调用方（首页待办 / 课表）都是「读闭包里的 status → await revert」，本身没有锁，
+  // 双击时两次都会读到 status='done'；这里在数据层兜住，保证只撤销一次。
+  if (revertingCourses.has(courseId)) return empty
+  revertingCourses.add(courseId)
+  try {
+    return await doRevert(courseId, empty)
+  } finally {
+    revertingCourses.delete(courseId)
+  }
+}
+
+/** 正在撤销中的课程 id（见 revertCompletion 的重入守卫） */
+const revertingCourses = new Set<string>()
+
+async function doRevert(courseId: string, empty: RevertResult): Promise<RevertResult> {
   const course = await db.courses.get(courseId)
   if (!course) return empty
+  // 幂等守卫：只有「已完成」的课才存在可撤销的结算。
+  // 缺少这层守卫时，第二次「取消完成」会因为 deductedHours 已被清空（不再是数组）
+  // 而落入「旧数据兜底」分支，按出席每人再返还 1 课时（实测 10 → 11）。
+  if (course.status !== 'done') return empty
 
   // ---------- 1) 归还课时 ----------
   let restoredHours = 0
@@ -327,7 +388,7 @@ export async function revertCompletion(courseId: string): Promise<RevertResult> 
     (t) => !t.deletedAt && t.courseId === courseId && isAutoCheckInTask(t),
   )
   for (const t of autoTasks) {
-    await deleteCheckInTask(t.id)
+    await deleteCheckInTask(t.id, { reason: 'revert' })
     removedCheckInTasks++
   }
 
@@ -338,13 +399,20 @@ export async function revertCompletion(courseId: string): Promise<RevertResult> 
     (a) => !a.deletedAt && a.auto === true && a.sourceCourseId === courseId,
   )
   for (const a of autoActivities) {
-    await deleteClassActivity(a, allRecords)
+    await deleteClassActivity(a, allRecords, { reason: 'revert' })
     removedClassActivities++
   }
 
   // ---------- 5) 状态回退（清空课酬与扣减快照） ----------
+  //  deductedHours 写空数组而不是 null：
+  //   - null / undefined 都是「旧数据（从未由 v21+ 结算过）」的标记；
+  //     回滚后再写 null，会让下次调用重新走旧数据兜底分支（多返还课时）。
+  //   - [] 明确表示「已由新逻辑结算过，且当次没有课时扣减」，语义唯一。
+  //  ⚠ feeUnitCents（单价快照）**刻意保留**：它是「这节课的定价基准」，与是否完成无关。
+  //     清空会让补课课程丢掉排课时写入的单价（feeCents 在这里被归零），
+  //     也会让「取消完成 → 重新完成」凭空改用新单价、课酬无端变化。
   await db.courses.put(
-    touch({ ...course, status: 'pending', feeCents: 0, deductedHours: null }),
+    touch({ ...course, status: 'pending', feeCents: 0, deductedHours: [] }),
   )
 
   return {

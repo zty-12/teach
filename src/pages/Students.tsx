@@ -904,7 +904,12 @@ function StudentModal({
       billingRule: form.billingRule,
       hourlyFeeCents: Math.round(Number(form.hourlyFeeYuan || 0) * 100),
       paidHours: Math.max(0, Math.floor(Number(form.paidHours || 0))),
-      remainingHours: Math.max(0, Math.floor(Number(form.remainingHours || form.paidHours || 0))),
+      // 仅在输入框「确实为空」时才回退到已缴课时；不能用 falsy 判断，
+      // 否则 remainingHours = 0（课时已上完）会被静默重置成已缴课时 → 凭空多出课时。
+      remainingHours:
+        form.remainingHours.trim() === ''
+          ? Math.max(0, Math.floor(Number(form.paidHours || 0)))
+          : Math.max(0, Math.floor(Number(form.remainingHours) || 0)),
       remindHours: Math.max(0, Math.floor(Number(form.remindHours || 0))),
       isTrial: form.isTrial,
       trialAt: form.isTrial ? (form.trialAt ?? Date.now()) : null,
@@ -1318,10 +1323,10 @@ const toForm = (s: Student): StudentForm => ({
   status: s.status,
   colorSlot: s.colorSlot,
   billingRule: s.billingRule ?? 'postpaid',
-  hourlyFeeYuan: s.hourlyFeeCents ? String(s.hourlyFeeCents / 100) : '',
-  paidHours: s.paidHours ? String(s.paidHours) : '',
-  remainingHours: s.remainingHours ? String(s.remainingHours) : '',
-  remindHours: s.remindHours ? String(s.remindHours) : '2',
+  hourlyFeeYuan: s.hourlyFeeCents != null ? String(s.hourlyFeeCents / 100) : '',
+  paidHours: s.paidHours != null ? String(s.paidHours) : '',
+  remainingHours: s.remainingHours != null ? String(s.remainingHours) : '',
+  remindHours: s.remindHours != null ? String(s.remindHours) : '2',
   isTrial: !!s.isTrial,
   trialAt: s.trialAt ?? null,
 })

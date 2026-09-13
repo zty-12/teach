@@ -31,6 +31,7 @@ import {
 } from '@/components/ui'
 import { useSettings } from '@/store/useSettings'
 import { generateReport, isAiConfigured, type ReportInput } from '@/lib/llm'
+import { resolveCheckInTaskContent } from '@/lib/points'
 import {
   TAG_TYPES,
   type LearningReport,
@@ -66,10 +67,19 @@ function periodRange(key: PeriodKey, custom: { start: string; end: string }) {
   if (key === 'last30') {
     const s = new Date(now.getTime() - 29 * 86400000)
     s.setHours(0, 0, 0, 0)
-    return { start: s.getTime(), end: now.getTime() }
+    // 结束时刻用「当天末尾」而不是 now(毫秒级)：否则每次进入页面重新挂载都会得到
+    // 不同的 periodEnd，existingReport 的精确相等匹配永远失败 → 反复保存生成多份重复报告。
+    const e = new Date(now)
+    e.setHours(23, 59, 59, 999)
+    return { start: s.getTime(), end: e.getTime() }
   }
   const s = custom.start ? new Date(`${custom.start}T00:00:00`) : new Date(now.getFullYear(), now.getMonth(), 1)
-  const e = custom.end ? new Date(`${custom.end}T23:59:59`) : now
+  let e: Date
+  if (custom.end) e = new Date(`${custom.end}T23:59:59`)
+  else {
+    e = new Date(now)
+    e.setHours(23, 59, 59, 999)
+  }
   return { start: s.getTime(), end: e.getTime() }
 }
 
@@ -88,6 +98,7 @@ export default function ReportsPage() {
   const courses = useLiveQuery(() => db.courses.toArray(), [])
   const feedbacks = useLiveQuery(() => db.courseFeedbacks.toArray(), [])
   const checkInRecords = useLiveQuery(() => db.checkInRecords.toArray(), [])
+  const checkInTasks = useLiveQuery(() => db.checkInTasks.toArray(), [])
 
   const liveStudents = useMemo(
     () => (students ?? []).filter((s) => !s.deletedAt && s.status !== 'archived'),
@@ -132,9 +143,10 @@ export default function ReportsPage() {
       .map((f) => f.summary.trim())
   }, [feedbacks, periodCourses])
 
-  /** 周期内打卡备注（含 AI 家长反馈）——作为学习报告 AI 生成的数据源 */
+  /** 周期内打卡备注（含对应打卡任务 + AI 家长反馈）——作为学习报告 AI 生成的数据源 */
   const checkInNotes = useMemo(() => {
     if (!student) return []
+    const taskById = new Map((checkInTasks ?? []).map((t) => [t.id, t]))
     return (checkInRecords ?? [])
       .filter(
         (r) =>
@@ -145,9 +157,18 @@ export default function ReportsPage() {
           r.dayAt <= range.end &&
           ((r.note ?? '').trim().length > 0 || (r.aiFeedback ?? '').trim().length > 0),
       )
-      .map((r) => ({ dayAt: r.dayAt as number, note: r.note ?? '', aiFeedback: r.aiFeedback ?? '' }))
+      .map((r) => {
+        const task = resolveCheckInTaskContent(r, taskById.get(r.taskId))
+        return {
+          dayAt: r.dayAt as number,
+          note: r.note ?? '',
+          aiFeedback: r.aiFeedback ?? '',
+          taskTitle: task?.title,
+          taskNote: task?.note,
+        }
+      })
       .sort((a, b) => a.dayAt - b.dayAt)
-  }, [checkInRecords, student, range])
+  }, [checkInRecords, checkInTasks, student, range])
 
   const studentTagNames = useMemo(() => {
     const ids = new Set(
@@ -374,7 +395,7 @@ function ReportPanel({
   setCustom: (v: { start: string; end: string }) => void
   periodCourses: Array<{ id: string; subject: string; status: string; startAt: number }>
   feedbackSummaries: string[]
-  checkInNotes: Array<{ dayAt: number; note: string; aiFeedback: string }>
+  checkInNotes: Array<{ dayAt: number; note: string; aiFeedback: string; taskTitle?: string; taskNote?: string }>
   tags: string[]
   existingReport?: LearningReport
   studentReports: LearningReport[]

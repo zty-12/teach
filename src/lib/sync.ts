@@ -163,6 +163,9 @@ export async function pushAll(settings?: AppSettings): Promise<SyncResult> {
   return result
 }
 
+/** 拉取时间重叠窗口：容忍写入端时钟与本机水位的偏差（LWW 合并会去重，重拉无害） */
+const PULL_OVERLAP_MS = 5 * 60_000
+
 /** 从云端拉取增量并合并到本地 */
 export async function pullAll(settings?: AppSettings): Promise<SyncResult> {
   const result: SyncResult = { pushed: 0, pulled: 0, errors: [] }
@@ -173,7 +176,9 @@ export async function pullAll(settings?: AppSettings): Promise<SyncResult> {
     try {
       const table = (db as unknown as Record<string, Table<never, string>>)[name]
       const meta = await db.syncMeta.get(name)
-      const since = meta?.lastPulledAt ?? 0
+      const watermark = meta?.lastPulledAt ?? 0
+      // 查询下界回拨一个重叠窗口：覆盖「写入端时钟略慢于水位」的记录
+      const since = Math.max(0, watermark - PULL_OVERLAP_MS)
 
       const { data, error } = await client.from(name).select('*').gt('updatedAt', since)
       if (error) {
@@ -188,6 +193,9 @@ export async function pullAll(settings?: AppSettings): Promise<SyncResult> {
       for (const r of remote) {
         const id = r.id as string
         const local = (await table.get(id)) as Record<string, unknown> | undefined
+        // 远端墓碑 + 本地从未有过该行 → 不写回。
+        // 否则 pushAll 刚清理掉的本地墓碑会被同一轮拉取写回来，清理形同虚设。
+        if (!local && r.deletedAt) continue
         const localUpdated = (local?.updatedAt as number) ?? 0
         const remoteUpdated = (r.updatedAt as number) ?? 0
 
@@ -202,9 +210,16 @@ export async function pullAll(settings?: AppSettings): Promise<SyncResult> {
         result.pulled += toPut.length
       }
 
+      // 水位用「已见到的最大远端 updatedAt」推进，而不是本机时钟 ——
+      // 否则写入端时钟慢于本机时，其记录会永远落在水位之下，被静默丢弃。
+      // 同时封顶到本机当前时间，避免某台设备时钟超前把水位顶到未来、之后什么都拉不到。
+      const maxRemote = remote.reduce(
+        (m, r) => Math.max(m, (r.updatedAt as number) ?? 0),
+        watermark,
+      )
       await db.syncMeta.put({
         table: name,
-        lastPulledAt: Date.now(),
+        lastPulledAt: Math.min(maxRemote, Date.now()),
         lastPushedAt: meta?.lastPushedAt ?? 0,
       })
     } catch (e) {
@@ -213,6 +228,31 @@ export async function pullAll(settings?: AppSettings): Promise<SyncResult> {
   }
 
   return result
+}
+
+/**
+ * 物理清除本地所有墓碑（deletedAt 非空）。
+ *
+ * 仅在**未配置云端**时使用：此时没有云端可「复活」，启动后清理一次即可，
+ * 避免软删记录长期堆积。
+ * ⚠️ 已配置云端时**不要**调用 —— 墓碑必须保留到推送成功，
+ * 否则删除永远到不了云端（pushAll 会在推送成功后自行清理对应的墓碑）。
+ */
+export async function purgeTombstones(): Promise<number> {
+  let total = 0
+  for (const name of SYNC_TABLES) {
+    try {
+      const table = (db as unknown as Record<string, Table<never, string>>)[name]
+      const rows = (await table.toArray()) as Array<{ id: string; deletedAt?: number | null }>
+      const ids = rows.filter((r) => r.deletedAt).map((r) => r.id)
+      if (ids.length === 0) continue
+      await table.bulkDelete(ids)
+      total += ids.length
+    } catch {
+      /* 单表异常不影响其它表 */
+    }
+  }
+  return total
 }
 
 /** 完整同步：先推送后拉取（含设置同步，设置失败不影响业务表同步结果） */

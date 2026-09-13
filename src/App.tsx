@@ -2,6 +2,9 @@ import { useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { useSettings } from '@/store/useSettings'
 import { useAutoSync } from '@/hooks/useAutoSync'
+import { isSupabaseConfigured } from '@/lib/supabase'
+import { purgeTombstones } from '@/lib/sync'
+import { ensureCheckInRuleBindings } from '@/lib/points'
 import AppShell from '@/components/layout/AppShell'
 import DashboardPage from '@/pages/Dashboard'
 import StudentsPage from '@/pages/Students'
@@ -24,6 +27,18 @@ export default function App() {
   useEffect(() => {
     void init()
   }, [init])
+
+  // 启动后的一次性本地数据维护（等设置加载完再执行，避免把「尚未读到云端配置」当成纯本地）：
+  //  1) 未配置云端 → 清理本地墓碑（没有云端可复活，留着只会长期堆积）；
+  //     已配置云端 → 必须保留墓碑，等 pushAll 推送成功后自行清理；
+  //  2) 旧打卡任务固化 ruleIds（否则之后新增规则会追溯影响历史积分）。
+  useEffect(() => {
+    if (!loaded) return
+    if (!isSupabaseConfigured(useSettings.getState().settings)) {
+      void purgeTombstones()
+    }
+    void ensureCheckInRuleBindings()
+  }, [loaded])
 
   if (!loaded) {
     return (

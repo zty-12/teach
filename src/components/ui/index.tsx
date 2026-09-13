@@ -109,7 +109,10 @@ export function CardHeader({
         <h3 className="truncate text-[15px] font-medium text-text-1">{title}</h3>
         {subtitle && <p className="mt-0.5 text-xs text-text-2">{subtitle}</p>}
       </div>
-      {action}
+      {/* ⚠ 必须 shrink-0：Button 自身是 shrink-0，若这里不锁宽，窄屏（390px）下本容器会被压到
+          103px 而两个按钮需要 155px → 按钮溢出卡片、被视口裁掉（移动端打卡页「关闭」实测溢出 19px）。
+          与 PageHeader 的写法保持一致。 */}
+      {action && <div className="flex shrink-0 items-center gap-2">{action}</div>}
     </div>
   )
 }

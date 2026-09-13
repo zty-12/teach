@@ -70,12 +70,50 @@ export default function GroupsPage() {
     setMemberModalOpen(true)
   }
   async function handleDelete(g: Group) {
-    if (!confirm(`确定删除班课「${g.name}」吗？该班课下的排课记录仍会保留为「班课」关联，但成员关系会一并清除。`)) return
-    await db.transaction('rw', db.groups, db.groupMembers, async () => {
-      await db.groups.put(markDeleted(g))
-      const rel = liveMembers.filter((m) => m.groupId === g.id)
-      for (const m of rel) await db.groupMembers.put(markDeleted(m))
-    })
+    // 未完成（pending）课程在成员关系被清除后，出席名单会变空 → 永远无法再结算。
+    // 与其留下这种「打不开名单」的孤儿课程，不如随班课一并软删（v24 审查：P3）。
+    const pendingCourses = (await db.courses.toArray()).filter(
+      (c) => !c.deletedAt && c.groupId === g.id && c.status !== 'done' && c.status !== 'cancelled',
+    )
+    const warn =
+      pendingCourses.length > 0
+        ? `\n\n注意：该班课还有 ${pendingCourses.length} 节未完成课程，成员清除后将无法再结算，会随班课一并删除。`
+        : ''
+    if (
+      !confirm(
+        `确定删除班课「${g.name}」吗？成员关系会一并清除（已完成课程的历史记录保留）。${warn}`,
+      )
+    ) {
+      return
+    }
+    const pendingIds = new Set(pendingCourses.map((c) => c.id))
+    const attToSoftDelete = (await db.courseAttendances.toArray()).filter(
+      (a) => !a.deletedAt && pendingIds.has(a.courseId),
+    )
+    // 知识点关联同样要清：老师完全可能先给未完成课程写了反馈、勾了知识点，
+    // 删班课后这些 courseKnowledges 行没人再管（消费方按活课程取用，不会算错数字，但会永久同步）。
+    const ckToSoftDelete = (await db.courseKnowledges.toArray()).filter(
+      (k) => !k.deletedAt && pendingIds.has(k.courseId),
+    )
+    await db.transaction(
+      'rw',
+      db.groups,
+      db.groupMembers,
+      db.courses,
+      db.courseAttendances,
+      db.courseKnowledges,
+      async () => {
+        await db.groups.put(markDeleted(g))
+        const rel = liveMembers.filter((m) => m.groupId === g.id)
+        for (const m of rel) await db.groupMembers.put(markDeleted(m))
+        for (const id of pendingIds) {
+          const c = await db.courses.get(id)
+          if (c && !c.deletedAt) await db.courses.put(markDeleted(c))
+        }
+        for (const a of attToSoftDelete) await db.courseAttendances.put(markDeleted(a))
+        for (const k of ckToSoftDelete) await db.courseKnowledges.put(markDeleted(k))
+      },
+    )
   }
 
   function handleExport() {

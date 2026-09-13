@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { newId } from '@/lib/db'
 import { Button, Modal } from '@/components/ui'
 import {
@@ -46,19 +46,48 @@ export function AttendanceModal({
 }) {
   const [draft, setDraft] = useState<CourseAttendance[]>([])
   const [error, setError] = useState('')
+  /** 提交中锁：避免连点「保存 + 标记完成」触发重复结算（会二次扣课时） */
+  const [busy, setBusy] = useState(false)
 
-  const studentById = new Map(students.map((s) => [s.id, s]))
-  const courseGroup = course?.groupId ? groups.find((g) => g.id === course.groupId) ?? null : null
+  // 包一层 useMemo：否则每次渲染都会新建 Map / 新数组，
+  // 使下面课酬预览的 useMemo 依赖恒变、memo 完全失效。
+  const studentById = useMemo(() => new Map(students.map((s) => [s.id, s])), [students])
+  const courseGroup = useMemo(
+    () => (course?.groupId ? groups.find((g) => g.id === course.groupId) ?? null : null),
+    [course, groups],
+  )
+  const courseMembers = useMemo(
+    () => groupMembers.filter((m) => m.groupId === course?.groupId),
+    [groupMembers, course],
+  )
 
-  // 加载当前课程的出席记录，按预期学生预填默认
+  // 草稿初始化：只在该弹窗「首次为某节课」初始化时吸收出席记录。
+  // 旧实现把 attendances 放进依赖且每次变化都 setDraft —— 弹窗打开期间任何外部写入
+  // （后台同步拉取、另一个标签页的操作）都会重置老师尚未保存的勾选（v24 审查：P4）。
+  const initCourseRef = useRef<string | null>(null)
+  /** 当前草稿是否只是「默认全员出席」占位（尚无真实出席记录）——真实记录到达时可安全替换 */
+  const seededRef = useRef(false)
+
   useEffect(() => {
-    if (!course) return
-    const current = attendances.filter((a) => a.courseId === course.id)
-    if (current.length > 0) {
-      setDraft(current)
+    if (!course) {
+      initCourseRef.current = null
+      seededRef.current = false
       return
     }
-    // 默认
+    const current = attendances.filter((a) => a.courseId === course.id)
+    const sameCourse = initCourseRef.current === course.id
+
+    if (current.length > 0) {
+      // 有真实出席记录：换课程、或当前仅占位名单（老师尚未手动改动）→ 采用真实记录
+      if (!sameCourse || seededRef.current) {
+        initCourseRef.current = course.id
+        seededRef.current = false
+        setDraft(current)
+      }
+      return
+    }
+    if (sameCourse) return
+    // 首次打开且尚无出席记录 → 预填默认（全员出席）
     const expected: string[] = []
     if (course.groupId) {
       for (const m of groupMembers) {
@@ -79,6 +108,8 @@ export function AttendanceModal({
       deletedAt: null,
       dirty: 1 as const,
     }))
+    initCourseRef.current = course.id
+    seededRef.current = true
     setDraft(seed)
   }, [course, attendances, groupMembers])
 
@@ -86,7 +117,7 @@ export function AttendanceModal({
   // 若在此处上方 return 会造成 hooks 数量不稳定 → React 崩溃白屏）
   const breakdown = useMemo<CompletionBreakdown>(() => {
     if (!course) {
-      return { present: [], absent: [], feeCents: 0, deductions: [], lowBalance: [] }
+      return { present: [], absent: [], feeCents: 0, unitCents: 0, deductions: [], lowBalance: [] }
     }
     const stubStudent = course.studentId ? studentById.get(course.studentId) ?? null : null
     return calculateCompletion({
@@ -94,16 +125,18 @@ export function AttendanceModal({
       attendances: draft,
       student: stubStudent,
       group: courseGroup,
-      groupMembers: groupMembers.filter((m) => m.groupId === course.groupId),
+      groupMembers: courseMembers,
       allStudents: Array.from(studentById.values()),
     })
-  }, [course, draft, studentById, groupMembers, courseGroup])
+  }, [course, draft, studentById, courseMembers, courseGroup])
 
   if (!course) return null
 
   const presentCount = draft.filter((a) => a.present).length
 
   function toggle(studentId: string) {
+    // 老师已手动改动 → 之后到达的「真实出席记录」不再自动覆盖草稿
+    seededRef.current = false
     setDraft((arr) =>
       arr.map((a) =>
         a.studentId === studentId
@@ -114,17 +147,45 @@ export function AttendanceModal({
   }
 
   async function handleSave() {
-    if (!course) return
+    if (!course || busy) return
+    setBusy(true)
     setError('')
-    await onSave(course.id, draft)
-    onClose()
+    try {
+      await onSave(course.id, draft)
+      onClose()
+    } catch (e) {
+      setError(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function handleComplete() {
-    if (!course) return
+    if (!course || busy) return
+    // 已完成过的课：再次「保存 + 完成」会重算并覆盖既有结算。
+    // 注意：重算用的是**本节课首次完成时固定的单价基准**（course.feeUnitCents 快照），
+    // 不会因为之后改了班课 / 学生单价而改变金额 —— 这里只把「旧金额 → 新金额」讲清楚。
+    if (course.status === 'done') {
+      const ok = window.confirm(
+        `这节课已完成结算（原课酬 ${formatMoney(course.feeCents)}）。\n` +
+          `继续将按本节课的定价基准（${formatMoney(breakdown.unitCents)}）重算为 ` +
+          `${formatMoney(breakdown.feeCents)} 并覆盖原结算。\n` +
+          `定价基准在首次完成时固定，之后改动班课 / 学生单价不会影响这节课的课酬。\n\n` +
+          `若只想修正出席、不改动金额，请改用「仅保存」。是否继续？`,
+      )
+      if (!ok) return
+    }
+    setBusy(true)
     setError('')
-    await onSave(course.id, draft)
-    await onComplete(course)
+    try {
+      // 保存出席后再结算；期间按钮禁用 + busy 锁，双击不会触发两次结算
+      await onSave(course.id, draft)
+      await onComplete(course)
+    } catch (e) {
+      setError(`完成失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -134,14 +195,22 @@ export function AttendanceModal({
       title={`出席 · ${course.subject}`}
       footer={
         <>
-          <Button onClick={onClose}>取消</Button>
+          <Button onClick={onClose} disabled={busy}>
+            取消
+          </Button>
           {batchCount <= 1 && (
-            <Button variant="secondary" onClick={() => void handleSave()}>
+            <Button variant="secondary" onClick={() => void handleSave()} disabled={busy}>
               仅保存
             </Button>
           )}
-          <Button variant="primary" onClick={() => void handleComplete()}>
-            {batchCount > 1 ? `保存 + 完成 ${batchCount} 节` : '保存 + 标记完成'}
+          <Button variant="primary" onClick={() => void handleComplete()} disabled={busy}>
+            {busy
+              ? '处理中…'
+              : batchCount > 1
+                ? `保存 + 完成 ${batchCount} 节`
+                : course.status === 'done'
+                  ? '重算并保存'
+                  : '保存 + 标记完成'}
           </Button>
         </>
       }
@@ -150,6 +219,15 @@ export function AttendanceModal({
         {error && (
           <div className="rounded-lg bg-leave-soft px-3 py-2 text-[13px] text-leave">
             {error}
+          </div>
+        )}
+
+        {course.status === 'done' && (
+          <div className="rounded-lg bg-pending-soft px-3 py-2 text-[13px] text-pending">
+            本课已完成结算（原课酬 {formatMoney(course.feeCents)}，定价基准{' '}
+            {formatMoney(breakdown.unitCents)}）。
+            「重算并保存」按本节课的定价基准重算并覆盖原金额，只随出席人数变化，不受班课 / 学生单价变更影响；
+            只想修正出席请用「仅保存」。
           </div>
         )}
 
@@ -200,6 +278,7 @@ export function AttendanceModal({
                   <button
                     type="button"
                     onClick={() => toggle(a.studentId)}
+                    disabled={busy}
                     aria-pressed={a.present}
                     className={cn(
                       'flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 text-white',

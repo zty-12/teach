@@ -8,7 +8,7 @@
  *    因此老师反复修改打卡状态不会重复加分。
  *  - **规则可配置**：base=每次打卡的基础分（默认 1）；bonus=满足条件额外奖励。
  */
-import { db, touch, withSyncFields } from './db'
+import { db, ensureDefaultPointRules, markDeleted, touch, withSyncFields } from './db'
 import type {
   CheckInRecord,
   CheckInTask,
@@ -43,8 +43,11 @@ export function isCheckinRule(r: PointRule): boolean {
 
 /**
  * 解析一个打卡任务实际生效的规则。
- *  - 有 ruleIds → 从规则库取（保持任务里的顺序）
- *  - 无 ruleIds → 回退到「所有启用的打卡规则」（旧数据行为不变）
+ *  - 有 ruleIds（含空数组）→ 只从规则库取这些（空数组 = 明确不引用任何规则）
+ *  - 无 ruleIds（undefined，仅旧数据）→ 回退到「所有启用的打卡规则」
+ *
+ * 注意：`[]` 与 `undefined` 语义不同 —— 老师把规则全部清空时写的是 `[]`，
+ * 必须解释成「不加任何分」，而不是「回退到全部规则」。
  */
 export function resolveCheckInRules(
   task: CheckInTask,
@@ -61,7 +64,7 @@ export function resolveCheckInRules(
     enabled: r.enabled,
   })
   const ids = task.ruleIds
-  if (ids && ids.length > 0) {
+  if (Array.isArray(ids)) {
     const map = new Map(live.map((r) => [r.id, r]))
     const out: ResolvedCheckInRule[] = []
     for (const id of ids) {
@@ -76,6 +79,9 @@ export function resolveCheckInRules(
 
 /** 取启用中的打卡规则 id 列表（新建打卡任务时的默认适用范围） */
 export async function defaultCheckInRuleIds(): Promise<string[]> {
+  // 规则库为空时先补齐默认规则（与课堂规则 defaultClassRuleIds 的处理一致），
+  // 否则全新安装会创建出「零规则」的打卡任务，怎么打卡都不加分。
+  await ensureDefaultPointRules()
   const all = await db.pointRules.toArray()
   return all
     .filter((r) => !r.deletedAt && isCheckinRule(r) && r.enabled)
@@ -138,32 +144,61 @@ function compare(actual: number, op: PointRuleCondition['operator'], expected: n
   return actual === expected
 }
 
+/**
+ * 表快照：一次调用内复用 records / tasks，避免在「记录 × 规则」循环里反复全表扫描。
+ * （此前 recomputeTaskPoints 每条 (记录, 规则) 都会 toArray 两张表，
+ *  7 天 × 40 人 × 2 条条件规则 ≈ 560 次全表扫描。）
+ */
+interface RecordsSnapshot {
+  records: CheckInRecord[]
+  tasks: CheckInTask[]
+  /** 学生 → 已完成记录缓存（同一次调用内惰性构建） */
+  doneCache: Map<string, Array<{ record: CheckInRecord; task: CheckInTask }>>
+}
+
 /** 取某学生的历史打卡（done）记录，按批次时间升序 */
-async function doneRecordsOf(studentId: string): Promise<
-  Array<{ record: CheckInRecord; task: CheckInTask }>
-> {
-  const [records, tasks] = await Promise.all([
-    db.checkInRecords.toArray(),
-    db.checkInTasks.toArray(),
-  ])
-  const taskMap = new Map(tasks.filter((t) => !t.deletedAt).map((t) => [t.id, t]))
+async function doneRecordsOf(
+  studentId: string,
+  snapshot?: RecordsSnapshot,
+): Promise<Array<{ record: CheckInRecord; task: CheckInTask }>> {
+  if (!snapshot) {
+    return doneRecordsOf(studentId, await buildSnapshot())
+  }
+  const cached = snapshot.doneCache.get(studentId)
+  if (cached) return cached
+
+  const taskMap = new Map(snapshot.tasks.filter((t) => !t.deletedAt).map((t) => [t.id, t]))
   const out: Array<{ record: CheckInRecord; task: CheckInTask }> = []
-  for (const r of records) {
+  for (const r of snapshot.records) {
     if (r.deletedAt || r.studentId !== studentId || r.status !== 'done') continue
     const t = taskMap.get(r.taskId)
     if (!t) continue
     out.push({ record: r, task: t })
   }
   // 按批次时间升序（用 createdAt 作为批次的时间锚点，稳定且与 dueAt 无关）
-  return out.sort((a, b) => a.task.createdAt - b.task.createdAt)
+  out.sort((a, b) => a.task.createdAt - b.task.createdAt)
+  snapshot.doneCache.set(studentId, out)
+  return out
+}
+
+/** 构建一次性的表快照（供一次重算内复用） */
+async function buildSnapshot(): Promise<RecordsSnapshot> {
+  const [records, tasks] = await Promise.all([
+    db.checkInRecords.toArray(),
+    db.checkInTasks.toArray(),
+  ])
+  return { records, tasks, doneCache: new Map() }
 }
 
 /**
  * 计算「连续打卡天数」：
  * 把所有 done 的批次按其日期去重，从最新一天往回数，连续有打卡的天数。
  */
-export async function consecutiveDays(studentId: string): Promise<number> {
-  const dones = await doneRecordsOf(studentId)
+export async function consecutiveDays(
+  studentId: string,
+  snapshot?: RecordsSnapshot,
+): Promise<number> {
+  const dones = await doneRecordsOf(studentId, snapshot)
   const daySet = new Set<number>()
   for (const { record, task } of dones) {
     // 周期任务用每条记录的打卡日；单次任务回退 dueAt / createdAt
@@ -182,8 +217,11 @@ export async function consecutiveDays(studentId: string): Promise<number> {
 }
 
 /** 计算「准时打卡率」：done 记录中 checkedAt <= dueAt 的比例（0-100） */
-export async function onTimeRate(studentId: string): Promise<number> {
-  const dones = await doneRecordsOf(studentId)
+export async function onTimeRate(
+  studentId: string,
+  snapshot?: RecordsSnapshot,
+): Promise<number> {
+  const dones = await doneRecordsOf(studentId, snapshot)
   if (dones.length === 0) return 0
   let onTime = 0
   let counted = 0
@@ -214,18 +252,19 @@ export async function evaluateCondition(
   cond: PointRuleCondition,
   studentId: string,
   records: CheckInRecord[],
+  snapshot?: RecordsSnapshot,
 ): Promise<boolean> {
   switch (cond.metric) {
     case 'checkin_count': {
-      const dones = await doneRecordsOf(studentId)
+      const dones = await doneRecordsOf(studentId, snapshot)
       return compare(dones.length, cond.operator, cond.value)
     }
     case 'consecutive_days': {
-      const days = await consecutiveDays(studentId)
+      const days = await consecutiveDays(studentId, snapshot)
       return compare(days, cond.operator, cond.value)
     }
     case 'on_time_rate': {
-      const rate = await onTimeRate(studentId)
+      const rate = await onTimeRate(studentId, snapshot)
       return compare(rate, cond.operator, cond.value)
     }
     case 'all_done': {
@@ -253,19 +292,22 @@ export async function recomputeTaskPoints(taskId: string): Promise<number> {
   const task = await db.checkInTasks.get(taskId)
   if (!task || task.deletedAt) return 0
 
-  const [allRecords, allRules] = await Promise.all([
-    db.checkInRecords.toArray(),
+  const [snapshot, allRules, allLedgers] = await Promise.all([
+    buildSnapshot(),
     db.pointRules.toArray(),
+    db.pointLedgers.toArray(),
   ])
-  const records = allRecords.filter((r) => !r.deletedAt && r.taskId === taskId)
+  const records = snapshot.records.filter((r) => !r.deletedAt && r.taskId === taskId)
   const rules = resolveCheckInRules(task, allRules)
 
-  // 1) 清除该批次已生成的 earn 流水（幂等的关键）
-  const oldLedgers = (await db.pointLedgers.toArray()).filter(
-    (l) => l.taskId === taskId && l.kind === 'earn',
+  // 1) 冲销该批次已生成的 earn 流水（幂等的关键）
+  //    ⚠️ 必须**软删**（留墓碑）而不是物理删除：否则云端仍保留这批旧流水，
+  //    换设备/清缓存后重新拉取会把它们带回来 → 同一批打卡被重复计分。
+  const oldLedgers = allLedgers.filter(
+    (l) => !l.deletedAt && l.taskId === taskId && l.kind === 'earn',
   )
   if (oldLedgers.length > 0) {
-    await db.pointLedgers.bulkDelete(oldLedgers.map((l) => l.id))
+    await db.pointLedgers.bulkPut(oldLedgers.map((l) => markDeleted(l)))
   }
 
   // 2) 重新生成：自动累加规则直接生效；带条件规则按条件判定；档位规则按选中项生效
@@ -278,7 +320,8 @@ export async function recomputeTaskPoints(taskId: string): Promise<number> {
       if (rule.mode === 'tier') {
         if (rec.selectedRuleId !== rule.id) continue
       } else if (rule.condition) {
-        const hit = await evaluateCondition(rule.condition, rec.studentId, records)
+        // 传 snapshot 让条件评估复用同一份表数据（避免逐条全表扫描）
+        const hit = await evaluateCondition(rule.condition, rec.studentId, records, snapshot)
         if (!hit) continue
       }
       rows.push(
@@ -314,53 +357,65 @@ export async function redeemReward(
   studentId: string,
   rewardItemId: string,
 ): Promise<RedeemResult> {
-  const [item, student, balance] = await Promise.all([
-    db.rewardItems.get(rewardItemId),
-    db.students.get(studentId),
-    computeBalance(studentId),
-  ])
-  if (!item || item.deletedAt) return { ok: false, message: '奖励项不存在' }
-  if (!item.enabled) return { ok: false, message: '该奖励已下架' }
-  if (!student) return { ok: false, message: '学生不存在' }
-  if (balance.balance < item.pointsCost) {
-    return {
-      ok: false,
-      message: `积分不足：需要 ${item.pointsCost} 分，当前 ${balance.balance} 分`,
-    }
-  }
-  if (item.stock !== null && item.stock <= 0) {
-    return { ok: false, message: '库存不足' }
-  }
+  // ⚠ 「读库存 → 校验 → 写回」必须包在**同一事务**里，并在事务内重读库存。
+  //   否则两个并发兑换都会读到旧 stock 并通过校验，各自写回 stock-1（覆盖写丢一次扣减），
+  //   结果是「1 个库存卖出 2 份、扣两次积分」（v26 审查实证：P3）。
+  return db.transaction(
+    'rw',
+    db.rewardItems,
+    db.students,
+    db.pointLedgers,
+    db.redemptions,
+    async () => {
+      const [item, student, balance] = await Promise.all([
+        db.rewardItems.get(rewardItemId),
+        db.students.get(studentId),
+        computeBalance(studentId),
+      ])
+      if (!item || item.deletedAt) return { ok: false as const, message: '奖励项不存在' }
+      if (!item.enabled) return { ok: false as const, message: '该奖励已下架' }
+      if (!student) return { ok: false as const, message: '学生不存在' }
+      if (balance.balance < item.pointsCost) {
+        return {
+          ok: false as const,
+          message: `积分不足：需要 ${item.pointsCost} 分，当前 ${balance.balance} 分`,
+        }
+      }
+      if (item.stock !== null && item.stock <= 0) {
+        return { ok: false as const, message: '库存不足' }
+      }
 
-  const now = Date.now()
-  const cost = item.pointsCost
-  await db.pointLedgers.put(
-    withSyncFields<PointLedger>({
-      studentId,
-      delta: -cost,
-      kind: 'spend',
-      reason: `兑换：${item.name}`,
-      taskId: null,
-      createdAt: now,
-    }),
+      const now = Date.now()
+      const cost = item.pointsCost
+      await db.pointLedgers.put(
+        withSyncFields<PointLedger>({
+          studentId,
+          delta: -cost,
+          kind: 'spend',
+          reason: `兑换：${item.name}`,
+          taskId: null,
+          createdAt: now,
+        }),
+      )
+      await db.redemptions.put(
+        withSyncFields<Redemption>({
+          studentId,
+          rewardItemId: item.id,
+          rewardName: item.name,
+          pointsSpent: cost,
+          status: 'pending',
+          redeemedAt: now,
+          fulfilledAt: null,
+          note: '',
+          createdAt: now,
+        }),
+      )
+      if (item.stock !== null) {
+        await db.rewardItems.put(touch({ ...item, stock: item.stock - 1 }))
+      }
+      return { ok: true as const, message: `兑换成功，消耗 ${cost} 积分` }
+    },
   )
-  await db.redemptions.put(
-    withSyncFields<Redemption>({
-      studentId,
-      rewardItemId: item.id,
-      rewardName: item.name,
-      pointsSpent: cost,
-      status: 'pending',
-      redeemedAt: now,
-      fulfilledAt: null,
-      note: '',
-      createdAt: now,
-    }),
-  )
-  if (item.stock !== null) {
-    await db.rewardItems.put(touch({ ...item, stock: item.stock - 1 }))
-  }
-  return { ok: true, message: `兑换成功，消耗 ${cost} 积分` }
 }
 
 /** 手动调整积分（老师加/减分，写 adjust 流水） */
@@ -454,6 +509,8 @@ export async function createCheckInTask(input: {
           note: '',
           aiFeedback: '',
           checkedAt: null,
+          // v-next：打卡时固化「当天对应打卡任务」内容快照，任务被改/删后历史仍自包含
+          taskSnapshot: { title: task.title, note: task.note, cadenceLabel: task.cadenceLabel },
           createdAt: now,
         }),
       )
@@ -461,6 +518,25 @@ export async function createCheckInTask(input: {
   }
   if (rows.length > 0) await db.checkInRecords.bulkPut(rows)
   return { task, created: rows.length }
+}
+
+/**
+ * 解析打卡记录对应的任务内容（v-next）。
+ * 优先用记录内固化的 `taskSnapshot`（打卡时快照，历史不随任务编辑漂移），
+ * 缺则回退按 `taskId` 关联传入的任务对象（兼容旧数据 / 快照缺失）。
+ * 返回 `{ title, note }` 或 `undefined`（无任何任务上下文时）。
+ */
+export function resolveCheckInTaskContent(
+  record: Pick<CheckInRecord, 'taskSnapshot' | 'taskId'>,
+  task?: CheckInTask | null,
+): { title: string; note: string } | undefined {
+  if (record.taskSnapshot && (record.taskSnapshot.title || record.taskSnapshot.note)) {
+    return { title: record.taskSnapshot.title, note: record.taskSnapshot.note }
+  }
+  if (task && (task.title || task.note)) {
+    return { title: task.title, note: task.note }
+  }
+  return undefined
 }
 
 /** 把打卡日集合格式化为用户可读的节奏文案 */
@@ -529,6 +605,8 @@ export async function updateCheckInTaskDays(
           note: '',
           aiFeedback: '',
           checkedAt: null,
+          // v-next：补天记录同样固化任务快照（沿用当时任务内容）
+          taskSnapshot: { title: task.title, note: task.note, cadenceLabel: task.cadenceLabel },
           createdAt: now,
         }),
       )
@@ -555,7 +633,7 @@ export async function ensureAutoCheckInTask(input: {
   fallbackStudentIds: string[]
 }): Promise<{ created: boolean }> {
   const existing = (await db.checkInTasks.toArray()).find(
-    (t) => !t.deletedAt && t.courseId === input.courseId,
+    (t) => t.courseId === input.courseId && (!t.deletedAt || t.deletedReason !== 'revert'),
   )
   if (existing) return { created: false }
 
@@ -617,6 +695,9 @@ export async function ensureAutoCheckInTask(input: {
     cadenceLabel: formatCadenceLabel(days),
     memberIds: ids,
     days,
+    // 与手动创建的任务保持一致：固化创建时的规则集，
+    // 否则后续新增的规则会「追溯」影响这个历史任务（历史积分悄悄变化）。
+    ruleIds: await defaultCheckInRuleIds(),
     auto: true,
   })
   return { created: true }
@@ -654,15 +735,58 @@ export async function updateCheckInRecord(
   await recomputeTaskPoints(record.taskId)
 }
 
-/** 删除打卡批次（连同其记录与积分流水，物理清除） */
-export async function deleteCheckInTask(taskId: string): Promise<void> {
+/**
+ * 删除打卡批次（连同其记录与积分流水）。
+ *
+ * ⚠️ 一律走**软删**：保留墓碑（deletedAt + dirty=1）才能把删除推到云端。
+ * 早先这里是物理删除，导致云端仍保留任务、换设备/清缓存后「复活」。
+ * 本地墓碑由 sync.ts 在推送成功后清理；纯本地模式由启动时的 purgeTombstones 回收。
+ *
+ * @param opts.reason 'manual'（默认，老师手动删）| 'revert'（取消完成时的自动回收）
+ */
+export async function deleteCheckInTask(
+  taskId: string,
+  opts?: { reason?: 'manual' | 'revert' },
+): Promise<void> {
+  const reason = opts?.reason ?? 'manual'
   const [records, ledgers] = await Promise.all([
     db.checkInRecords.toArray(),
     db.pointLedgers.toArray(),
   ])
-  const recIds = records.filter((r) => r.taskId === taskId).map((r) => r.id)
-  if (recIds.length > 0) await db.checkInRecords.bulkDelete(recIds)
-  const ledgerIds = ledgers.filter((l) => l.taskId === taskId).map((l) => l.id)
-  if (ledgerIds.length > 0) await db.pointLedgers.bulkDelete(ledgerIds)
-  await db.checkInTasks.delete(taskId)
+  const recs = records.filter((r) => !r.deletedAt && r.taskId === taskId)
+  if (recs.length > 0) {
+    await db.checkInRecords.bulkPut(recs.map((r) => markDeleted(r)))
+  }
+  const lgs = ledgers.filter((l) => !l.deletedAt && l.taskId === taskId)
+  if (lgs.length > 0) await db.pointLedgers.bulkPut(lgs.map((l) => markDeleted(l)))
+  const task = await db.checkInTasks.get(taskId)
+  if (task && !task.deletedAt) {
+    await db.checkInTasks.put(markDeleted({ ...task, deletedReason: reason }))
+  }
+}
+
+/**
+ * 一次性迁移（v23）：把「没有 ruleIds」的旧打卡任务固化为「迁移当时启用的规则集」。
+ *
+ * 背景：无 ruleIds 的任务会回退成「所有启用的打卡规则」，于是老师之后新增一条规则，
+ * 历史任务在重算时会一并吸收 → 历史积分悄悄变化。固化后历史不再漂移。
+ *
+ * 幂等：只处理 `ruleIds === undefined` 的任务；已固化/已被老师显式清空（[]）的不动。
+ */
+export async function ensureCheckInRuleBindings(): Promise<number> {
+  const [tasks, rules] = await Promise.all([
+    db.checkInTasks.toArray(),
+    db.pointRules.toArray(),
+  ])
+  const legacy = tasks.filter((t) => !t.deletedAt && t.ruleIds === undefined)
+  if (legacy.length === 0) return 0
+  const ids = rules
+    .filter((r) => !r.deletedAt && isCheckinRule(r) && r.enabled)
+    .sort((a, b) => a.order - b.order)
+    .map((r) => r.id)
+  const now = Date.now()
+  await db.checkInTasks.bulkPut(
+    legacy.map((t) => ({ ...t, ruleIds: ids, updatedAt: now, dirty: 1 as const })),
+  )
+  return legacy.length
 }

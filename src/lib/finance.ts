@@ -112,10 +112,14 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
           .filter((id) => memberIds.includes(id))
       : memberIds
     if (presentIds.length === 0 || course.feeCents === 0) return []
-    const share = Math.round(course.feeCents / presentIds.length)
-    return presentIds.map((sid) => ({
+    // 均摊必须保证「各份额之和 === 课酬」：直接 Math.round 会有舍入残留
+    // （如 2000/3 → 667×3 = 2001 ≠ 2000，分账合计与原课酬差 1 分）。
+    // 改为向下取整 + 余数补给前 remainder 位（v24 审查：P3）。
+    const base = Math.floor(course.feeCents / presentIds.length)
+    const remainder = course.feeCents - base * presentIds.length
+    return presentIds.map((sid, i) => ({
       sid,
-      share,
+      share: base + (i < remainder ? 1 : 0),
       prepaid: studentMap.get(sid)?.billingRule === 'prepaid',
     }))
   }

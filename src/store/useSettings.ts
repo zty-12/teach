@@ -31,6 +31,22 @@ function applySubjectColors(colors: string[]) {
   })
 }
 
+/**
+ * 系统主题监听只注册一次。
+ * init() 可能被多次调用（启动 + 路由重挂载等），旧写法每次都 addEventListener 却从不解绑，
+ * 会累积监听器（v26 审查：P4）。
+ */
+let mediaBound = false
+function bindSystemThemeWatcher() {
+  if (mediaBound) return
+  mediaBound = true
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (useSettings.getState().settings.themeMode === 'system') {
+      applyTheme('system')
+    }
+  })
+}
+
 interface SettingsState {
   settings: AppSettings
   loaded: boolean
@@ -50,12 +66,8 @@ export const useSettings = create<SettingsState>((set, get) => ({
     applySubjectColors(s.subjectColors)
     set({ settings: s, loaded: true })
 
-    // 跟随系统时，监听系统主题变化
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-      if (useSettings.getState().settings.themeMode === 'system') {
-        applyTheme('system')
-      }
-    })
+    // 跟随系统时，监听系统主题变化（只注册一次，见 bindSystemThemeWatcher）
+    bindSystemThemeWatcher()
   },
 
   update: async (patch) => {

@@ -74,6 +74,27 @@ export class LlmError extends Error {
 }
 
 /**
+ * 单次请求超时（毫秒）。
+ * ⚠ 没有超时的话，上游 TCP 黑洞会让 fetch 一直挂着 → UI 永远 loading（v26 审查：P4）。
+ * 用 AbortController 手写，而非 AbortSignal.timeout —— 后者在旧 WebView 里缺失。
+ */
+const LLM_REQUEST_TIMEOUT_MS = 120_000
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = LLM_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
  * 调用 LLM 的 chat completion。
  * jsonMode=true 时请求结构化 JSON 输出（部分服务商不支持，会兜底回退到普通模式重试）。
  */
@@ -113,7 +134,7 @@ export async function chat(
       : endpoint
     let res: Response
     try {
-      res = await fetch(url, {
+      res = await fetchWithTimeout(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
@@ -204,7 +225,7 @@ async function requestViaProxy(
     headers.Authorization = `Bearer ${cfg.proxyToken ?? ''}`
   }
   try {
-    res = await fetch(cfg.proxyUrl!.trim(), {
+    res = await fetchWithTimeout(cfg.proxyUrl!.trim(), {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -526,8 +547,8 @@ export interface ReportInput {
   tags: string[]
   /** 周期内课后反馈摘要列表 */
   feedbackSummaries: string[]
-  /** 周期内打卡备注（含日期+AI家长反馈），按日期升序 */
-  checkInNotes: Array<{ dayAt: number; note: string; aiFeedback: string }>
+  /** 周期内打卡备注（含日期+AI家长反馈+对应打卡任务内容），按日期升序 */
+  checkInNotes: Array<{ dayAt: number; note: string; aiFeedback: string; taskTitle?: string; taskNote?: string }>
 }
 
 export interface GeneratedReport {
@@ -535,7 +556,7 @@ export interface GeneratedReport {
   content: string
 }
 
-function buildReportPrompt(input: ReportInput): Array<{ role: 'system' | 'user'; content: string }> {
+export function buildReportPrompt(input: ReportInput): Array<{ role: 'system' | 'user'; content: string }> {
   const fmt = (t: number) =>
     new Date(t).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
   const feedbackList =
@@ -548,6 +569,11 @@ function buildReportPrompt(input: ReportInput): Array<{ role: 'system' | 'user';
           .map((n) => {
             const date = new Date(n.dayAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
             const parts = [`${date} 打卡备注：${n.note}`]
+            if (n.taskTitle || n.taskNote) {
+              const taskParts = [`打卡任务：${n.taskTitle ?? '（未命名任务）'}`]
+              if (n.taskNote) taskParts.push(`要求：${n.taskNote}`)
+              parts.push(`  · ${taskParts.join('；')}`)
+            }
             if (n.aiFeedback) parts.push(`  · 教师观察：${n.aiFeedback}`)
             return parts.join('\n')
           })
@@ -574,7 +600,7 @@ function buildReportPrompt(input: ReportInput): Array<{ role: 'system' | 'user';
 - 学习标签：${input.tags.length > 0 ? input.tags.join('、') : '暂无'}
 - 本周期课后反馈摘要：
 ${feedbackList}
-- 本周期打卡备注（含视频观察）：
+- 本周期打卡备注（含对应打卡任务与教师观察）：
 ${checkInList}
 
 请基于以上真实素材撰写，不要编造未提及的事实。`,
@@ -1793,6 +1819,7 @@ export async function generateCheckInFeedback(
   note: string,
   studentName?: string,
   profile?: StudentProfileSnapshot,
+  task?: { title: string; note?: string; cadenceLabel?: string },
 ): Promise<string> {
   const profileBlock = profile && (profile.summary || profile.strengths || profile.weaknesses || profile.teachingStyle)
     ? `
@@ -1810,6 +1837,16 @@ export async function generateCheckInFeedback(
 4) 若画像与本次表现不符，以本次表现为准，画像只作参考。`
     : ''
 
+  const taskBlock = task && (task.title || task.note)
+    ? `
+【本次打卡对应的任务】
+- 任务名称：${task.title || '（未命名）'}
+${task.note ? `- 任务要求：${task.note}` : ''}
+${task.cadenceLabel ? `- 打卡节奏：${task.cadenceLabel}` : ''}
+
+请结合任务要求判断学员完成情况：1) 是否达成了任务目标；2) 反馈里点明"完成了任务的哪一部分"或"还差哪里"；3) 家庭练习建议尽量贴合任务要求。`
+    : ''
+
   const messages = [
     {
       role: 'system' as const,
@@ -1818,11 +1855,14 @@ export async function generateCheckInFeedback(
         '要求：1) 语气亲切但专业；2) 先肯定表现，再指出可改进点（如有）；3) 给出 1-2 条可操作的家庭练习建议；4) 200 字以内；5) 直接输出反馈正文，不要加标题或前缀。' +
         (profileBlock
           ? '注意：本次反馈必须结合【学员历史画像】做个性化处理，避免"每次反馈都长得一样"。'
+          : '') +
+        (taskBlock
+          ? '注意：本次反馈必须结合【本次打卡对应的任务】判断完成度，避免空泛。'
           : ''),
     },
     {
       role: 'user' as const,
-      content: `学员：${studentName ?? '学生'}\n老师观察记录：${note}\n${profileBlock}`,
+      content: `学员：${studentName ?? '学生'}\n老师观察记录：${note}\n${taskBlock}${profileBlock}`,
     },
   ]
   const raw = await chat(cfgFrom(settings), messages, false)

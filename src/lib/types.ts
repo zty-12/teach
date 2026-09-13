@@ -154,6 +154,14 @@ export interface Course extends SyncFields {
    * 旧数据无此字段时回退到按出席重算。
    */
   deductedHours?: Array<{ studentId: string; hours: number }> | null
+  /**
+   * v26：结算时使用的「单位课酬基准」快照（分）。
+   *  - 班课：= 完成当时的 perStudentFeeCents（人均课酬）
+   *  - 1对1：= 完成当时的 hourlyFeeCents；补课则取其排课时写入的课酬单价
+   * 首次完成时写入，之后班课 / 学生单价再如何变更，这节课的历史课酬都不会被追溯改写；
+   * 重算只随出席人数变化。旧数据无此字段时回退到「当前单价」。
+   */
+  feeUnitCents?: number | null
 }
 
 // ============================================================
@@ -412,7 +420,8 @@ export interface CheckInTask extends SyncFields {
   note: string
   /**
    * 本任务适用的打卡规则 id（v20，引用 pointRules 中 scope='checkin' 的规则）。
-   * 空数组 / undefined = 兼容旧数据：沿用所有启用的打卡规则。
+   *  - `undefined` = 兼容旧数据：沿用所有启用的打卡规则；
+   *  - `[]` = 明确「不引用任何规则」（老师把规则全清空了）。
    */
   ruleIds?: string[]
   /**
@@ -420,6 +429,11 @@ export interface CheckInTask extends SyncFields {
    * 「取消完成」时据此清理对应打卡任务（避免误删老师手动创建的课程打卡）。
    */
   auto?: boolean
+  /**
+   * v23：软删来源，用于区分「老师手动删除」与「取消完成时的自动回收」。
+   * 手动删除=不再自动重建；revert=允许「重新完成」时重建。
+   */
+  deletedReason?: 'manual' | 'revert' | null
   createdAt: number
 }
 
@@ -429,6 +443,20 @@ export const CHECKIN_STATUS_LABEL: Record<CheckInStatus, string> = {
   pending: '未打卡',
   done: '已打卡',
   missed: '未通过',
+}
+
+/**
+ * 打卡任务内容快照（v-next，对齐 v27 单价快照 / v29 规则快照）。
+ * 打卡时把「当天对应的打卡任务」标题+要求+节奏固化进记录，
+ * 任务被改/删后历史记录仍自包含，且 AI 生成备注/报告时有上下文。
+ */
+export interface CheckInTaskSnapshot {
+  /** 任务标题（如「课后打卡 · 二次函数」） */
+  title: string
+  /** 打卡要求 / 说明 */
+  note: string
+  /** 节奏文案（如「每天打卡 · 7 天」），可选 */
+  cadenceLabel?: string
 }
 
 /** 单个学生在某个打卡任务、某个打卡日中的记录（一条=一个学生·一天） */
@@ -442,6 +470,11 @@ export interface CheckInRecord extends SyncFields {
   note: string
   /** AI 生成的给家长看的反馈（可选，由「AI 生成家长反馈」按钮写入，可再次编辑） */
   aiFeedback: string
+  /**
+   * 打卡时固化的「当天对应打卡任务」内容快照（v-next）。
+   * 优先用本快照；为空时回退按 `taskId` 关联实时任务（兼容旧数据）。
+   */
+  taskSnapshot?: CheckInTaskSnapshot
   checkedAt: number | null
   /** 手动档位规则选中的规则 id（v20）：mode='tier' 的规则据此计分 */
   selectedRuleId?: string | null
@@ -663,6 +696,34 @@ export interface ClassActivityRule {
   rankTo?: number
 }
 
+/**
+ * 课堂规则的「固化快照」（v29）。
+ *
+ * 为什么需要：ClassActivity 原来只存 ruleIds（引用规则库），
+ * resolveClassRules 每次从规则库「实时」解出分值 —— 老师改规则后，
+ * 任何一次重算（改判/换档/加学生）都会用新分值冲销旧分再记，历史积分被追溯改写。
+ * 这正是 v27 修过的「课酬单价快照（feeUnitCents）」同一族问题。
+ *
+ * 语义：结构 = 某活动「首次被触碰时」的 ResolvedClassRule[] 持久化形态。
+ *  - 有快照 → 一律用快照分值（历史固化，不随规则编辑漂移）；
+ *  - 无快照（历史活动 / 尚未触碰）→ 实时解规则库，并在下一次写库前补写。
+ */
+export interface ClassRuleSnapshotItem {
+  /** 规则 id；旧版内嵌规则用 `legacy:<index>` */
+  id: string
+  name: string
+  points: number
+  mode: 'auto' | 'tier'
+  /** 状态/名次条件；null = 所有过关学生都加 */
+  condition: ClassRuleCondition | null
+  rankN?: number
+  rankFrom?: number
+  rankTo?: number
+  enabled: boolean
+  /** 是否来自规则库（false = 旧版内嵌规则） */
+  fromLibrary: boolean
+}
+
 /** 课堂活动 */
 export interface ClassActivity extends SyncFields {
   title: string
@@ -678,11 +739,23 @@ export interface ClassActivity extends SyncFields {
   sourceCourseId?: string | null
   /**
    * 本活动适用的课堂规则 id（v20，引用 pointRules 中 scope='class' 的规则）。
-   * 用于新建/自动生成的活动；为空时回退到下面的内嵌 rules（旧数据）。
+   *  - `undefined` = 旧数据，回退到下面的内嵌 rules；
+   *  - `[]` = 明确「不引用任何规则」（老师把规则全清空了）。
    */
   ruleIds?: string[]
   /** 旧版内嵌计分规则（v16~v19），仅用于兼容历史活动 */
   rules?: ClassActivityRule[]
+  /**
+   * 课堂规则端到端快照（v29）。
+   *  - 有值（含空数组）→ resolveClassRules 直接用它，不再实时解规则库；
+   *  - 无值 → 回退到「ruleIds 实时解」或「内嵌 rules」，下一次写库前补齐。
+   */
+  classRuleSnapshot?: ClassRuleSnapshotItem[]
+  /**
+   * v23：软删来源，用于区分「老师手动删除」与「取消完成时的自动回收」。
+   * 手动删除=不再自动重建；revert=允许「重新完成」时重建。
+   */
+  deletedReason?: 'manual' | 'revert' | null
   note: string
   createdAt: number
 }

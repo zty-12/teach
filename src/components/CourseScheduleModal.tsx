@@ -13,8 +13,9 @@ import {
   X,
 } from 'lucide-react'
 import { addDays, format } from 'date-fns'
-import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { db, touch, withSyncFields } from '@/lib/db'
 import { revertCompletion } from '@/lib/courseCompletion'
+import { hardDeleteCourses } from '@/lib/batchDelete'
 import { getHolidayInfo } from '@/lib/holidays'
 import {
   BILLING_RULE_LABEL,
@@ -517,8 +518,9 @@ export function CourseScheduleModal({
           if (onComplete) {
             await onComplete(saved)
           } else {
-            // 无完成回调（只读场景）：退回直接置为已完成
-            await db.courses.put(touch({ ...saved, status: 'done' }))
+            // 无完成回调时**不得**绕过出席结算直接置为已完成 ——
+            // 那只会改状态：不扣课时、不写结算、不建打卡（典型的「哑雷」）。
+            window.alert('请从课表点击「完成上课」，以便按实际出席结算课酬与课时。')
             onClose()
           }
           return
@@ -574,8 +576,17 @@ export function CourseScheduleModal({
 
   async function handleDelete() {
     if (!course) return
-    if (!window.confirm('确定删除这节课吗？')) return
-    await db.courses.put(markDeleted(course))
+    if (
+      !window.confirm(
+        '确定彻底删除这节课吗？\n\n将连同其出席、结算、反馈、知识点关联，以及自动生成的课后打卡 / 课堂活动一并删除，且不可恢复！',
+      )
+    ) {
+      return
+    }
+    // 与课表批量删除走**同一条级联**（hardDeleteCourses）：软删出席 / 结算 / 反馈 / 知识点关联 /
+    // 自动生成的任务与活动，最后软删课程本体。
+    // 之前这里只回收自动产物，导致「删除一节课」的行为随入口不同而不同（v27 追问后统一）。
+    await hardDeleteCourses([course.id])
     onClose()
   }
 

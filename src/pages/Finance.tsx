@@ -77,7 +77,9 @@ export default function FinancePage() {
     类型: r.type,
     学生或班课: r.who,
     科目: r.subject,
-    金额元: Math.round(r.amountCents / 100),
+    // 保留角分（与 exportSchedule 的 Number((cents/100).toFixed(2)) 口径一致）；
+    // Math.round 会把 ¥123.45 抹成 ¥123，导出对不上账（v26 审查：P4）
+    金额元: Number((r.amountCents / 100).toFixed(2)),
     备注: r.note,
   }))
 

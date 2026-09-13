@@ -22,27 +22,17 @@ import { adjustPoints } from './points'
 import type {
   ClassActivity,
   ClassActivityRecord,
-  ClassRuleCondition,
   ClassRuleConditionSpec,
+  ClassRuleSnapshotItem,
   PointRule,
 } from './types'
 
-/** 归一化后的课堂规则：库规则引用 or 旧版内嵌规则，引擎只认这个形状 */
-export interface ResolvedClassRule {
-  /** 库规则 id；旧版内嵌规则用 `legacy:<index>` */
-  id: string
-  name: string
-  points: number
-  mode: 'auto' | 'tier'
-  /** 状态/名次条件；null = 所有过关学生都加 */
-  condition: ClassRuleCondition | null
-  rankN?: number
-  rankFrom?: number
-  rankTo?: number
-  enabled: boolean
-  /** 是否来自规则库（false = 旧版内嵌规则） */
-  fromLibrary: boolean
-}
+/**
+ * 归一化后的课堂规则：库规则引用 or 旧版内嵌规则，引擎只认这个形状。
+ * 结构与持久化快照 `ClassRuleSnapshotItem`（types.ts）完全一致，
+ * 因此 `resolveClassRules`（优先读快照时可把快照数组直接当 ResolvedClassRule[] 返回）。
+ */
+export interface ResolvedClassRule extends ClassRuleSnapshotItem {}
 
 /** 新建课堂活动时的默认计分规则（库为空时补齐用） */
 export const DEFAULT_CLASS_RULES: ClassRuleConditionSpec[] = [
@@ -53,15 +43,24 @@ export const DEFAULT_CLASS_RULE_NAMES = ['过关', '第一个额外']
 
 /**
  * 解析一个活动实际生效的规则列表。
- *  - 有 ruleIds → 从规则库取（保持活动里的顺序，缺失/已删的跳过）
- *  - 无 ruleIds → 回退到旧版内嵌 rules（历史活动兼容）
+ *
+ * 优先序（v29 起）：
+ *  1. 有 `classRuleSnapshot`（含空数组）→ 直接用它。这是历史积分不随规则编辑漂移的保证；
+ *  2. 有 ruleIds（含空数组）→ 从规则库取这些（空数组 = 明确不引用任何规则）；
+ *  3. 无 ruleIds（undefined）→ 回退到旧版内嵌 rules（历史活动兼容）。
+ *
+ * 注意：`[]` 与 `undefined` 语义不同 —— 规则全清空写 `[]`，旧数据为 `undefined`。
  */
 export function resolveClassRules(
   activity: ClassActivity,
   lib: PointRule[],
 ): ResolvedClassRule[] {
+  // v29：优先读固化快照 —— 历史分值不随规则库后续编辑漂移
+  if (Array.isArray(activity.classRuleSnapshot)) {
+    return activity.classRuleSnapshot
+  }
   const ids = activity.ruleIds
-  if (ids && ids.length > 0) {
+  if (Array.isArray(ids)) {
     const map = new Map(lib.map((r) => [r.id, r]))
     const out: ResolvedClassRule[] = []
     for (const id of ids) {
@@ -100,6 +99,73 @@ export function resolveClassRules(
 /** 取活动里所有处于「手动档位」模式的启用规则 */
 export function tierRules(rules: ResolvedClassRule[]): ResolvedClassRule[] {
   return rules.filter((r) => r.mode === 'tier' && r.enabled)
+}
+
+/**
+ * 确保某活动已固化「课堂规则快照」（v29）。
+ *
+ * 任一写入入口（改判 / 换档）在计算前调用：
+ *  - 库里已有 `classRuleSnapshot` → 直接返回库里对象（快照一旦写入即权威，永不被覆盖）；
+ *  - 库里无快照（历史活动 / 尚未触碰）→ 用当前解析出的 rules 写回快照，
+ *    从这一刻起该活动的历史分值固化，之后规则库怎么改都不再影响它。
+ *
+ * ⚠ 判定必须**以库为准**：调用方传入的活动对象可能是旧内存快照（useLiveQuery 尚未刷新），
+ * 若用它判断「是否有快照」，会拿新规则覆盖已固化的旧快照 —— 快照就失效了。
+ *
+ * 返回更新后的活动对象（调用方应优先用它，保证拿到最新快照）。
+ */
+export async function ensureClassRuleSnapshot(
+  activity: ClassActivity,
+  rules: ResolvedClassRule[],
+): Promise<ClassActivity> {
+  const fresh = (await db.classActivities.get(activity.id)) ?? activity
+  if (Array.isArray(fresh.classRuleSnapshot)) return fresh
+  const updated = touch({
+    ...fresh,
+    classRuleSnapshot: rules,
+  })
+  await db.classActivities.put(updated)
+  return updated
+}
+
+/**
+ * 从快照 / 规则库解析出的规则列表构建持久化快照项（用于新建活动时直接固化）。
+ * 底层等同 resolveClassRules 的结果，暴露出来便于「引擎解得数、调用方落快照」。
+ */
+export function snapshotFromRules(rules: ResolvedClassRule[]): ClassRuleSnapshotItem[] {
+  return rules
+}
+
+/**
+ * 按 ruleIds 从规则库解析并构建快照（v29，新建活动时固化「当时生效」的课堂规则）。
+ * 无 ruleIds（undefined）时返回 undefined（沿用旧版内嵌规则路径，不固快照）；
+ * 返回空数组表示「明确不引用任何规则」（老师把规则全清空）。
+ */
+export async function buildSnapshotForRuleIds(
+  ruleIds?: string[],
+): Promise<ClassRuleSnapshotItem[] | undefined> {
+  if (!Array.isArray(ruleIds)) return undefined
+  const rules = await db.pointRules.toArray()
+  const map = new Map(rules.map((r) => [r.id, r]))
+  const out: ClassRuleSnapshotItem[] = []
+  for (const id of ruleIds) {
+    const r = map.get(id)
+    if (!r || r.deletedAt) continue
+    const spec = r.classCondition
+    out.push({
+      id: r.id,
+      name: r.name,
+      points: r.points,
+      mode: r.mode ?? 'auto',
+      condition: spec?.condition ?? null,
+      rankN: spec?.rankN,
+      rankFrom: spec?.rankFrom,
+      rankTo: spec?.rankTo,
+      enabled: r.enabled,
+      fromLibrary: true,
+    })
+  }
+  return out
 }
 
 // ============================================================
@@ -150,8 +216,7 @@ export function awardedPoints(
   for (const r of rules) {
     if (!r.enabled) continue
     if (r.mode === 'tier') {
-      // 档位规则：老师选中的那条生效（待检查不计分）
-      if (status !== 'pass' && status !== 'fail') continue
+      // 档位规则：老师选中的那条生效
       if (selectedRuleId && selectedRuleId === r.id) total += r.points
       continue
     }
@@ -221,16 +286,22 @@ export async function resettleActivity(
     passedOrder(siblings).map((r, i) => [r.studentId, i + 1]),
   )
   const tierName = new Map(tierRules(rules).map((r) => [r.id, r.name]))
+  // 当前活动能生效的档位规则 id 集合（v29：用于识别「悬空档位」——选中的规则已删/失效）
+  const tierIds = new Set(tierRules(rules).map((r) => r.id))
 
   const updates: ClassActivityRecord[] = []
   for (const rec of siblings) {
     const rank = rankMap.get(rec.studentId) ?? 0
+    // v29 档位兜底：`selectedRuleId` 指向的档位规则已不在当前规则集合（已删 / ruleIds 被改）时，
+    // 按「无档位」重算，并把失效引用清空 —— 避免历史档位分凭空消失、又永久残留一条悬空 id。
+    const staleTier = Boolean(rec.selectedRuleId) && !tierIds.has(rec.selectedRuleId!)
+    const effectiveSelected = staleTier ? null : rec.selectedRuleId
     // 过关 → 按名次计分；未过关 → 仅「未过关者加」/已选档位生效；待检查 → 不计分
     const expected =
       rec.status === 'pass'
-        ? awardedPoints(rules, rank, 'pass', rec.selectedRuleId)
+        ? awardedPoints(rules, rank, 'pass', effectiveSelected)
         : rec.status === 'fail'
-          ? awardedPoints(rules, 0, 'fail', rec.selectedRuleId)
+          ? awardedPoints(rules, 0, 'fail', effectiveSelected)
           : 0
     const hasLedger = Boolean(rec.ledgerId)
     const forced = opts.force?.has(rec.id) ?? false
@@ -249,7 +320,7 @@ export async function resettleActivity(
             `课堂积分 · ${activity.title}${suffix ? ` · ${suffix}` : ''}`,
           )
         : null
-    updates.push(touch({ ...rec, pointsAwarded: expected, ledgerId }))
+    updates.push(touch({ ...rec, pointsAwarded: expected, ledgerId, ...(staleTier ? { selectedRuleId: null } : {}) }))
   }
   if (updates.length > 0) await db.classActivityRecords.bulkPut(updates)
 }
@@ -257,14 +328,62 @@ export async function resettleActivity(
 /**
  * 设置某学生的状态（过关 / 未过关 / 待检查），随后整体重算名次与积分。
  * 撤销（→ pending）后，后面学生的名次会自动前移。
+ *
+ * v29 并发安全：同活动的写串行化（活动级队列），配合「从库重读」，
+ * 彻底消除并发过关时的名次错乱与重复发流水（两个 resettle 对同一批记录并发改时的竞态）。
  */
-export async function setActivityStatus(
+export function setActivityStatus(
   activity: ClassActivity,
   record: ClassActivityRecord,
   status: 'pending' | 'pass' | 'fail',
-  allRecords: ClassActivityRecord[],
+  _allRecords: ClassActivityRecord[], // 保留签名兼容；v29 起从库重读，不再信任调用方快照
   rules: ResolvedClassRule[],
 ): Promise<void> {
+  return serializeActivity(activity.id, () => doSetActivityStatus(activity, record, status, rules))
+}
+
+/** 设置某学生的「手动档位」（选中的 tier 规则 id；null = 不选），随后重算。 */
+export function setActivityTier(
+  activity: ClassActivity,
+  record: ClassActivityRecord,
+  ruleId: string | null,
+  _allRecords: ClassActivityRecord[], // 保留签名兼容；v29 起从库重读
+  rules: ResolvedClassRule[],
+): Promise<void> {
+  return serializeActivity(activity.id, () =>
+    doSetActivityTier(activity, record, ruleId, rules),
+  )
+}
+
+/** 按活动 id 串行执行的 Promise 队列（v29）：同活动的写入线性化，避免并发重算竞态。 */
+const activityQueue = new Map<string, Promise<unknown>>()
+
+function serializeActivity<T>(activityId: string, task: () => Promise<T>): Promise<T> {
+  const prev = activityQueue.get(activityId) ?? Promise.resolve()
+  const run = prev.then(task, task)
+  // 失败也清理，让后续排队者继续；把原始 promise 返回给调用方报错
+  activityQueue.set(
+    activityId,
+    run.catch(() => {}),
+  )
+  return run
+}
+
+async function doSetActivityStatus(
+  activity: ClassActivity,
+  record: ClassActivityRecord,
+  status: 'pending' | 'pass' | 'fail',
+  rules: ResolvedClassRule[],
+): Promise<void> {
+  // v29：写入前先固化「该活动当时生效的规则快照」。
+  // 若活动已有快照，传入的 rules 可能是从「已改后的规则库」实时解的，会污染重算；
+  // 因此这里一律以固化快照为准（无快照时传入 rules 正是「当时的规则」，正好用于固化）。
+  const act = await ensureClassRuleSnapshot(activity, rules)
+  const effectiveRules =
+    Array.isArray(act.classRuleSnapshot) && act.classRuleSnapshot.length > 0
+      ? ((act.classRuleSnapshot as ClassRuleSnapshotItem[]) as ResolvedClassRule[])
+      : rules
+
   const updated: ClassActivityRecord = {
     ...record,
     status,
@@ -273,39 +392,51 @@ export async function setActivityStatus(
   }
   await db.classActivityRecords.put(touch(updated))
 
-  const merged = [
-    ...allRecords.filter((r) => r.id !== record.id && !r.deletedAt),
-    updated,
-  ]
-  await resettleActivity(activity, merged, {
-    rules,
+  // v29 并发修复：不信任调用方传入的 allRecords 快照（两次并发共用同一份过期的将各判各的第一）。
+  // 以库里最新记录为准计算名次，则并发的第二次运行时能读到第一次已提交的状态。
+  const merged = await freshActivityRecords(activity.id, updated)
+  await resettleActivity(act, merged, {
+    rules: effectiveRules,
     force: new Set([updated.id]),
   })
 }
 
-/**
- * 设置某学生的「手动档位」（选中的 tier 规则 id；null = 不选），随后重算。
- * 用于「背诵熟练 +1 / 不熟练 +0.5」这类需要老师逐人判档的场景。
- */
-export async function setActivityTier(
+async function doSetActivityTier(
   activity: ClassActivity,
   record: ClassActivityRecord,
   ruleId: string | null,
-  allRecords: ClassActivityRecord[],
   rules: ResolvedClassRule[],
 ): Promise<void> {
+  const act = await ensureClassRuleSnapshot(activity, rules)
+  const effectiveRules =
+    Array.isArray(act.classRuleSnapshot) && act.classRuleSnapshot.length > 0
+      ? ((act.classRuleSnapshot as ClassRuleSnapshotItem[]) as ResolvedClassRule[])
+      : rules
+
   const updated: ClassActivityRecord = { ...record, selectedRuleId: ruleId }
   await db.classActivityRecords.put(touch(updated))
-  // 未标记状态时选档位：视为「过关」，方便先选档再确认
+  // 未标记状态时选档位：视为「过关」，方便先选档再确认。
+  // 直接调底层 doSetActivityStatus，避免经过 serializeActivity 造成同活动自死锁。
   if (updated.status === 'pending') {
-    await setActivityStatus(activity, updated, 'pass', allRecords, rules)
+    await doSetActivityStatus(act, updated, 'pass', effectiveRules)
     return
   }
-  const merged = [
-    ...allRecords.filter((r) => r.id !== record.id && !r.deletedAt),
-    updated,
-  ]
-  await resettleActivity(activity, merged, { rules, force: new Set([updated.id]) })
+  const merged = await freshActivityRecords(activity.id, updated)
+  await resettleActivity(act, merged, { rules: effectiveRules, force: new Set([updated.id]) })
+}
+
+/**
+ * 从库里重读某活动的全部活记录，并把「刚写入的那条」合并进去（保证本次计算包含它）。
+ * 返回的数组即 resettleActivity 计算名次/积分的权威集合 —— 用最新库态而非调用方过期快照。
+ */
+async function freshActivityRecords(
+  activityId: string,
+  override: ClassActivityRecord,
+): Promise<ClassActivityRecord[]> {
+  const all = await db.classActivityRecords.toArray()
+  return all
+    .filter((r) => !r.deletedAt && r.activityId === activityId)
+    .map((r) => (r.id === override.id ? override : r))
 }
 
 /** 学生名单：把给定学生加入活动（已存在则跳过），返回新增条数 */
@@ -339,11 +470,19 @@ export async function addStudentsToActivity(
   return rows.length
 }
 
-/** 删除活动：软删活动与其记录，并冲销全部分数（避免积分残留） */
+/**
+ * 删除活动：软删活动与其记录，并冲销全部分数（避免积分残留）。
+ *
+ * ⚠️ 一律软删（保留墓碑以传播同步）。`reason` 用于区分删除来源：
+ *  - 'manual'（默认）：老师手动删掉 → 之后「完成课程」不再自动重建该活动；
+ *  - 'revert'：「取消完成」时的自动回收 → 允许「重新完成」时重建。
+ */
 export async function deleteClassActivity(
   activity: ClassActivity,
   allRecords: ClassActivityRecord[],
+  opts?: { reason?: 'manual' | 'revert' },
 ): Promise<void> {
+  const reason = opts?.reason ?? 'manual'
   const siblings = allRecords.filter(
     (r) => r.activityId === activity.id && !r.deletedAt,
   )
@@ -355,7 +494,12 @@ export async function deleteClassActivity(
       ),
     )
   }
-  await db.classActivities.put(markDeleted(activity))
+  await db.classActivities.put(markDeleted({ ...activity, deletedReason: reason }))
+}
+
+/** 该活动是否应「阻止」自动重建：未删的任何活动、或老师手动删掉的活动都会阻止 */
+function blocksAutoGen(a: ClassActivity): boolean {
+  return !a.deletedAt || a.deletedReason !== 'revert'
 }
 
 // ============================================================
@@ -371,7 +515,7 @@ export async function ensureDefaultClassRules(): Promise<number> {
   const rows = DEFAULT_CLASS_RULES.map((spec, i) =>
     withSyncFields<PointRule>({
       name: DEFAULT_CLASS_RULE_NAMES[i] ?? `规则 ${i + 1}`,
-      points: i === 0 ? 1 : 1,
+      points: 1,
       scope: 'class',
       mode: 'auto',
       condition: null,
@@ -385,7 +529,7 @@ export async function ensureDefaultClassRules(): Promise<number> {
   return rows.length
 }
 
-/** 取当前启用且启用的课堂规则 id 列表（新建活动时的默认适用范围） */
+/** 取当前「启用中」的课堂规则 id 列表（新建活动时的默认适用范围） */
 export async function defaultClassRuleIds(): Promise<string[]> {
   await ensureDefaultClassRules()
   const all = await db.pointRules.toArray()
@@ -458,7 +602,11 @@ export async function ensureTodayClassActivities(
     if (!g) continue
     // v21：班课可关闭「自动生成课堂活动」（与课后自动打卡同款开关）
     if (g.classActivityAuto === false) continue
-    // 该班课今天是否已有活动（含已删除 —— 删过就不再自动生成）
+    // 该班课今天是否已有活动（**含已删除** —— 删过就不再自动生成）。
+    // 与 ensureAutoClassActivityForCourse 的差异是刻意的：
+    //  - 这里由「打开课堂积分页 / 排课当天」触发，任何删除都视为老师的明确意图 → 不重生；
+    //  - 那里由「完成课程」触发，需支持「取消完成 → 重新完成」的重建，
+    //    因此只把「未删除」与「手动删除」视为阻止（见 blocksAutoGen）。
     const exists = activities.some(
       (a) => a.groupId === gid && a.activityDate === dayStart,
     )
@@ -471,6 +619,8 @@ export async function ensureTodayClassActivities(
 
     const course = courseByGroup.get(gid)
     const now = Date.now()
+    // v29：新建即固化快照 —— 历史分值不随规则库后续编辑漂移
+    const snapshot = await buildSnapshotForRuleIds(ruleIds)
     const activity = withSyncFields<ClassActivity>({
       title: `课堂积分 · ${g.name}`,
       courseId: course?.id ?? null,
@@ -480,6 +630,7 @@ export async function ensureTodayClassActivities(
       sourceCourseId: course?.id ?? null,
       ruleIds,
       rules: [],
+      classRuleSnapshot: snapshot,
       note: '',
       createdAt: now,
     })
@@ -538,10 +689,13 @@ export async function ensureAutoClassActivityForCourse(input: {
 
   const dayStart = startOfDay(new Date(input.activityDate)).getTime()
   const activities = await db.classActivities.toArray()
-  // 去重：仅「未删除」的活动参与判定 —— 这样「取消完成→重新完成」可重建
+  // 去重：
+  //  - 未删除的活动 → 跳过（不重复建）；
+  //  - 「取消完成」时被自动回收的（deletedReason='revert'）→ 不阻止，可重建；
+  //  - 老师手动删掉的（'manual'）→ 视为明确不要，不再重建。
   const exists = activities.some(
     (a) =>
-      !a.deletedAt &&
+      blocksAutoGen(a) &&
       (a.sourceCourseId === input.courseId ||
         (a.groupId === input.groupId && a.activityDate === dayStart)),
   )
@@ -549,6 +703,8 @@ export async function ensureAutoClassActivityForCourse(input: {
 
   const ruleIds = await defaultClassRuleIds()
   const now = Date.now()
+  // v29：新建即固化快照 —— 历史分值不随规则库后续编辑漂移
+  const snapshot = await buildSnapshotForRuleIds(ruleIds)
   const activity = withSyncFields<ClassActivity>({
     title: `课堂积分 · ${input.title}`,
     courseId: input.courseId,
@@ -558,6 +714,7 @@ export async function ensureAutoClassActivityForCourse(input: {
     sourceCourseId: input.courseId,
     ruleIds,
     rules: [],
+    classRuleSnapshot: snapshot,
     note: '',
     createdAt: now,
   })

@@ -28,11 +28,35 @@ export function RulePicker({
     .filter((r) => !r.deletedAt && (r.scope ?? 'checkin') === scope)
     .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
 
+  // 失效引用：被引用、但在规则库里已删除 / 已跨套的 id。
+  // 计分时会自动跳过，但配置项会「隐形残留」——这里显式暴露并支持一键清理。
+  const knownIds = new Set(list.map((r) => r.id))
+  const staleIds = value.filter((id) => !knownIds.has(id))
+  const staleBanner =
+    staleIds.length > 0 ? (
+      <div className="flex items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-[11px] text-text-2">
+        <Info size={11} className="shrink-0 text-amber-600 dark:text-amber-400" />
+        <span className="min-w-0 flex-1">
+          有 {staleIds.length} 条被引用的规则已被删除或不属于本套（已不计分）
+        </span>
+        <button
+          type="button"
+          className="shrink-0 text-accent hover:underline"
+          onClick={() => onChange(value.filter((id) => knownIds.has(id)))}
+        >
+          清理
+        </button>
+      </div>
+    ) : null
+
   if (list.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-line-1 bg-surface-0 p-3 text-[12px] text-text-3">
-        还没有{RULE_SCOPE_LABEL[scope]}，请先到「积分规则」页新建。
-        {emptyHint ? ` ${emptyHint}` : ''}
+      <div className="space-y-2">
+        <div className="rounded-lg border border-dashed border-line-1 bg-surface-0 p-3 text-[12px] text-text-3">
+          还没有{RULE_SCOPE_LABEL[scope]}，请先到「积分规则」页新建。
+          {emptyHint ? ` ${emptyHint}` : ''}
+        </div>
+        {staleBanner}
       </div>
     )
   }
@@ -92,6 +116,7 @@ export function RulePicker({
           清空
         </button>
       </div>
+      {staleBanner}
     </div>
   )
 }

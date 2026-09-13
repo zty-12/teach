@@ -5,7 +5,7 @@ import { isSupabaseConfigured } from '@/lib/supabase'
 import { syncNow } from '@/lib/sync'
 import { createSnapshot } from '@/lib/snapshots'
 import { useSettings } from '@/store/useSettings'
-import { SYNC_TABLES } from '@/lib/sync'
+import { SYNC_TABLES, type SyncResult } from '@/lib/sync'
 import type { AppSettings } from '@/lib/types'
 
 /**
@@ -22,19 +22,37 @@ import type { AppSettings } from '@/lib/types'
 const AUTO_INTERVAL = 60_000 // 周期同步间隔
 const CHANGE_DEBOUNCE = 3_000 // 变更后延迟
 
-// 模块级并发锁
-let syncingFlag = false
+// 模块级并发互斥：以「是否真的有同步在飞行」为准（而不是以调用是否返回为准）
+let inFlight: Promise<SyncResult> | null = null
+let inFlightAt = 0
+/** 僵尸同步阈值：超过它仍未落地则强制放行下一次，避免网络黑洞把同步永久卡死 */
+const STALE_MS = 120_000
 
 async function runSyncOnce(
   settings: AppSettings,
   timeoutMs = 25_000,
 ): Promise<void> {
-  if (syncingFlag) return
-  syncingFlag = true
+  // ⚠ 互斥必须看 inFlight，而不是「本轮 await 是否已返回」：
+  //   旧写法用 Promise.race 超时后 finally 立刻解锁，但 syncNow **仍在后台跑**，
+  //   于是下一轮（周期 60s / 脏数据防抖 3s）会与它并发，两个 pushAll 同时 upsert 同一批行
+  //   （v26 审查：P2）。
+  if (inFlight && Date.now() - inFlightAt < STALE_MS) return
+  const work = syncNow(settings)
+  inFlight = work
+  inFlightAt = Date.now()
+  // 真正落地时才释放锁（成功/失败都释放）；用 then 的双回调避免未处理的 rejection
+  work.then(
+    () => {
+      inFlight = null
+    },
+    () => {
+      inFlight = null
+    },
+  )
   try {
-    // 限时：避免网络卡死挂起后续调度
+    // 限时只是「本轮不再等待」，不表示同步结束 —— 锁由上面的 then 释放
     const r = await Promise.race([
-      syncNow(settings),
+      work,
       new Promise<null>((res) => setTimeout(() => res(null), timeoutMs)),
     ])
     // 同步成功（无错误）后自动留档一个数据版本；失败/超时不留（多为网络问题）
@@ -44,8 +62,6 @@ async function runSyncOnce(
     }
   } catch {
     /* 同步失败静默忽略，下个周期再试；错误在设置页手动同步时可见 */
-  } finally {
-    syncingFlag = false
   }
 }
 

@@ -149,8 +149,10 @@ export async function exportBackupJson(): Promise<number> {
   return SYNC_TABLES.reduce((sum, n) => sum + (tables[n] as unknown[]).length, 0)
 }
 
-/** 从 JSON 文件恢复全库（追加合并，按 id 覆盖） */
-export async function importBackupJson(file: File): Promise<{ tables: number; rows: number }> {
+/** 从 JSON 文件恢复全库（逐行 LWW 合并：仅当备份行更新、或本地无该行时才写入） */
+export async function importBackupJson(
+  file: File,
+): Promise<{ tables: number; rows: number; skipped: number }> {
   const text = await file.text()
   const data = JSON.parse(text) as {
     tables: Record<string, Record<string, unknown>[]>
@@ -162,14 +164,34 @@ export async function importBackupJson(file: File): Promise<{ tables: number; ro
 
   let totalRows = 0
   let totalTables = 0
+  let skipped = 0
   for (const name of SYNC_TABLES) {
     const rows = data.tables[name]
     if (!Array.isArray(rows) || rows.length === 0) continue
     const table = (db as unknown as Record<string, Table<never, string>>)[name]
-    // 保留 dirty 标记，合并后由同步引擎 push；无 id 的记录跳过
-    const valid = rows.filter((r) => typeof r.id === 'string')
-    await table.bulkPut(valid as never[])
-    totalRows += valid.length
+    const valid = rows.filter((r) => typeof r.id === 'string') as Array<Record<string, unknown>>
+
+    // ⚠ 逐行 last-write-wins：备份文件里的行可能**比本地旧**（导出之后本地又改过），
+    //   直接 bulkPut 会把本地较新的记录静默回退；且备份行的 dirty 多为 0，
+    //   回退后甚至推不到云端 → 本机与云端分裂（v26 审查：P2）。
+    const keep: Array<Record<string, unknown>> = []
+    for (const r of valid) {
+      const local = (await table.get(r.id as string)) as { updatedAt?: number } | undefined
+      const backupAt = typeof r.updatedAt === 'number' ? r.updatedAt : 0
+      const localAt = typeof local?.updatedAt === 'number' ? local.updatedAt : 0
+      if (!local || backupAt > localAt) {
+        keep.push({ ...r, dirty: 1 }) // 统一标 dirty，保证合并结果能推送出去
+      } else {
+        skipped++
+      }
+    }
+    if (keep.length === 0) continue
+
+    // 整批包事务：要么都进、要么都不进，避免半途失败留下不一致的库
+    await db.transaction('rw', table, async () => {
+      await table.bulkPut(keep as never[])
+    })
+    totalRows += keep.length
     totalTables += 1
   }
 
@@ -181,6 +203,6 @@ export async function importBackupJson(file: File): Promise<{ tables: number; ro
     }
   }
 
-  return { tables: totalTables, rows: totalRows }
+  return { tables: totalTables, rows: totalRows, skipped }
 }
 

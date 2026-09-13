@@ -106,7 +106,9 @@ create table if not exists courses (
   "isMakeup" boolean not null default false,
   "makeupSourceCourseId" text,
   -- v21：完成上课时的扣减课时快照（取消完成时据此精确返还）
-  "deductedHours" jsonb
+  "deductedHours" jsonb,
+  -- v26：单位课酬基准快照（分）——首次完成时固定，历史课酬不随单价变更被追溯改写
+  "feeUnitCents" integer
 );
 create index if not exists courses_updated_idx on courses ("updatedAt");
 create index if not exists courses_start_idx on courses ("startAt");
@@ -312,6 +314,8 @@ create table if not exists "checkInTasks" (
   "cadenceLabel" text not null default '',
   note text not null default '',
   "ruleIds" jsonb not null default '[]'::jsonb,
+  "auto" boolean not null default false,
+  "deletedReason" text,
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
   "deletedAt" bigint
@@ -435,6 +439,8 @@ create table if not exists "classActivities" (
   "sourceCourseId" text,
   "rules" jsonb not null default '[]'::jsonb,
   "ruleIds" jsonb not null default '[]'::jsonb,
+  "classRuleSnapshot" jsonb,
+  "deletedReason" text,
   "note" text not null default '',
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
@@ -518,6 +524,8 @@ alter table "classActivities" add column if not exists "groupId" text;
 alter table "classActivities" add column if not exists "activityDate" bigint;
 alter table "classActivities" add column if not exists "auto" boolean default false;
 alter table "classActivities" add column if not exists "sourceCourseId" text;
+-- v29：课堂规则快照（jsonb 数组，可空）。历史活动补写入后固化分值，杜绝追溯改写。
+alter table "classActivities" add column if not exists "classRuleSnapshot" jsonb;
 alter table "classActivityRecords" add column if not exists "ledgerId" text;
 
 -- 兜底：已按旧脚本建库时 auto 带 NOT NULL 约束，这里放宽，
@@ -532,6 +540,8 @@ alter table "pointRules" add column if not exists mode text not null default 'au
 alter table "pointRules" add column if not exists "classCondition" jsonb;
 alter table "checkInTasks" add column if not exists "ruleIds" jsonb not null default '[]'::jsonb;
 alter table "checkInRecords" add column if not exists "selectedRuleId" text;
+-- v-next：打卡记录固化「当天对应打卡任务」内容快照（jsonb，可空），供 AI 生成备注/报告时提供任务上下文
+alter table "checkInRecords" add column if not exists "taskSnapshot" jsonb;
 alter table "classActivities" add column if not exists "ruleIds" jsonb not null default '[]'::jsonb;
 alter table "classActivityRecords" add column if not exists "selectedRuleId" text;
 
@@ -540,6 +550,16 @@ alter table "classActivityRecords" add column if not exists "selectedRuleId" tex
 alter table groups add column if not exists "classActivityAuto" boolean not null default true;
 alter table "checkInTasks" add column if not exists "auto" boolean not null default false;
 alter table courses add column if not exists "deductedHours" jsonb;
+
+-- v23：软删来源（区分「老师手动删除」与「取消完成时的自动回收」）。
+--      自动生成的打卡任务 / 课堂活动据此决定「重新完成时可否重建」；
+--      同时所有物理删除改为软删（保留墓碑），删除才能真正同步到云端。
+alter table "checkInTasks" add column if not exists "deletedReason" text;
+alter table "classActivities" add column if not exists "deletedReason" text;
+
+-- v26：课程「单位课酬基准」快照（分）。首次完成结算时写入当时单价，
+--      之后班课 / 学生单价变更不再改写这节课的历史课酬（重算只随出席人数变化）。
+alter table courses add column if not exists "feeUnitCents" integer;
 
 
 -- ============================================================

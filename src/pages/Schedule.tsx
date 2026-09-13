@@ -266,7 +266,7 @@ export default function SchedulePage() {
       .join('\n')
     if (
       !confirm(
-        `确定彻底删除 ${ids.length} 节课吗？\n${labels}\n\n将连同其出席、结算、反馈记录一并删除，且不可恢复！`,
+        `确定彻底删除 ${ids.length} 节课吗？\n${labels}\n\n将连同其出席、结算、反馈，以及自动生成的课后打卡 / 课堂活动一并删除，且不可恢复！`,
       )
     ) {
       return

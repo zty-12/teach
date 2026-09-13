@@ -9,7 +9,7 @@
  *   4. 生成新反馈时把画像塞进 prompt，让每次反馈都针对该学生个性化
  */
 import { db, newId, touch } from './db'
-import type { AppSettings, CheckInRecord, StudentProfile } from './types'
+import type { AppSettings, CheckInRecord, CheckInTask, StudentProfile } from './types'
 import { chat, cfgFromSettings, extractJson, isAiConfigured } from './llm'
 
 // ============================================================
@@ -29,21 +29,31 @@ export async function saveStudentProfile(profile: StudentProfile): Promise<void>
   await db.studentProfiles.put(touch(profile))
 }
 
-/** 该学生的历史 aiFeedback + note 素材（按时间升序，最多 recentLimit 条） */
+/** 该学生的历史 aiFeedback + note 素材（含对应打卡任务标题，按时间升序，最多 recentLimit 条） */
 export async function getCheckInHistory(
   studentId: string,
   recentLimit = 30,
-): Promise<Array<{ dayAt: number; note: string; aiFeedback: string }>> {
+): Promise<Array<{ dayAt: number; note: string; aiFeedback: string; taskTitle?: string }>> {
   if (!studentId) return []
   const all = (await db.checkInRecords.toArray()) as CheckInRecord[]
+  const taskById = new Map(((await db.checkInTasks.toArray()) as CheckInTask[]).map((t) => [t.id, t]))
   return all
     .filter((r) => !r.deletedAt && r.studentId === studentId && r.dayAt !== null)
     .filter((r) => (r.note ?? '').trim().length > 0 || (r.aiFeedback ?? '').trim().length > 0)
-    .map((r) => ({
-      dayAt: r.dayAt as number,
-      note: r.note ?? '',
-      aiFeedback: r.aiFeedback ?? '',
-    }))
+    .map((r) => {
+      // 优先用打卡时固化的任务快照，缺则回退关联任务（兼容旧数据）
+      const snap = r.taskSnapshot
+      const task =
+        snap && (snap.title || snap.note)
+          ? { title: snap.title, note: snap.note }
+          : taskById.get(r.taskId)
+      return {
+        dayAt: r.dayAt as number,
+        note: r.note ?? '',
+        aiFeedback: r.aiFeedback ?? '',
+        taskTitle: task?.title,
+      }
+    })
     .sort((a, b) => b.dayAt - a.dayAt)
     .slice(0, recentLimit)
     .reverse()
@@ -62,12 +72,13 @@ interface ProfileJsonOutput {
 
 function buildProfilePrompt(
   studentName: string,
-  materials: Array<{ dayAt: number; note: string; aiFeedback: string }>,
+  materials: Array<{ dayAt: number; note: string; aiFeedback: string; taskTitle?: string }>,
 ): Array<{ role: 'system' | 'user'; content: string }> {
   const fmt = (t: number) => new Date(t).toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' })
   const materialList = materials
     .map((m) => {
       const parts: string[] = [`【${fmt(m.dayAt)}】`]
+      if (m.taskTitle) parts.push(`打卡任务：${m.taskTitle}`)
       if (m.note) parts.push(`老师观察：${m.note}`)
       if (m.aiFeedback) parts.push(`家长反馈：${m.aiFeedback}`)
       return parts.join('\n')

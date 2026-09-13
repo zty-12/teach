@@ -129,7 +129,9 @@ export function GroupDetailSheet({
       }
     }
     // 实际出席数 = done 课程的出席里属于本班成员的人数
-    const attendances = allAttendances ?? []
+    // ⚠ 必须过滤软删：移除班课成员时 persistAttendance 会把出席行软删，
+    //   不过滤会把已删出席计入「累计出席人次」，数字虚高（v24 审查：P3）。
+    const attendances = (allAttendances ?? []).filter((a) => !a.deletedAt)
     const doneAttended = attendances.filter(
       (a) =>
         a.present &&

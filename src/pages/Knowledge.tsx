@@ -812,7 +812,9 @@ function ImportDocModal({
       size="xl"
       footer={
         <>
-          <Button onClick={onClose}>取消</Button>
+          {/* 必须走 handleModalClose（内含 runner.cancel()）：
+              直接用 onClose 会绕过取消 → 识别 / AI 分类在弹窗关闭后继续跑，白烧视觉 API（v26 审查：P3） */}
+          <Button onClick={handleModalClose}>取消</Button>
           {!classification ? (
             <Button
               variant="primary"

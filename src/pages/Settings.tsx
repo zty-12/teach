@@ -203,14 +203,24 @@ export default function SettingsPage() {
     try {
       // 用 store 最新值测试（受控输入已实时写入 settings）
       const latest = useSettings.getState().settings
-      await update({
+      // ⚠ 必须用「trim 后」的值去测试：原实现把 trim 结果写回 settings，
+      //   却仍拿未 trim 的 latest 去调 testLlm，地址尾部多一个空格就会连接失败。
+      const trimmed = {
+        ...latest,
         aiBaseUrl: latest.aiBaseUrl.trim(),
         aiApiKey: latest.aiApiKey.trim(),
         aiModel: latest.aiModel.trim(),
         aiProxyUrl: latest.aiProxyUrl.trim(),
         aiProxyToken: latest.aiProxyToken.trim(),
+      }
+      await update({
+        aiBaseUrl: trimmed.aiBaseUrl,
+        aiApiKey: trimmed.aiApiKey,
+        aiModel: trimmed.aiModel,
+        aiProxyUrl: trimmed.aiProxyUrl,
+        aiProxyToken: trimmed.aiProxyToken,
       })
-      const reply = await testLlm(latest)
+      const reply = await testLlm(trimmed)
       setAiStatus('ok')
       setAiMessage(`连接成功，模型响应：${reply}`)
     } catch (e) {
@@ -224,15 +234,24 @@ export default function SettingsPage() {
     setVisionMessage('')
     try {
       const latest = useSettings.getState().settings
-      await update({
+      const trimmed = {
+        ...latest,
         aiVisionEnabled: latest.aiVisionEnabled,
         aiVisionBaseUrl: latest.aiVisionBaseUrl.trim(),
         aiVisionApiKey: latest.aiVisionApiKey.trim(),
         aiVisionModel: latest.aiVisionModel.trim(),
         aiVisionProxyUrl: latest.aiVisionProxyUrl.trim(),
         aiVisionProxyToken: latest.aiVisionProxyToken.trim(),
+      }
+      await update({
+        aiVisionEnabled: trimmed.aiVisionEnabled,
+        aiVisionBaseUrl: trimmed.aiVisionBaseUrl,
+        aiVisionApiKey: trimmed.aiVisionApiKey,
+        aiVisionModel: trimmed.aiVisionModel,
+        aiVisionProxyUrl: trimmed.aiVisionProxyUrl,
+        aiVisionProxyToken: trimmed.aiVisionProxyToken,
       })
-      const reply = await testVisionLlm(latest)
+      const reply = await testVisionLlm(trimmed)
       setVisionStatus('ok')
       setVisionMessage(`连接成功，模型响应：${reply}`)
     } catch (e) {
@@ -272,8 +291,10 @@ export default function SettingsPage() {
   async function handleImportFile(file: File) {
     try {
       const res = await importBackupJson(file)
+      const skippedNote =
+        res.skipped > 0 ? `\n跳过 ${res.skipped} 条：本地版本更新（不会用旧备份覆盖）。` : ''
       alert(
-        `恢复完成：共 ${res.tables} 张表 / ${res.rows} 条记录已合并到本地。\n请刷新页面查看；开启同步后，新数据会自动推送到云端。`,
+        `恢复完成：共 ${res.tables} 张表 / ${res.rows} 条记录已合并到本地。${skippedNote}\n请刷新页面查看；开启同步后，新数据会自动推送到云端。`,
       )
       setPending((await pendingCount()) + 1)
     } catch (e) {

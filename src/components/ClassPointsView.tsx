@@ -31,6 +31,7 @@ import { cn } from '@/lib/utils'
 import type { PointBalance } from '@/lib/points'
 import {
   addStudentsToActivity,
+  buildSnapshotForRuleIds,
   defaultClassRuleIds,
   deleteClassActivity,
   ensureTodayClassActivities,
@@ -77,6 +78,8 @@ export default function ClassPointsView() {
 
   const [showCreate, setShowCreate] = useState(false)
   const autoRan = useRef(false)
+  // v29：正在处理中的活动 id（活动级提交锁，防并发改判导致名次错乱）
+  const processingRef = useRef(new Set<string>())
 
   // 进入页面时，按班课排课补齐「今天」的课堂活动（幂等，一次挂载只跑一次）
   useEffect(() => {
@@ -170,7 +173,14 @@ export default function ClassPointsView() {
     record: ClassActivityRecord,
     status: 'pending' | 'pass' | 'fail',
   ) {
-    await setActivityStatus(activity, record, status, liveRecords, ruleMap.get(activity.id) ?? [])
+    // v29：活动级提交锁 —— 快速连点时丢弃后续调用，配合数据层「从库重读」根治并发名次错乱
+    if (processingRef.current.has(activity.id)) return
+    processingRef.current.add(activity.id)
+    try {
+      await setActivityStatus(activity, record, status, liveRecords, ruleMap.get(activity.id) ?? [])
+    } finally {
+      processingRef.current.delete(activity.id)
+    }
   }
 
   async function handleTier(
@@ -178,7 +188,13 @@ export default function ClassPointsView() {
     record: ClassActivityRecord,
     ruleId: string | null,
   ) {
-    await setActivityTier(activity, record, ruleId, liveRecords, ruleMap.get(activity.id) ?? [])
+    if (processingRef.current.has(activity.id)) return
+    processingRef.current.add(activity.id)
+    try {
+      await setActivityTier(activity, record, ruleId, liveRecords, ruleMap.get(activity.id) ?? [])
+    } finally {
+      processingRef.current.delete(activity.id)
+    }
   }
 
   async function handleAddStudents(activity: ClassActivity) {
@@ -404,6 +420,10 @@ function ActivityCard({
               const isFail = rec.status === 'fail'
               // 名次只看本活动的记录，避免跨活动同名次串味
               const rank = isPass ? rankOf(records, rec.studentId) : 0
+              // v29 兜底：该生选中的档位规则已被删除/失效（不在当前档位集合里）
+              const staleTierSelected =
+                Boolean(rec.selectedRuleId) &&
+                !tiers.some((t) => t.id === rec.selectedRuleId)
               const preview =
                 rec.status === 'pending'
                   ? previewPassPoints(activity, rules, records, rec.studentId)
@@ -476,8 +496,9 @@ function ActivityCard({
                       </>
                     )}
 
-                    {/* 手动档位选择：已过关/未过关时显示 */}
-                    {tiers.length > 0 && rec.status !== 'pending' && (
+                    {/* 手动档位选择：已过关/未过关时显示。
+                        v29：即使唯一档位规则被删（staleTierSelected）也渲染，便于用户重选 */}
+                    {(tiers.length > 0 || staleTierSelected) && rec.status !== 'pending' && (
                       <Select
                         value={rec.selectedRuleId ?? ''}
                         onChange={(e) =>
@@ -492,6 +513,12 @@ function ActivityCard({
                             {t.name} +{t.points}
                           </option>
                         ))}
+                        {/* v29 兜底：所选档位规则已删除/失效 → 给一个可见的失效项，避免 Select 静默空白 */}
+                        {staleTierSelected && (
+                          <option value={rec.selectedRuleId ?? ''} disabled>
+                            失效档位（已删除）
+                          </option>
+                        )}
                       </Select>
                     )}
 
@@ -595,6 +622,8 @@ function CreateActivityModal({
     setSaving(true)
     try {
       const now = Date.now()
+      // v29：手动新建也固化「当时选用的规则」快照，历史分值不随规则库后续编辑漂移
+      const snapshot = await buildSnapshotForRuleIds(ruleIds)
       const activity = withSyncFields<ClassActivity>({
         title: title.trim(),
         courseId: null,
@@ -605,6 +634,7 @@ function CreateActivityModal({
         // 新活动只引用规则库，不再内嵌可编辑规则
         ruleIds,
         rules: [],
+        classRuleSnapshot: snapshot,
         note: note.trim(),
         createdAt: now,
       })

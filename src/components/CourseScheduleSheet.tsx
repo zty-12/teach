@@ -14,7 +14,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { CalendarPlus, ChevronDown, ChevronLeft, ChevronRight, Filter, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { format, parse } from 'date-fns'
-import { db } from '@/lib/db'
+import { db, touch } from '@/lib/db'
 import { hardDeleteCourses } from '@/lib/batchDelete'
 import { Badge, Button, StatusBadge } from '@/components/ui'
 import {
@@ -96,6 +96,8 @@ export function CourseScheduleSheet({
   const [monthFilter, setMonthFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | CourseStatus>('all')
   const [page, setPage] = useState(1)
+  /** 批量操作进行中：禁用按钮，避免连点触发重复结算 */
+  const [busy, setBusy] = useState(false)
 
   // 该课程所属范围：同学生 或 同班课
   const scope = useMemo(() => {
@@ -189,51 +191,67 @@ export function CourseScheduleSheet({
 
   /** 批量标记状态 */
   async function batchSetStatus(status: CourseStatus) {
-    if (!scope || selected.size === 0) return
-    const targets = scope.list.filter((c) => selected.has(c.id))
+    if (!scope || selected.size === 0 || busy) return
+    setBusy(true)
+    try {
+      const targets = scope.list.filter((c) => selected.has(c.id))
 
-    // 1) 撤销完成（done → 非 done）：归还课时 / 撤销结算 / 回收自动生成的打卡与课堂活动
-    //    （不能直接 bulkPut 覆盖，否则课时与自动任务不会回滚）
-    const reverts = targets.filter((c) => c.status === 'done' && status !== 'done')
-    const total: RevertResult = {
-      restoredHours: 0,
-      removedSettlements: 0,
-      removedCheckInTasks: 0,
-      removedClassActivities: 0,
+      // 1) 撤销完成（done → 非 done）：归还课时 / 撤销结算 / 回收自动生成的打卡与课堂活动
+      //    （不能直接 bulkPut 覆盖，否则课时与自动任务不会回滚）
+      const reverts = targets.filter((c) => c.status === 'done' && status !== 'done')
+      const total: RevertResult = {
+        restoredHours: 0,
+        removedSettlements: 0,
+        removedCheckInTasks: 0,
+        removedClassActivities: 0,
+      }
+      for (const c of reverts) {
+        const r = await revertCompletion(c.id)
+        total.restoredHours += r.restoredHours
+        total.removedSettlements += r.removedSettlements
+        total.removedCheckInTasks += r.removedCheckInTasks
+        total.removedClassActivities += r.removedClassActivities
+      }
+
+      // 1.5) revertCompletion 内部把状态硬编码回 'pending'。
+      //      若老师选的目标不是「待上」，这里补写目标状态，
+      //      否则「取消 / 请假」会被静默改成「待上」，与所选不符。
+      if (reverts.length > 0 && status !== 'pending') {
+        const fresh = await Promise.all(reverts.map((c) => db.courses.get(c.id)))
+        const rows = fresh.filter((c): c is Course => !!c && !c.deletedAt)
+        if (rows.length > 0) {
+          await db.courses.bulkPut(rows.map((c) => touch({ ...c, status })))
+        }
+      }
+
+      // 2) 标记完成（非 done → done）：不在这里直接结算，而是交给上层
+      //    弹一次「出席选择」，按实际出席统一结算（与单节完成同一套流程）
+      const completions = status === 'done' ? targets.filter((c) => c.status !== 'done') : []
+
+      // 3) 其余目标直接改状态（如 pending/cancelled/leave，或本来就已完成）
+      const handled = new Set([...reverts, ...completions].map((c) => c.id))
+      const rest = targets.filter((c) => !handled.has(c.id))
+      if (rest.length > 0) {
+        const now = Date.now()
+        await db.courses.bulkPut(rest.map((c) => ({ ...c, status, updatedAt: now, dirty: 1 })))
+      }
+
+      setSelected(new Set())
+      setSelectMode(false)
+
+      // 先汇报「取消完成」的回滚结果（完成则交由出席弹窗确认，无需再弹提示）
+      const msg = summarizeRevert(total)
+      if (msg) window.alert(msg)
+
+      if (completions.length > 0) onBatchComplete(completions)
+    } finally {
+      setBusy(false)
     }
-    for (const c of reverts) {
-      const r = await revertCompletion(c.id)
-      total.restoredHours += r.restoredHours
-      total.removedSettlements += r.removedSettlements
-      total.removedCheckInTasks += r.removedCheckInTasks
-      total.removedClassActivities += r.removedClassActivities
-    }
-
-    // 2) 标记完成（非 done → done）：不在这里直接结算，而是交给上层
-    //    弹一次「出席选择」，按实际出席统一结算（与单节完成同一套流程）
-    const completions = status === 'done' ? targets.filter((c) => c.status !== 'done') : []
-
-    // 3) 其余目标直接改状态（如 pending/cancelled/leave，或本来就已完成）
-    const handled = new Set([...reverts, ...completions].map((c) => c.id))
-    const rest = targets.filter((c) => !handled.has(c.id))
-    if (rest.length > 0) {
-      const now = Date.now()
-      await db.courses.bulkPut(rest.map((c) => ({ ...c, status, updatedAt: now, dirty: 1 })))
-    }
-
-    setSelected(new Set())
-    setSelectMode(false)
-
-    // 先汇报「取消完成」的回滚结果（完成则交由出席弹窗确认，无需再弹提示）
-    const msg = summarizeRevert(total)
-    if (msg) window.alert(msg)
-
-    if (completions.length > 0) onBatchComplete(completions)
   }
 
   /** 批量彻底删除 */
   async function batchDelete() {
-    if (!scope || selected.size === 0) return
+    if (!scope || selected.size === 0 || busy) return
     const ids = Array.from(selected)
     const labels = scope.list
       .filter((c) => ids.includes(c.id))
@@ -241,7 +259,7 @@ export function CourseScheduleSheet({
       .join('\n')
     if (
       !confirm(
-        `确定彻底删除 ${ids.length} 节课吗？\n${labels}\n\n将连同其出席、结算、反馈记录一并删除，且不可恢复！`,
+        `确定彻底删除 ${ids.length} 节课吗？\n${labels}\n\n将连同其出席、结算、反馈，以及自动生成的课后打卡 / 课堂活动一并删除，且不可恢复！`,
       )
     ) {
       return
@@ -388,7 +406,7 @@ export function CourseScheduleSheet({
               <button
                 key={a.status}
                 type="button"
-                disabled={selected.size === 0}
+                disabled={selected.size === 0 || busy}
                 onClick={() => void batchSetStatus(a.status)}
                 className={cn(
                   'rounded-lg px-2.5 py-1 text-[12px] font-medium transition-colors',
@@ -396,12 +414,12 @@ export function CourseScheduleSheet({
                   'disabled:cursor-not-allowed disabled:opacity-50',
                 )}
               >
-                标为{a.label}
+                {busy ? '处理中…' : `标为${a.label}`}
               </button>
             ))}
             <button
               type="button"
-              disabled={selected.size === 0}
+              disabled={selected.size === 0 || busy}
               onClick={() => void batchDelete()}
               className="inline-flex items-center gap-1 rounded-lg bg-money-out px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
