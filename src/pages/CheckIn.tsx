@@ -730,6 +730,14 @@ function CheckInMatrix({
                 <div className="text-[10px] font-normal text-text-3">
                   {format(d, 'EEE')}
                 </div>
+                {(task.title || task.cadenceLabel) && (
+                  <div
+                    className="mx-auto mt-1 max-w-[64px] truncate text-[9px] font-normal leading-tight text-text-3"
+                    title={task.title || task.cadenceLabel}
+                  >
+                    {task.title || task.cadenceLabel}
+                  </div>
+                )}
               </th>
             ))}
             <th className="border-b border-line-1 px-2 py-2 text-center font-medium text-text-2">
