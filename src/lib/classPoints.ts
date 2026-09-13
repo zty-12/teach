@@ -684,7 +684,15 @@ export async function ensureAutoClassActivityForCourse(input: {
   // 班课关闭了自动生成 → 不建
   if (g.classActivityAuto === false) return { created: false }
 
-  const ids = Array.from(new Set(input.studentIds.filter(Boolean)))
+  let ids = Array.from(new Set((input.studentIds ?? []).filter(Boolean)))
+  // 兜底：调用方未给到学生（如完成课程时 liveMembers 尚未加载 / 为空）时，
+  // 直接从库里取该班课成员，避免课堂活动被静默漏建。
+  if (ids.length === 0 && input.groupId) {
+    const mem = (await db.groupMembers.toArray()).filter(
+      (m) => !m.deletedAt && m.groupId === input.groupId,
+    )
+    ids = mem.map((m) => m.studentId)
+  }
   if (ids.length === 0) return { created: false }
 
   const dayStart = startOfDay(new Date(input.activityDate)).getTime()

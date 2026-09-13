@@ -259,8 +259,9 @@ export async function completeCourseWithAttendance(
         title: courseTitle(course, studentMap, groupMap),
       })
     }
-  } catch {
-    // 课堂活动创建失败不影响课程完成
+  } catch (e) {
+    // 课堂活动创建失败不影响课程完成，但需可见以便排查
+    console.warn('[completeCourse] 课堂活动自动生成失败（不影响课程完成）：', e)
   }
 }
 
