@@ -29,6 +29,6 @@ rewrite_hybrid.py
 # gh-pages 部署临时目录
 .gh-pages-tmp/
 
-# gh-pages 部署临时目录
+# gh-pages 部署临时目录（含 .gh-pages-deploy-v21 这类带后缀的变体）
 .gh-pages-tmp/
-.gh-pages-deploy/
+.gh-pages-deploy*/
