@@ -38,8 +38,8 @@ import {
   previewPassPoints,
   rankOf,
   resolveClassRules,
-  setActivityStatus,
-  setActivityTier,
+  setActivityOutcome,
+  setActivityTierOutcome,
   tierRules,
   type ResolvedClassRule,
 } from '@/lib/classPoints'
@@ -63,7 +63,8 @@ import { RulePicker } from '@/components/RulePicker'
  *  - 规则支持两种模式并存：
  *      · auto（自动累加）：过关/未过关/名次达标的学生自动加分
  *      · tier（手动档位）：逐人判档，如「背诵熟练 +1 / 不熟练 +0.5」
- *  - 学生行在「已过/未过」状态下出现档位下拉，选中即记分到 selectedRuleId。
+ *  - 学生行为恒定三态按钮（v30）：过关 / 档位（如「不熟练 +0.5」）/ 未过关，
+ *    当前态高亮；档位是介于过关与未过关之间的独立第三态，只加档位分。
  *  - 名次仅用于展示与名次类规则，不再作为唯一计分依据。
  *  - 按班课排课时间，当天自动生成活动（沿用当前启用的课堂规则）。
  */
@@ -168,7 +169,7 @@ export default function ClassPointsView() {
     return liveStudents.map((s) => s.id)
   }
 
-  async function handleStatus(
+  async function handleOutcome(
     activity: ClassActivity,
     record: ClassActivityRecord,
     status: 'pending' | 'pass' | 'fail',
@@ -177,7 +178,8 @@ export default function ClassPointsView() {
     if (processingRef.current.has(activity.id)) return
     processingRef.current.add(activity.id)
     try {
-      await setActivityStatus(activity, record, status, liveRecords, ruleMap.get(activity.id) ?? [])
+      // v30 三态互斥：落状态时清掉残留档位，避免「过关/未过关 + 旧档位」半吊子状态
+      await setActivityOutcome(activity, record, status, ruleMap.get(activity.id) ?? [])
     } finally {
       processingRef.current.delete(activity.id)
     }
@@ -186,12 +188,13 @@ export default function ClassPointsView() {
   async function handleTier(
     activity: ClassActivity,
     record: ClassActivityRecord,
-    ruleId: string | null,
+    tierId: string,
   ) {
     if (processingRef.current.has(activity.id)) return
     processingRef.current.add(activity.id)
     try {
-      await setActivityTier(activity, record, ruleId, liveRecords, ruleMap.get(activity.id) ?? [])
+      // v30 档位是独立第三态：只加档位分（如「不熟练 +0.5」），不叠加过关/未过关规则
+      await setActivityTierOutcome(activity, record, tierId, ruleMap.get(activity.id) ?? [])
     } finally {
       processingRef.current.delete(activity.id)
     }
@@ -254,7 +257,7 @@ export default function ClassPointsView() {
             groupMap={groupMap}
             balances={balances}
             isToday={activity.activityDate === todayStart}
-            onStatus={handleStatus}
+            onStatus={handleOutcome}
             onTier={handleTier}
             onAddStudents={handleAddStudents}
             onDelete={handleDelete}
@@ -304,7 +307,7 @@ function ActivityCard({
   onTier: (
     activity: ClassActivity,
     record: ClassActivityRecord,
-    ruleId: string | null,
+    tierId: string,
   ) => void
   onAddStudents: (activity: ClassActivity) => void
   onDelete: (activity: ClassActivity) => void
@@ -395,6 +398,14 @@ function ActivityCard({
               ))}
             </div>
           )}
+          {/* v30：档位规则缺失时的可见提示 —— 常见误配是把「不熟练」建成自动累加模式，
+              导致学生行永远出不了档位按钮（用户实测反馈） */}
+          {rules.some((r) => r.enabled) && tiers.length === 0 && (
+            <p className="mt-2 text-[11px] text-text-3">
+              提示：要在学生行逐人标记档位（如「不熟练」），需在「积分规则 → 课堂规则」里把该规则的
+              计算方式设为「手动档位」；当前引用的规则均为自动累加，不会出现档位按钮。
+            </p>
+          )}
         </div>
       </div>
 
@@ -418,12 +429,13 @@ function ActivityCard({
               const bal = balances.get(rec.studentId)
               const isPass = rec.status === 'pass'
               const isFail = rec.status === 'fail'
+              // v30：档位态 = fail + 选中档位规则（独立第三态，只加档位分）
+              const activeTier =
+                isFail && rec.selectedRuleId
+                  ? tiers.find((t) => t.id === rec.selectedRuleId) ?? null
+                  : null
               // 名次只看本活动的记录，避免跨活动同名次串味
               const rank = isPass ? rankOf(records, rec.studentId) : 0
-              // v29 兜底：该生选中的档位规则已被删除/失效（不在当前档位集合里）
-              const staleTierSelected =
-                Boolean(rec.selectedRuleId) &&
-                !tiers.some((t) => t.id === rec.selectedRuleId)
               const preview =
                 rec.status === 'pending'
                   ? previewPassPoints(activity, rules, records, rec.studentId)
@@ -436,9 +448,11 @@ function ActivityCard({
                     'flex items-center justify-between gap-2 rounded-lg border px-3 py-2',
                     isPass
                       ? 'border-done/30 bg-done/5 dark:bg-done/10'
-                      : isFail
-                        ? 'border-money-due/30 bg-money-due/5 dark:bg-money-due/10'
-                        : 'border-line-1 bg-surface-0',
+                      : activeTier
+                        ? 'border-amber-300/60 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/20'
+                        : isFail
+                          ? 'border-money-due/30 bg-money-due/5 dark:bg-money-due/10'
+                          : 'border-line-1 bg-surface-0',
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-2.5">
@@ -472,97 +486,72 @@ function ActivityCard({
                   </div>
 
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                    {rec.status === 'pending' && (
-                      <>
-                        {preview > 0 && (
-                          <span className="hidden text-[11px] text-text-3 sm:inline">
-                            过关 +{preview}
-                          </span>
-                        )}
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          onClick={() => onStatus(activity, rec, 'pass')}
-                        >
-                          <CheckCircle2 size={13} /> 过关
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => onStatus(activity, rec, 'fail')}
-                        >
-                          <XCircle size={13} /> 未过关
-                        </Button>
-                      </>
+                    {/* v30 三态按钮：过关 / 档位（不熟练） / 未过关 —— 恒定显示，当前态高亮 */}
+                    {rec.status === 'pending' && preview > 0 && (
+                      <span className="hidden text-[11px] text-text-3 sm:inline">
+                        过关 +{preview}
+                      </span>
                     )}
+                    <Button
+                      variant={isPass ? 'primary' : 'secondary'}
+                      size="sm"
+                      title={isPass ? '当前：过关' : '标记为过关'}
+                      onClick={() => onStatus(activity, rec, 'pass')}
+                    >
+                      <CheckCircle2 size={13} /> 过关
+                    </Button>
+                    {tiers.map((t) => {
+                      const active = activeTier?.id === t.id
+                      return (
+                        <Button
+                          key={t.id}
+                          variant={active ? 'primary' : 'secondary'}
+                          size="sm"
+                          title={
+                            active
+                              ? `当前：${t.name}（只加档位分）`
+                              : `标记为「${t.name}」（介于过关与未过关，只加档位分 +${t.points}）`
+                          }
+                          onClick={() => onTier(activity, rec, t.id)}
+                        >
+                          <Sparkles size={13} /> {t.name} +{t.points}
+                        </Button>
+                      )
+                    })}
+                    <Button
+                      variant={isFail && !activeTier ? 'primary' : 'secondary'}
+                      size="sm"
+                      title={isFail && !activeTier ? '当前：未过关' : '标记为未过关'}
+                      onClick={() => onStatus(activity, rec, 'fail')}
+                    >
+                      <XCircle size={13} /> 未过关
+                    </Button>
 
-                    {/* 手动档位选择：已过关/未过关时显示。
-                        v29：即使唯一档位规则被删（staleTierSelected）也渲染，便于用户重选 */}
-                    {(tiers.length > 0 || staleTierSelected) && rec.status !== 'pending' && (
-                      <Select
-                        value={rec.selectedRuleId ?? ''}
-                        onChange={(e) =>
-                          onTier(activity, rec, e.target.value || null)
-                        }
-                        className="h-7 w-28 text-[12px]"
-                        title="选择计分档位"
-                      >
-                        <option value="">选择档位</option>
-                        {tiers.map((t) => (
-                          <option key={t.id} value={t.id}>
-                            {t.name} +{t.points}
-                          </option>
-                        ))}
-                        {/* v29 兜底：所选档位规则已删除/失效 → 给一个可见的失效项，避免 Select 静默空白 */}
-                        {staleTierSelected && (
-                          <option value={rec.selectedRuleId ?? ''} disabled>
-                            失效档位（已删除）
-                          </option>
-                        )}
-                      </Select>
-                    )}
-
+                    {/* 当前结果与积分 */}
                     {isPass && (
-                      <>
-                        <span className="flex items-center gap-1 text-[12px] font-medium text-done">
-                          <CheckCircle2 size={13} /> +{rec.pointsAwarded} 分
-                        </span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          title="撤销（分与名次会重算）"
-                          onClick={() => onStatus(activity, rec, 'pending')}
-                        >
-                          <RotateCcw size={13} />
-                        </Button>
-                      </>
+                      <span className="flex items-center gap-1 text-[12px] font-medium text-done">
+                        +{rec.pointsAwarded} 分
+                      </span>
                     )}
-
-                    {isFail && (
-                      <>
-                        <span className="flex items-center gap-1 text-[12px] text-money-due">
-                          <XCircle size={13} /> 未过关
-                          {rec.pointsAwarded > 0 && (
-                            <span className="font-medium text-done">+{rec.pointsAwarded} 分</span>
-                          )}
-                        </span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          title="改判为过关"
-                          onClick={() => onStatus(activity, rec, 'pass')}
-                        >
-                          <CheckCircle2 size={13} />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          title="重置为待检查"
-                          onClick={() => onStatus(activity, rec, 'pending')}
-                        >
-                          <RotateCcw size={13} />
-                        </Button>
-                      </>
+                    {activeTier && (
+                      <span className="flex items-center gap-1 text-[12px] font-medium text-amber-600 dark:text-amber-400">
+                        {activeTier.name} +{rec.pointsAwarded} 分
+                      </span>
+                    )}
+                    {isFail && !activeTier && (
+                      <span className="flex items-center gap-1 text-[12px] text-money-due">
+                        未过关
+                      </span>
+                    )}
+                    {rec.status !== 'pending' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        title="撤销（分与名次会重算）"
+                        onClick={() => onStatus(activity, rec, 'pending')}
+                      >
+                        <RotateCcw size={13} />
+                      </Button>
                     )}
                   </div>
                 </div>

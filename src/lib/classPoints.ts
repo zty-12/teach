@@ -225,6 +225,16 @@ export function awardedPoints(
   return total
 }
 
+/**
+ * 只取某「档位规则」自身的分值（忽略所有自动规则）。
+ * 用于「档位」独立态（如 不熟练 +0.5）：该态既不走过关加分、也不走未过关的自动加分，
+ * 只拿这一档的分值 —— 对应 UI 上的第三个按钮「不熟练」。
+ */
+function tierOnlyPoints(rules: ResolvedClassRule[], tierId: string): number {
+  const r = rules.find((x) => x.mode === 'tier' && x.enabled && x.id === tierId)
+  return r ? r.points : 0
+}
+
 /** 已过关记录按「过关时间升序」排列：index 0 即第一个过关的学生 */
 export function passedOrder(records: ClassActivityRecord[]): ClassActivityRecord[] {
   return records
@@ -296,12 +306,17 @@ export async function resettleActivity(
     // 按「无档位」重算，并把失效引用清空 —— 避免历史档位分凭空消失、又永久残留一条悬空 id。
     const staleTier = Boolean(rec.selectedRuleId) && !tierIds.has(rec.selectedRuleId!)
     const effectiveSelected = staleTier ? null : rec.selectedRuleId
-    // 过关 → 按名次计分；未过关 → 仅「未过关者加」/已选档位生效；待检查 → 不计分
+    // 过关 → 按名次计分（可叠加所选档位）；
+    // 未过关 → 无档位时按「未过关者加」；有档位时视为独立「档位态」，只按该档位计分
+    //          （如「不熟练 +0.5」不叠加过关/未过关的自动规则）；
+    // 待检查 → 不计分
     const expected =
       rec.status === 'pass'
         ? awardedPoints(rules, rank, 'pass', effectiveSelected)
         : rec.status === 'fail'
-          ? awardedPoints(rules, 0, 'fail', effectiveSelected)
+          ? effectiveSelected
+            ? tierOnlyPoints(rules, effectiveSelected)
+            : awardedPoints(rules, 0, 'fail', null)
           : 0
     const hasLedger = Boolean(rec.ledgerId)
     const forced = opts.force?.has(rec.id) ?? false
@@ -352,6 +367,40 @@ export function setActivityTier(
 ): Promise<void> {
   return serializeActivity(activity.id, () =>
     doSetActivityTier(activity, record, ruleId, rules),
+  )
+}
+
+/**
+ * 三态标记（v30，UI 用）：过关 / 未过关 / 重置为待检查。
+ *
+ * 与 `setActivityTier` 的区别：**三态互斥** —— 落状态时一并清空所选档位，
+ * 避免出现「未过关 + 残留档位」这种半吊子状态（用户反馈：点过关后仍带着旧档位）。
+ */
+export function setActivityOutcome(
+  activity: ClassActivity,
+  record: ClassActivityRecord,
+  status: 'pending' | 'pass' | 'fail',
+  rules: ResolvedClassRule[],
+): Promise<void> {
+  return serializeActivity(activity.id, () =>
+    doSetActivityStatus(activity, { ...record, selectedRuleId: null }, status, rules),
+  )
+}
+
+/**
+ * 三态标记（v30，UI 用）：把学生标为某个「档位」（如「不熟练 +0.5」）。
+ *
+ * 档位是独立的第三态：底层落 `status='fail' + selectedRuleId=tierId`，
+ * 计分只按该档位（不叠加过关/未过关的自动规则，见 resettleActivity）。
+ */
+export function setActivityTierOutcome(
+  activity: ClassActivity,
+  record: ClassActivityRecord,
+  tierId: string,
+  rules: ResolvedClassRule[],
+): Promise<void> {
+  return serializeActivity(activity.id, () =>
+    doSetActivityStatus(activity, { ...record, selectedRuleId: tierId }, 'fail', rules),
   )
 }
 
@@ -497,11 +546,6 @@ export async function deleteClassActivity(
   await db.classActivities.put(markDeleted({ ...activity, deletedReason: reason }))
 }
 
-/** 该活动是否应「阻止」自动重建：未删的任何活动、或老师手动删掉的活动都会阻止 */
-function blocksAutoGen(a: ClassActivity): boolean {
-  return !a.deletedAt || a.deletedReason !== 'revert'
-}
-
 // ============================================================
 // 规则库：默认课堂规则补齐
 // ============================================================
@@ -606,7 +650,7 @@ export async function ensureTodayClassActivities(
     // 与 ensureAutoClassActivityForCourse 的差异是刻意的：
     //  - 这里由「打开课堂积分页 / 排课当天」触发，任何删除都视为老师的明确意图 → 不重生；
     //  - 那里由「完成课程」触发，需支持「取消完成 → 重新完成」的重建，
-    //    因此只把「未删除」与「手动删除」视为阻止（见 blocksAutoGen）。
+    //    因此按「课程」精确匹配去重，并允许认领当天尚未归属课程的自动活动（v30）。
     const exists = activities.some(
       (a) => a.groupId === gid && a.activityDate === dayStart,
     )
@@ -697,17 +741,49 @@ export async function ensureAutoClassActivityForCourse(input: {
 
   const dayStart = startOfDay(new Date(input.activityDate)).getTime()
   const activities = await db.classActivities.toArray()
-  // 去重：
-  //  - 未删除的活动 → 跳过（不重复建）；
-  //  - 「取消完成」时被自动回收的（deletedReason='revert'）→ 不阻止，可重建；
-  //  - 老师手动删掉的（'manual'）→ 视为明确不要，不再重建。
-  const exists = activities.some(
-    (a) =>
-      blocksAutoGen(a) &&
-      (a.sourceCourseId === input.courseId ||
-        (a.groupId === input.groupId && a.activityDate === dayStart)),
+  const sameDay = activities.filter(
+    (a) => a.groupId === input.groupId && a.activityDate === dayStart,
   )
-  if (exists) return { created: false }
+
+  // 去重（v30 改为「按课程精确匹配」，与 ensureAutoCheckInTask 同款）：
+  //  1) 本课程自己已生成过（存活 / 被 revert 回收过之外的任何存活墓碑）→ 幂等跳过。
+  //  2) 老师手动删掉过「本课程绑定」的活动 → 尊重其意图，不再重建。
+  //  3) 若当天该班课存在「尚未归属任何课程」的自动活动（课堂积分页按排课预生成的孤儿活动）
+  //     → **认领**为本课程：这样「取消完成」能精确回收它、「重新完成」又能重建。
+  //     ⚠ 旧实现用「同班同天」兜底去重，会把这种孤儿活动也算作「已存在」，
+  //       导致「完成课程」不建活动，而「取消完成」又因 sourceCourseId 对不上回收不掉 ——
+  //       于是「取消完成 → 再完成」永远看不到本课的课堂活动（用户实测）。
+  const owned = sameDay.find(
+    (a) => !a.deletedAt && a.sourceCourseId === input.courseId,
+  )
+  if (owned) return { created: false, activityId: owned.id }
+
+  const manualDeletedOwned = sameDay.find(
+    (a) =>
+      a.deletedAt &&
+      a.deletedReason === 'manual' &&
+      a.sourceCourseId === input.courseId,
+  )
+  if (manualDeletedOwned) return { created: false }
+
+  const orphan = sameDay.find(
+    (a) => !a.deletedAt && a.auto === true && !a.sourceCourseId,
+  )
+  if (orphan) {
+    await db.classActivities.put(
+      touch({ ...orphan, sourceCourseId: input.courseId, courseId: input.courseId }),
+    )
+    return { created: false, activityId: orphan.id }
+  }
+
+  // 4) 当天该班课已有其它存活活动（老师手动新建 / 已归属别的课）→ 不重复建。
+  const otherAlive = sameDay.find((a) => !a.deletedAt)
+  if (otherAlive) return { created: false, activityId: otherAlive.id }
+
+  // 5) 老师手动删除过「当天该班课」的活动 → 视为明确不要，不重建。
+  if (sameDay.some((a) => a.deletedAt && a.deletedReason === 'manual')) {
+    return { created: false }
+  }
 
   const ruleIds = await defaultClassRuleIds()
   const now = Date.now()
