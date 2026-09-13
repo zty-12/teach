@@ -26,7 +26,7 @@ import {
 } from '@/lib/types'
 import { cn, formatCourseRange, subjectColorVar } from '@/lib/utils'
 import { courseTitle } from '@/pages/schedule-helpers'
-import { revertCompletion } from '@/lib/courseCompletion'
+import { revertCompletion, summarizeRevert, type RevertResult } from '@/lib/courseCompletion'
 
 /** 每页显示多少条 */
 const PAGE_SIZE = 20
@@ -185,9 +185,22 @@ export function CourseScheduleSheet({
   async function batchSetStatus(status: CourseStatus) {
     if (!scope || selected.size === 0) return
     const targets = scope.list.filter((c) => selected.has(c.id))
-    // 撤销完成：先归还课时 / 撤销结算，再改状态（不能直接 bulkPut 覆盖）
+    // 撤销完成：先归还课时 / 撤销结算 / 回收自动生成的打卡与课堂活动，再改状态
+    // （不能直接 bulkPut 覆盖，否则课时与自动任务不会回滚）
     const reverts = targets.filter((c) => c.status === 'done' && status !== 'done')
-    for (const c of reverts) await revertCompletion(c.id)
+    const total: RevertResult = {
+      restoredHours: 0,
+      removedSettlements: 0,
+      removedCheckInTasks: 0,
+      removedClassActivities: 0,
+    }
+    for (const c of reverts) {
+      const r = await revertCompletion(c.id)
+      total.restoredHours += r.restoredHours
+      total.removedSettlements += r.removedSettlements
+      total.removedCheckInTasks += r.removedCheckInTasks
+      total.removedClassActivities += r.removedClassActivities
+    }
     const rest = targets.filter((c) => !(c.status === 'done' && status !== 'done'))
     if (rest.length > 0) {
       const now = Date.now()
@@ -195,6 +208,8 @@ export function CourseScheduleSheet({
     }
     setSelected(new Set())
     setSelectMode(false)
+    const msg = summarizeRevert(total)
+    if (msg) window.alert(msg)
   }
 
   /** 批量彻底删除 */

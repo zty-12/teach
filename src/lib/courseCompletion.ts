@@ -8,7 +8,10 @@
  *  - 完成时自动写一条 Settlement
  */
 import { db, markDeleted, touch, withSyncFields } from './db'
+import { deleteCheckInTask } from './points'
+import { deleteClassActivity } from './classPoints'
 import type {
+  CheckInTask,
   Course,
   CourseAttendance,
   Group,
@@ -149,8 +152,16 @@ export async function applyCompletion(
 
   // 1) 更新 Course.feeCents + status='done'
   //    注意：status 一并置为 done，避免调用方再用旧 course 对象覆盖掉刚算好的课酬。
+  //    v21：同时写入「实际扣减快照」，供「取消完成」精确返还课时。
   await db.courses.put(
-    touch({ ...input.course, feeCents: breakdown.feeCents, status: 'done' }),
+    touch({
+      ...input.course,
+      feeCents: breakdown.feeCents,
+      status: 'done',
+      deductedHours: breakdown.deductions
+        .map((d) => ({ studentId: d.studentId, hours: Math.max(0, d.before - d.after) }))
+        .filter((d) => d.hours > 0),
+    }),
   )
 
   // 2) 课时扣减
@@ -191,64 +202,105 @@ export async function applyCompletion(
   return breakdown
 }
 
+export interface RevertResult {
+  /** 归还的课时数 */
+  restoredHours: number
+  /** 撤销的结算条数 */
+  removedSettlements: number
+  /** 取消的「自动生成」打卡任务数 */
+  removedCheckInTasks: number
+  /** 取消的「自动生成」课堂活动数 */
+  removedClassActivities: number
+}
+
+/** 把撤销结果整理成一句可展示的提示（无实际变更时返回 ''） */
+export function summarizeRevert(r: RevertResult): string {
+  const parts: string[] = []
+  if (r.restoredHours > 0) parts.push(`返还 ${r.restoredHours} 课时`)
+  if (r.removedSettlements > 0) parts.push(`撤销 ${r.removedSettlements} 笔结算`)
+  if (r.removedCheckInTasks > 0) parts.push(`取消 ${r.removedCheckInTasks} 个自动打卡`)
+  if (r.removedClassActivities > 0) parts.push(`取消 ${r.removedClassActivities} 个自动课堂活动`)
+  return parts.length > 0 ? `已取消完成：${parts.join('，')}。` : ''
+}
+
+/** 判定某打卡任务是否为「完成课程时自动生成」（v21 有 auto 标记；旧数据按备注前缀兜底） */
+function isAutoCheckInTask(t: CheckInTask): boolean {
+  return t.auto === true || t.note.startsWith('课程完成后自动创建')
+}
+
 /**
  * 撤销「完成上课」——applyCompletion 的逆操作：
- *  1. 归还该课对预付学生扣减的课时；
+ *  1. 归还该课扣减的课时（优先用完成时写入的 deductedHours 快照精确返还）；
  *  2. 软删除该课未结清的 Settlement（撤销课酬结算）；
- *  3. 课程状态回 pending、feeCents 归零。
+ *  3. 清理完成时自动生成的打卡任务与课堂积分活动（不误伤老师手动建的）；
+ *  4. 课程状态回 pending、feeCents 归零、快照清空。
  *
- * 说明：完成时未记录逐生扣减快照，这里按「当前出席记录」重算应扣量并对称加回；
- * 对「完成后立即撤销」这一常见场景结果精确。幂等：未完成的课调用无副作用。
+ * 幂等：未完成的课调用无副作用。
  */
-export async function revertCompletion(
-  courseId: string,
-): Promise<{ restoredHours: number; removedSettlements: number }> {
+export async function revertCompletion(courseId: string): Promise<RevertResult> {
+  const empty: RevertResult = {
+    restoredHours: 0,
+    removedSettlements: 0,
+    removedCheckInTasks: 0,
+    removedClassActivities: 0,
+  }
   const course = await db.courses.get(courseId)
-  if (!course) return { restoredHours: 0, removedSettlements: 0 }
+  if (!course) return empty
 
-  const attendances = (await db.courseAttendances.toArray()).filter(
-    (a) => !a.deletedAt && a.courseId === courseId,
-  )
-  const groupMembers = course.groupId
-    ? (await db.groupMembers.toArray()).filter(
-        (m) => !m.deletedAt && m.groupId === course.groupId,
-      )
-    : []
-  const student = course.studentId
-    ? (await db.students.get(course.studentId)) ?? null
-    : null
-  const group = course.groupId
-    ? (await db.groups.get(course.groupId)) ?? null
-    : null
-  const allStudents = student
-    ? [student]
-    : (await db.students.bulkGet(groupMembers.map((m) => m.studentId))).filter(
-        (s): s is Student => !!s && !s.deletedAt,
-      )
-
-  const breakdown = calculateCompletion({
-    course,
-    attendances,
-    student,
-    group,
-    groupMembers,
-    allStudents,
-  })
-
-  // 1) 归还课时
+  // ---------- 1) 归还课时 ----------
   let restoredHours = 0
-  for (const d of breakdown.deductions) {
-    const deducted = d.before - d.after
-    if (deducted <= 0) continue
-    const s = await db.students.get(d.studentId)
-    if (!s) continue
-    await db.students.put(
-      touch({ ...s, remainingHours: s.remainingHours + deducted }),
+  const snapshot = Array.isArray(course.deductedHours) ? course.deductedHours : null
+
+  if (snapshot && snapshot.length > 0) {
+    // 精确路径：按完成时记录的实际扣减量加回
+    for (const d of snapshot) {
+      if (!d || !d.studentId || !(d.hours > 0)) continue
+      const s = await db.students.get(d.studentId)
+      if (!s) continue
+      await db.students.put(touch({ ...s, remainingHours: s.remainingHours + d.hours }))
+      restoredHours += d.hours
+    }
+  } else {
+    // 兼容旧数据（无快照）：按出席重算。
+    // ⚠ 旧实现用 `before - max(0, before-1)` 求扣减量，会把「余额正好扣到 0」的课
+    //   返还成 0 课时 —— 这正是「取消完成没返还课时」的根因。
+    //   这里改为「每位出席的预付学生各返还 1 课时」，与扣减口径一致。
+    const attendances = (await db.courseAttendances.toArray()).filter(
+      (a) => !a.deletedAt && a.courseId === courseId,
     )
-    restoredHours += deducted
+    const groupMembers = course.groupId
+      ? (await db.groupMembers.toArray()).filter(
+          (m) => !m.deletedAt && m.groupId === course.groupId,
+        )
+      : []
+    const student = course.studentId
+      ? (await db.students.get(course.studentId)) ?? null
+      : null
+    const group = course.groupId
+      ? (await db.groups.get(course.groupId)) ?? null
+      : null
+    const allStudents = student
+      ? [student]
+      : (await db.students.bulkGet(groupMembers.map((m) => m.studentId))).filter(
+          (s): s is Student => !!s && !s.deletedAt,
+        )
+    const breakdown = calculateCompletion({
+      course,
+      attendances,
+      student,
+      group,
+      groupMembers,
+      allStudents,
+    })
+    for (const d of breakdown.deductions) {
+      const s = await db.students.get(d.studentId)
+      if (!s) continue
+      await db.students.put(touch({ ...s, remainingHours: s.remainingHours + 1 }))
+      restoredHours += 1
+    }
   }
 
-  // 2) 撤销结算
+  // ---------- 2) 撤销结算 ----------
   let removedSettlements = 0
   const settled = (await db.settlements.toArray()).filter(
     (s) => s.courseId === courseId && !s.deletedAt,
@@ -258,10 +310,38 @@ export async function revertCompletion(
     removedSettlements++
   }
 
-  // 3) 状态回退（清空课酬，避免残留待结算金额）
-  await db.courses.put(touch({ ...course, status: 'pending', feeCents: 0 }))
+  // ---------- 3) 取消「完成时自动生成」的打卡任务 ----------
+  let removedCheckInTasks = 0
+  const autoTasks = (await db.checkInTasks.toArray()).filter(
+    (t) => !t.deletedAt && t.courseId === courseId && isAutoCheckInTask(t),
+  )
+  for (const t of autoTasks) {
+    await deleteCheckInTask(t.id)
+    removedCheckInTasks++
+  }
 
-  return { restoredHours, removedSettlements }
+  // ---------- 4) 取消自动生成的课堂积分活动 ----------
+  let removedClassActivities = 0
+  const allRecords = await db.classActivityRecords.toArray()
+  const autoActivities = (await db.classActivities.toArray()).filter(
+    (a) => !a.deletedAt && a.auto === true && a.sourceCourseId === courseId,
+  )
+  for (const a of autoActivities) {
+    await deleteClassActivity(a, allRecords)
+    removedClassActivities++
+  }
+
+  // ---------- 5) 状态回退（清空课酬与扣减快照） ----------
+  await db.courses.put(
+    touch({ ...course, status: 'pending', feeCents: 0, deductedHours: null }),
+  )
+
+  return {
+    restoredHours,
+    removedSettlements,
+    removedCheckInTasks,
+    removedClassActivities,
+  }
 }
 
 /**

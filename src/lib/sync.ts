@@ -88,6 +88,14 @@ const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
     note: '',
     status: 'pending',
   },
+  // v21：云端 groups.classActivityAuto / checkInTasks.auto 为 NOT NULL DEFAULT，
+  //      批量 upsert 时缺键会被补成 null → 违反非空约束，这里兜底。
+  groups: {
+    classActivityAuto: true,
+  },
+  checkInTasks: {
+    auto: false,
+  },
 }
 
 /** 对单条待推送记录补齐云端 NOT NULL 列的缺省值 */

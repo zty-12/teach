@@ -407,6 +407,8 @@ export async function createCheckInTask(input: {
   days: number[]
   /** 本任务适用的打卡规则 id（v20）；缺省时不写，按「全部启用规则」处理 */
   ruleIds?: string[]
+  /** v21：是否为「完成课程」自动生成（取消完成时据此清理） */
+  auto?: boolean
   /** all 模式下的在读学生列表 */
   activeStudents?: Student[]
 }): Promise<{ task: CheckInTask; created: number }> {
@@ -428,6 +430,8 @@ export async function createCheckInTask(input: {
     cadenceLabel: input.cadenceLabel.trim() || '单次打卡',
     note: input.note.trim(),
     ...(input.ruleIds ? { ruleIds: input.ruleIds } : {}),
+    // v21：标记「完成课程自动生成」，供「取消完成」精确回收
+    ...(input.auto ? { auto: true } : {}),
     createdAt: now,
   })
   await db.checkInTasks.put(task)
@@ -613,6 +617,7 @@ export async function ensureAutoCheckInTask(input: {
     cadenceLabel: formatCadenceLabel(days),
     memberIds: ids,
     days,
+    auto: true,
   })
   return { created: true }
 }

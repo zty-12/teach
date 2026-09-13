@@ -456,6 +456,8 @@ export async function ensureTodayClassActivities(
   for (const gid of scheduled) {
     const g = groupMap.get(gid)
     if (!g) continue
+    // v21：班课可关闭「自动生成课堂活动」（与课后自动打卡同款开关）
+    if (g.classActivityAuto === false) continue
     // 该班课今天是否已有活动（含已删除 —— 删过就不再自动生成）
     const exists = activities.some(
       (a) => a.groupId === gid && a.activityDate === dayStart,
@@ -501,4 +503,79 @@ export async function ensureTodayClassActivities(
   }
 
   return { created: titles.length, titles }
+}
+
+/**
+ * v21：课程「完成上课」后，为该班课自动生成当天的课堂积分活动（幂等）。
+ *
+ * 与「课后自动打卡」并列，受班课设置 `classActivityAuto` 控制（缺省开启）：
+ *  - 仅处理班课课程（1对1 无课堂积分场景）；
+ *  - 为「本次出席学生」建记录（出勤数据缺失时回退班课全员）；
+ *  - 去重：同一节课已生成 / 同班同天已有活动 → 跳过；
+ *  - 「取消完成」时会软删对应活动（见 courseCompletion.revertCompletion）。
+ *
+ * 失败由调用方兜底，不应阻塞课程完成流程。
+ */
+export async function ensureAutoClassActivityForCourse(input: {
+  /** 来源课程 id（写入 sourceCourseId，便于取消完成时精确清理） */
+  courseId: string
+  groupId: string | null
+  /** 上课日期（通常为课程 startAt）；内部取当天零点 */
+  activityDate: number
+  /** 参与学生 id（出席学生；为空则调用方回退全班） */
+  studentIds: string[]
+  /** 活动标题（会加「课堂积分 · 」前缀） */
+  title: string
+}): Promise<{ created: boolean; activityId?: string }> {
+  if (!input.groupId) return { created: false }
+  const g = await db.groups.get(input.groupId)
+  if (!g || g.deletedAt) return { created: false }
+  // 班课关闭了自动生成 → 不建
+  if (g.classActivityAuto === false) return { created: false }
+
+  const ids = Array.from(new Set(input.studentIds.filter(Boolean)))
+  if (ids.length === 0) return { created: false }
+
+  const dayStart = startOfDay(new Date(input.activityDate)).getTime()
+  const activities = await db.classActivities.toArray()
+  // 去重：仅「未删除」的活动参与判定 —— 这样「取消完成→重新完成」可重建
+  const exists = activities.some(
+    (a) =>
+      !a.deletedAt &&
+      (a.sourceCourseId === input.courseId ||
+        (a.groupId === input.groupId && a.activityDate === dayStart)),
+  )
+  if (exists) return { created: false }
+
+  const ruleIds = await defaultClassRuleIds()
+  const now = Date.now()
+  const activity = withSyncFields<ClassActivity>({
+    title: `课堂积分 · ${input.title}`,
+    courseId: input.courseId,
+    groupId: input.groupId,
+    activityDate: dayStart,
+    auto: true,
+    sourceCourseId: input.courseId,
+    ruleIds,
+    rules: [],
+    note: '',
+    createdAt: now,
+  })
+  await db.classActivities.put(activity)
+  await db.classActivityRecords.bulkPut(
+    ids.map((sid) =>
+      withSyncFields<ClassActivityRecord>({
+        activityId: activity.id,
+        studentId: sid,
+        status: 'pending',
+        pointsAwarded: 0,
+        note: '',
+        checkedAt: null,
+        createdAt: now,
+        ledgerId: null,
+        selectedRuleId: null,
+      }),
+    ),
+  )
+  return { created: true, activityId: activity.id }
 }

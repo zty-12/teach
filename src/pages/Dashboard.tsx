@@ -30,7 +30,7 @@ import {
   type Student,
 } from '@/lib/types'
 import { completeCourseWithAttendance, persistAttendance } from './schedule-helpers'
-import { revertCompletion } from '@/lib/courseCompletion'
+import { revertCompletion, summarizeRevert } from '@/lib/courseCompletion'
 import { computeFinanceMetrics } from '@/lib/finance'
 
 // ============================================================
@@ -386,10 +386,12 @@ export default function DashboardPage() {
 
   const { todayCourses, weeklyBars, weeklyCourseCount } = data
 
-  function quickComplete(c: Course) {
+  async function quickComplete(c: Course) {
     if (c.status === 'done') {
-      // 撤销完成：归还课时 + 撤销结算（不能只改状态）
-      void revertCompletion(c.id)
+      // 撤销完成：归还课时 + 撤销结算 + 回收自动生成的打卡/课堂活动（不能只改状态）
+      const r = await revertCompletion(c.id)
+      const msg = summarizeRevert(r)
+      if (msg) window.alert(msg)
       return
     }
     setAttendanceFor(c)

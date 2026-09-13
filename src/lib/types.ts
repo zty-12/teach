@@ -98,6 +98,9 @@ export interface Group extends SyncFields {
    * 设置后：从起始日起向后取「落在所选星期几」的日期，共 checkInDays 天。
    */
   checkInWeekdays?: number[]
+  // ---- v21：班课「课堂积分活动」自动生成配置（与课后自动打卡并列）----
+  /** 该班课每次完成后是否自动生成课堂积分活动；缺省 true（向后兼容） */
+  classActivityAuto?: boolean
 }
 
 export interface GroupMember extends SyncFields {
@@ -144,6 +147,13 @@ export interface Course extends SyncFields {
   isMakeup?: boolean
   /** 补课对应的原课程（通常是被请假的班课）ID；非补课为 null/缺省 */
   makeupSourceCourseId?: string | null
+  /**
+   * v21：完成上课时对每位学生的「实际扣减课时」快照。
+   * 「取消完成」据此精确返还——避免仅按当前余额重算时，
+   * 把「余额正好扣到 0」的课返还成 0 课时的问题。
+   * 旧数据无此字段时回退到按出席重算。
+   */
+  deductedHours?: Array<{ studentId: string; hours: number }> | null
 }
 
 // ============================================================
@@ -405,6 +415,11 @@ export interface CheckInTask extends SyncFields {
    * 空数组 / undefined = 兼容旧数据：沿用所有启用的打卡规则。
    */
   ruleIds?: string[]
+  /**
+   * v21：是否由「完成课程」自动生成。
+   * 「取消完成」时据此清理对应打卡任务（避免误删老师手动创建的课程打卡）。
+   */
+  auto?: boolean
   createdAt: number
 }
 

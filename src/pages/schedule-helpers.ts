@@ -7,6 +7,7 @@ import type { Course, CourseAttendance, Group, GroupMember, Student } from '../l
 import { courseDurationMin } from '../lib/utils'
 import { applyCompletion } from '../lib/courseCompletion'
 import { ensureAutoCheckInTask } from '../lib/points'
+import { ensureAutoClassActivityForCourse } from '../lib/classPoints'
 
 /**
  * 课程标题：优先学生名，其次班课名（被 Schedule / CourseScheduleSheet 共用的纯函数）。
@@ -207,7 +208,9 @@ export async function persistAttendance(
 /**
  * 按「已保存的出席记录」完成课程：
  *  - 重新读取最新出席（用户已在弹窗里勾选），据此计算课酬、扣减预付课时；
- *  - applyCompletion 内部会写入 feeCents 并把课程状态置为 done。
+ *  - applyCompletion 内部会写入 feeCents 并把课程状态置为 done；
+ *  - 完成后再按班课配置，自动生成「课后打卡」与「课堂积分活动」
+ *    （两者都可在「取消完成」时被精确回收）。
  */
 export async function completeCourseWithAttendance(
   course: Course,
@@ -241,5 +244,22 @@ export async function completeCourseWithAttendance(
     })
   } catch {
     // 打卡任务创建失败不影响课程完成
+  }
+
+  // v21：完成后自动生成当天的「课堂积分活动」（仅班课；受班课 classActivityAuto 控制）
+  try {
+    if (course.groupId) {
+      const presentIds = allAtts.filter((a) => a.present).map((a) => a.studentId)
+      const memberIds = groupMems.map((m) => m.studentId)
+      await ensureAutoClassActivityForCourse({
+        courseId: course.id,
+        groupId: course.groupId,
+        activityDate: course.startAt,
+        studentIds: presentIds.length > 0 ? presentIds : memberIds,
+        title: courseTitle(course, studentMap, groupMap),
+      })
+    }
+  } catch {
+    // 课堂活动创建失败不影响课程完成
   }
 }

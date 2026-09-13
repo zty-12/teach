@@ -297,6 +297,8 @@ function GroupModal({
       checkInWeekdays: Array.from(new Set(form.checkInWeekdays.filter((d) => d >= 0 && d <= 6))).sort(
         (a, b) => a - b,
       ),
+      // v21：完成课程后自动生成课堂积分活动（与课后自动打卡并列）
+      classActivityAuto: form.classActivityAuto,
     }
     if (group) {
       // 计算新计划时长
@@ -513,6 +515,27 @@ function GroupModal({
           </div>
         )}
 
+        {/* v21：班课「课堂积分活动」自动生成（与「课后自动打卡」并列，可在班课设置里直接开关） */}
+        <Field
+          label="自动生成课堂活动"
+          hint="本班每次课完成后，自动为出勤学员生成「课堂积分」活动"
+        >
+          <label className="flex items-start gap-2 rounded-lg border border-line-1 bg-surface-0 px-3 py-2.5 text-[13px] text-text-1">
+            <input
+              type="checkbox"
+              checked={form.classActivityAuto}
+              onChange={(e) => patch({ classActivityAuto: e.target.checked })}
+              className="mt-0.5 h-3.5 w-3.5 accent-accent"
+            />
+            <span>
+              完成课程后自动生成课堂活动
+              <span className="block text-[11px] text-text-3">
+                关闭后需到「打卡与积分 → 课堂积分」页手动新建活动。
+              </span>
+            </span>
+          </label>
+        </Field>
+
         <Field label="配色">
           <div className="flex flex-wrap gap-2">
             {Array.from({ length: 8 }, (_, i) => i + 1).map((slot) => (
@@ -687,6 +710,8 @@ interface GroupForm {
   checkInStartOffset: number
   /** v16：限定打卡日落在这些星期几（0=周日~6=周六）；空=按自然日连续 */
   checkInWeekdays: number[]
+  /** v21：完成课程后是否自动生成「课堂积分活动」（与课后自动打卡并列） */
+  classActivityAuto: boolean
 }
 
 const emptyForm = (): GroupForm => ({
@@ -703,6 +728,7 @@ const emptyForm = (): GroupForm => ({
   checkInDays: 7,
   checkInStartOffset: 1,
   checkInWeekdays: [],
+  classActivityAuto: true,
 })
 
 const toForm = (g: Group): GroupForm => ({
@@ -721,4 +747,5 @@ const toForm = (g: Group): GroupForm => ({
   checkInWeekdays: Array.isArray(g.checkInWeekdays)
     ? Array.from(new Set(g.checkInWeekdays.filter((d) => d >= 0 && d <= 6))).sort((a, b) => a - b)
     : [],
+  classActivityAuto: g.classActivityAuto !== false,
 })

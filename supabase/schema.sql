@@ -67,7 +67,9 @@ create table if not exists groups (
   "checkInAuto" boolean not null default true,
   "checkInDays" integer not null default 7,
   "checkInStartOffset" integer not null default 1,
-  "checkInWeekdays" jsonb not null default '[]'::jsonb
+  "checkInWeekdays" jsonb not null default '[]'::jsonb,
+  -- v21：完成课程后自动生成「课堂积分活动」
+  "classActivityAuto" boolean not null default true
 );
 create index if not exists groups_updated_idx on groups ("updatedAt");
 create index if not exists groups_weekday_idx on groups (weekday);
@@ -102,7 +104,9 @@ create table if not exists courses (
   "deletedAt" bigint,
   -- v7：补课标记
   "isMakeup" boolean not null default false,
-  "makeupSourceCourseId" text
+  "makeupSourceCourseId" text,
+  -- v21：完成上课时的扣减课时快照（取消完成时据此精确返还）
+  "deductedHours" jsonb
 );
 create index if not exists courses_updated_idx on courses ("updatedAt");
 create index if not exists courses_start_idx on courses ("startAt");
@@ -530,6 +534,12 @@ alter table "checkInTasks" add column if not exists "ruleIds" jsonb not null def
 alter table "checkInRecords" add column if not exists "selectedRuleId" text;
 alter table "classActivities" add column if not exists "ruleIds" jsonb not null default '[]'::jsonb;
 alter table "classActivityRecords" add column if not exists "selectedRuleId" text;
+
+-- v21：班课「自动生成课堂活动」开关 + 完成课程自动生成的打卡任务标记
+--       + 课程完成时的课时扣减慢照（「取消完成」据此精确返还/回收）
+alter table groups add column if not exists "classActivityAuto" boolean not null default true;
+alter table "checkInTasks" add column if not exists "auto" boolean not null default false;
+alter table courses add column if not exists "deductedHours" jsonb;
 
 
 -- ============================================================

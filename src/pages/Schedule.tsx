@@ -45,7 +45,7 @@ import {
   subjectTintVar,
 } from '@/lib/utils'
 import { exportSchedule } from '@/lib/exporters'
-import { revertCompletion } from '@/lib/courseCompletion'
+import { revertCompletion, summarizeRevert } from '@/lib/courseCompletion'
 import {
   completeCourseWithAttendance,
   computePlannedGroupSlots,
@@ -192,10 +192,12 @@ export default function SchedulePage() {
   }
 
   /** 快速标记完成：完成前先弹出「出席选择」，确认后再按实际出席结算 */
-  function toggleDone(course: Course) {
+  async function toggleDone(course: Course) {
     if (course.status === 'done') {
-      // 撤销完成：归还课时 + 撤销结算（不能只改状态）
-      void revertCompletion(course.id)
+      // 撤销完成：归还课时 + 撤销结算 + 回收自动生成的打卡/课堂活动（不能只改状态）
+      const r = await revertCompletion(course.id)
+      const msg = summarizeRevert(r)
+      if (msg) window.alert(msg)
     } else {
       // 完成：先选出席 + 预览课酬，再结算
       setAttendanceFor(course)
