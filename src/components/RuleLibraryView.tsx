@@ -226,6 +226,9 @@ export function describeRule(r: PointRule): string {
     if (spec.condition === 'fail') {
       return `未过关的学生自动 ${fmtPoints(r.points)} 分`
     }
+    if (spec.condition === 'custom') {
+      return `手动点选「${spec.customText?.trim() || r.name}」→ ${fmtPoints(r.points)} 分（覆盖自动累加）`
+    }
     return `当「${describeClassRuleCondition(spec)}」时自动 ${fmtPoints(r.points)} 分`
   }
   if (!r.condition) return `每次「已打卡」自动 ${fmtPoints(r.points)} 分`
@@ -251,6 +254,7 @@ const CLASS_COND_KEY_LABEL: Record<ClassCondKey, string> = {
   topN: CLASS_RULE_CONDITION_LABEL.topN,
   rank: CLASS_RULE_CONDITION_LABEL.rank,
   range: CLASS_RULE_CONDITION_LABEL.range,
+  custom: '自定义…（手动按钮，不自动累加）',
 }
 
 /** 打卡条件键：none = 无条件 */
@@ -271,6 +275,7 @@ function RuleModal({
   const [points, setPoints] = useState('1')
   const [mode, setMode] = useState<RuleMode>('auto')
   const [classCond, setClassCond] = useState<ClassCondKey>('none')
+  const [customText, setCustomText] = useState('')
   const [rankN, setRankN] = useState('3')
   const [rankFrom, setRankFrom] = useState('1')
   const [rankTo, setRankTo] = useState('3')
@@ -294,6 +299,7 @@ function RuleModal({
     } else {
       setClassCond('none')
     }
+    setCustomText(spec?.customText ?? '')
     setRankN(String(spec?.rankN ?? 3))
     setRankFrom(String(spec?.rankFrom ?? 1))
     setRankTo(String(spec?.rankTo ?? spec?.rankFrom ?? 3))
@@ -331,6 +337,13 @@ function RuleModal({
         const from = Math.max(1, Number(rankFrom) || 1)
         const to = Math.max(from, Number(rankTo) || from)
         nextClassCond = { condition: 'range', rankFrom: from, rankTo: to }
+      } else if (classCond === 'custom') {
+        const txt = customText.trim()
+        if (!txt) {
+          alert('请填写自定义加分条件（如「背得不熟练」）')
+          return
+        }
+        nextClassCond = { condition: 'custom', customText: txt }
       } else {
         nextClassCond = { condition: classCond }
       }
@@ -469,8 +482,19 @@ function RuleModal({
                 <span className="text-[12px] text-text-3">名过关</span>
               </div>
             )}
+            {classCond === 'custom' && (
+              <Field label="自定义条件说明">
+                <Input
+                  value={customText}
+                  onChange={(e) => setCustomText(e.target.value)}
+                  placeholder="如：背得不熟练 / 只完成一半 / 声音太小"
+                />
+              </Field>
+            )}
             <p className="text-[11px] text-text-3">
-              名次按「过关先后」计算（第 1 名 = 最先过关的学生）。
+              {classCond === 'custom'
+                ? '自定义条件无法自动判断，因此这条规则会作为「手动按钮」——在活动页点选后该生得此分值，不参与自动累加。'
+                : '名次按「过关先后」计算（第 1 名 = 最先过关的学生）。'}
             </p>
           </div>
         )}
@@ -522,6 +546,7 @@ function RuleModal({
             scope: targetScope,
             mode,
             classCond,
+            customText,
             rankN: Number(rankN) || 1,
             rankFrom: Number(rankFrom) || 1,
             rankTo: Number(rankTo) || 1,
@@ -542,6 +567,7 @@ function describeDraft(d: {
   scope: RuleScope
   mode: RuleMode
   classCond: ClassCondKey
+  customText: string
   rankN: number
   rankFrom: number
   rankTo: number
@@ -555,6 +581,10 @@ function describeDraft(d: {
   if (d.scope === 'class') {
     if (d.classCond === 'none') return `每个过关的学生自动 ${fmtPoints(d.points)} 分。`
     if (d.classCond === 'fail') return `每个未过关的学生自动 ${fmtPoints(d.points)} 分。`
+    if (d.classCond === 'custom') {
+      const label = d.customText.trim() || d.name
+      return `手动点选「${label}」按钮 → 该生得 ${fmtPoints(d.points)} 分（覆盖自动累加）。`
+    }
     const text = describeClassRuleCondition({
       condition: d.classCond,
       rankN: d.rankN,

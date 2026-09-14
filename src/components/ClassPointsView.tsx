@@ -10,7 +10,6 @@ import {
   Trash2,
   Trophy,
   Users,
-  XCircle,
   Zap,
 } from 'lucide-react'
 import { db, withSyncFields } from '@/lib/db'
@@ -35,12 +34,11 @@ import {
   defaultClassRuleIds,
   deleteClassActivity,
   ensureTodayClassActivities,
-  previewPassPoints,
+  isOverrideRule,
   rankOf,
   resolveClassRules,
-  setActivityOutcome,
-  setActivityTierOutcome,
-  tierRules,
+  ruleAppliesNow,
+  setActivityRuleOutcome,
   type ResolvedClassRule,
 } from '@/lib/classPoints'
 import type {
@@ -63,9 +61,14 @@ import { RulePicker } from '@/components/RulePicker'
  *  - 规则支持两种模式并存：
  *      · auto（自动累加）：过关/未过关/名次达标的学生自动加分
  *      · tier（手动档位）：逐人判档，如「背诵熟练 +1 / 不熟练 +0.5」
- *  - 学生行为恒定三态按钮（v30）：过关 / 档位（如「不熟练 +0.5」）/ 未过关，
- *    当前态高亮；档位是介于过关与未过关之间的独立第三态，只加档位分。
- *  - 名次仅用于展示与名次类规则，不再作为唯一计分依据。
+ *  - 学生行为以「规则按钮」呈现（v30.2「自动累加 + 手动覆盖」）：活动引用的每一条规则都出按钮。
+ *      · 自动累加类（过关 / 未过关 / 第 N 名 / 前 N 名 / X~Y 名）：
+ *        点选只标记该生的过关/未过关状态，得分由**全部自动规则按条件累加**
+ *        （如「过关 +1」+「第一个额外 +1」→ 第一名共 +2）；
+ *      · 覆盖类（手动档位 / 自定义加分条件）：点选后该生得分**只取这条规则的分值**，
+ *        覆盖自动累加（适合「不熟练 +0.5」这类老师主观判定的档）。
+ *    再点一次当前项 = 取消、回到待检查；也可用行末「撤销」。
+ *  - 名次仅用于展示（按标记先后）。
  *  - 按班课排课时间，当天自动生成活动（沿用当前启用的课堂规则）。
  */
 export default function ClassPointsView() {
@@ -169,32 +172,17 @@ export default function ClassPointsView() {
     return liveStudents.map((s) => s.id)
   }
 
-  async function handleOutcome(
+  async function handleRule(
     activity: ClassActivity,
     record: ClassActivityRecord,
-    status: 'pending' | 'pass' | 'fail',
+    ruleId: string | null,
   ) {
     // v29：活动级提交锁 —— 快速连点时丢弃后续调用，配合数据层「从库重读」根治并发名次错乱
     if (processingRef.current.has(activity.id)) return
     processingRef.current.add(activity.id)
     try {
-      // v30 三态互斥：落状态时清掉残留档位，避免「过关/未过关 + 旧档位」半吊子状态
-      await setActivityOutcome(activity, record, status, ruleMap.get(activity.id) ?? [])
-    } finally {
-      processingRef.current.delete(activity.id)
-    }
-  }
-
-  async function handleTier(
-    activity: ClassActivity,
-    record: ClassActivityRecord,
-    tierId: string,
-  ) {
-    if (processingRef.current.has(activity.id)) return
-    processingRef.current.add(activity.id)
-    try {
-      // v30 档位是独立第三态：只加档位分（如「不熟练 +0.5」），不叠加过关/未过关规则
-      await setActivityTierOutcome(activity, record, tierId, ruleMap.get(activity.id) ?? [])
+      // v30.2：规则按钮 —— 自动累加类标记状态（按条件累加）；覆盖类只取该规则分值；null = 撤销
+      await setActivityRuleOutcome(activity, record, ruleId, ruleMap.get(activity.id) ?? [])
     } finally {
       processingRef.current.delete(activity.id)
     }
@@ -257,8 +245,7 @@ export default function ClassPointsView() {
             groupMap={groupMap}
             balances={balances}
             isToday={activity.activityDate === todayStart}
-            onStatus={handleOutcome}
-            onTier={handleTier}
+            onRule={handleRule}
             onAddStudents={handleAddStudents}
             onDelete={handleDelete}
           />
@@ -287,8 +274,7 @@ function ActivityCard({
   groupMap,
   balances,
   isToday,
-  onStatus,
-  onTier,
+  onRule,
   onAddStudents,
   onDelete,
 }: {
@@ -299,15 +285,10 @@ function ActivityCard({
   groupMap: Map<string, Group>
   balances: Map<string, PointBalance>
   isToday: boolean
-  onStatus: (
+  onRule: (
     activity: ClassActivity,
     record: ClassActivityRecord,
-    status: 'pending' | 'pass' | 'fail',
-  ) => void
-  onTier: (
-    activity: ClassActivity,
-    record: ClassActivityRecord,
-    tierId: string,
+    ruleId: string | null,
   ) => void
   onAddStudents: (activity: ClassActivity) => void
   onDelete: (activity: ClassActivity) => void
@@ -315,7 +296,6 @@ function ActivityCard({
   const group = activity.groupId ? groupMap.get(activity.groupId) : null
   const passed = records.filter((r) => r.status === 'pass')
   const totalAwarded = records.reduce((s, r) => s + (r.pointsAwarded || 0), 0)
-  const tiers = tierRules(rules)
 
   return (
     <Card>
@@ -387,25 +367,18 @@ function ActivityCard({
                       rankN: r.rankN,
                       rankFrom: r.rankFrom,
                       rankTo: r.rankTo,
+                      customText: r.customText,
                     })}
                   </span>
-                  {r.mode === 'tier' && (
-                    <span className="rounded bg-amber-200 px-1 text-[9px] text-amber-800 dark:bg-amber-800/50 dark:text-amber-200">
-                      档位
-                    </span>
-                  )}
                 </div>
               ))}
             </div>
           )}
-          {/* v30：档位规则缺失时的可见提示 —— 常见误配是把「不熟练」建成自动累加模式，
-              导致学生行永远出不了档位按钮（用户实测反馈） */}
-          {rules.some((r) => r.enabled) && tiers.length === 0 && (
-            <p className="mt-2 text-[11px] text-text-3">
-              提示：要在学生行逐人标记档位（如「不熟练」），需在「积分规则 → 课堂规则」里把该规则的
-              计算方式设为「手动档位」；当前引用的规则均为自动累加，不会出现档位按钮。
-            </p>
-          )}
+          <p className="mt-2 text-[11px] text-text-3">
+            规则都会作为学生行的可选按钮：「过关 / 未过关 / 名次」类点选即按条件自动累加
+            （过关+1 且第一个过关额外+1 → 第一名共 +2）；带「自定义加分条件」或「手动档位」的规则
+            点选后则只按该规则分值覆盖（适合「不熟练 +0.5」这类主观档）。
+          </p>
         </div>
       </div>
 
@@ -428,31 +401,24 @@ function ActivityCard({
               if (!student) return null
               const bal = balances.get(rec.studentId)
               const isPass = rec.status === 'pass'
-              const isFail = rec.status === 'fail'
-              // v30：档位态 = fail + 选中档位规则（独立第三态，只加档位分）
-              const activeTier =
-                isFail && rec.selectedRuleId
-                  ? tiers.find((t) => t.id === rec.selectedRuleId) ?? null
-                  : null
-              // 名次只看本活动的记录，避免跨活动同名次串味
+              // v30.2：手动「覆盖」选中的规则（非空表示该生被覆盖为这条规则的分值）
+              const overrideRule = rec.selectedRuleId
+                ? rules.find((r) => r.id === rec.selectedRuleId) ?? null
+                : null
+              // 名次只看本活动的记录，避免跨活动同名次串味（按标记先后）
               const rank = isPass ? rankOf(records, rec.studentId) : 0
-              const preview =
-                rec.status === 'pending'
-                  ? previewPassPoints(activity, rules, records, rec.studentId)
-                  : 0
+              const marked = rec.status !== 'pending' || Boolean(overrideRule)
 
               return (
                 <div
                   key={rec.id}
                   className={cn(
                     'flex items-center justify-between gap-2 rounded-lg border px-3 py-2',
-                    isPass
-                      ? 'border-done/30 bg-done/5 dark:bg-done/10'
-                      : activeTier
-                        ? 'border-amber-300/60 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/20'
-                        : isFail
-                          ? 'border-money-due/30 bg-money-due/5 dark:bg-money-due/10'
-                          : 'border-line-1 bg-surface-0',
+                    overrideRule
+                      ? 'border-amber-300/60 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/20'
+                      : isPass
+                        ? 'border-done/30 bg-surface-0'
+                        : 'border-line-1 bg-surface-0',
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-2.5">
@@ -486,69 +452,54 @@ function ActivityCard({
                   </div>
 
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                    {/* v30 三态按钮：过关 / 档位（不熟练） / 未过关 —— 恒定显示，当前态高亮 */}
-                    {rec.status === 'pending' && preview > 0 && (
-                      <span className="hidden text-[11px] text-text-3 sm:inline">
-                        过关 +{preview}
-                      </span>
+                    {/* v30.2：活动引用的每一条规则都出按钮。
+                        自动累加类 → 点选只标记过关/未过关（得分按全部自动规则累加）；
+                        覆盖类（手动档位/自定义条件）→ 点选后该生只取这条规则分值。 */}
+                    {rules.length === 0 ? (
+                      <span className="text-[11px] text-text-3">该活动未引用任何规则</span>
+                    ) : (
+                      rules.map((r) => {
+                        const isOverride = isOverrideRule(r)
+                        const selected = isOverride && rec.selectedRuleId === r.id
+                        const applied =
+                          !isOverride && ruleAppliesNow(r, rank, rec.status)
+                        const title = isOverride
+                          ? selected
+                            ? `当前覆盖：${r.name}（+${r.points} 分），再点取消覆盖`
+                            : `覆盖为「${r.name}」：该生只 +${r.points} 分（不再自动累加）`
+                          : applied
+                            ? `已生效：${r.name}（+${r.points} 分）；要取消请点行末「撤销」`
+                            : `标记为「过关」：本规则按条件自动累加，命中时 +${r.points} 分`
+                        return (
+                          <Button
+                            key={r.id}
+                            variant={selected ? 'primary' : 'secondary'}
+                            size="sm"
+                            disabled={!r.enabled}
+                            title={title}
+                            className={cn(
+                              applied && 'border border-done/40 text-done',
+                            )}
+                            onClick={() => onRule(activity, rec, r.id)}
+                          >
+                            {applied ? '✓ ' : ''}
+                            {r.name} +{r.points}
+                          </Button>
+                        )
+                      })
                     )}
-                    <Button
-                      variant={isPass ? 'primary' : 'secondary'}
-                      size="sm"
-                      title={isPass ? '当前：过关' : '标记为过关'}
-                      onClick={() => onStatus(activity, rec, 'pass')}
-                    >
-                      <CheckCircle2 size={13} /> 过关
-                    </Button>
-                    {tiers.map((t) => {
-                      const active = activeTier?.id === t.id
-                      return (
-                        <Button
-                          key={t.id}
-                          variant={active ? 'primary' : 'secondary'}
-                          size="sm"
-                          title={
-                            active
-                              ? `当前：${t.name}（只加档位分）`
-                              : `标记为「${t.name}」（介于过关与未过关，只加档位分 +${t.points}）`
-                          }
-                          onClick={() => onTier(activity, rec, t.id)}
-                        >
-                          <Sparkles size={13} /> {t.name} +{t.points}
-                        </Button>
-                      )
-                    })}
-                    <Button
-                      variant={isFail && !activeTier ? 'primary' : 'secondary'}
-                      size="sm"
-                      title={isFail && !activeTier ? '当前：未过关' : '标记为未过关'}
-                      onClick={() => onStatus(activity, rec, 'fail')}
-                    >
-                      <XCircle size={13} /> 未过关
-                    </Button>
-
-                    {/* 当前结果与积分 */}
-                    {isPass && (
-                      <span className="flex items-center gap-1 text-[12px] font-medium text-done">
-                        +{rec.pointsAwarded} 分
-                      </span>
-                    )}
-                    {activeTier && (
+                    {marked && (
                       <span className="flex items-center gap-1 text-[12px] font-medium text-amber-600 dark:text-amber-400">
-                        {activeTier.name} +{rec.pointsAwarded} 分
+                        {overrideRule ? `${overrideRule.name}，` : ''}
+                        共 +{rec.pointsAwarded} 分
                       </span>
                     )}
-                    {isFail && !activeTier && (
-                      <span className="flex items-center gap-1 text-[12px] text-money-due">
-                        未过关
-                      </span>
-                    )}
-                    {rec.status !== 'pending' && (
+                    {marked && (
                       <Button
                         variant="ghost"
                         size="sm"
-                        title="撤销（分与名次会重算）"
-                        onClick={() => onStatus(activity, rec, 'pending')}
+                        title="撤销（回到待检查，分数冲销）"
+                        onClick={() => onRule(activity, rec, null)}
                       >
                         <RotateCcw size={13} />
                       </Button>

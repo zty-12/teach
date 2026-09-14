@@ -615,9 +615,12 @@ export interface PointLedger extends SyncFields {
  * - topN  ：前 N 名过关额外加（配 rankN）
  * - rank  ：第 N 名过关额外加（配 rankN）
  * - range ：第 X ~ Y 名过关额外加（配 rankFrom / rankTo）
+ * - custom：自定义条件（v30.2，配 customText）——由老师自由填写条件说明。
+ *   「自定义」规则无法自动求值，因此一律作为**手动覆盖**按钮（点选即得该规则分值），
+ *   不参与按条件自动累加。
  * 旧的 pass / first 数据继续有效，无需迁移。
  */
-export type ClassRuleCondition = 'pass' | 'fail' | 'first' | 'topN' | 'rank' | 'range'
+export type ClassRuleCondition = 'pass' | 'fail' | 'first' | 'topN' | 'rank' | 'range' | 'custom'
 
 export const CLASS_RULE_CONDITION_LABEL: Record<ClassRuleCondition, string> = {
   pass: '过关者都加',
@@ -626,6 +629,7 @@ export const CLASS_RULE_CONDITION_LABEL: Record<ClassRuleCondition, string> = {
   topN: '前 N 名过关',
   rank: '第 N 名过关',
   range: '第 X~Y 名过关',
+  custom: '自定义…',
 }
 
 /** 各条件是否需要额外填写名次参数（用于新建弹窗按条件动态显示输入框） */
@@ -639,6 +643,7 @@ export const CLASS_RULE_CONDITION_PARAM: Record<
   topN: 'single',
   rank: 'single',
   range: 'range',
+  custom: 'none',
 }
 
 /** 需要填写名次参数的条件（topN / rank 用 rankN，range 用 rankFrom~rankTo） */
@@ -658,6 +663,8 @@ export interface ClassRuleConditionSpec {
   rankFrom?: number
   /** range：结束名次 */
   rankTo?: number
+  /** custom：自定义条件说明（如「背得不熟练」） */
+  customText?: string
 }
 
 /** 把课堂规则条件描述成中文短句（含名次参数），用于规则标签 */
@@ -666,8 +673,11 @@ export function describeClassRuleCondition(spec: {
   rankN?: number
   rankFrom?: number
   rankTo?: number
+  customText?: string
 }): string {
   switch (spec.condition) {
+    case 'custom':
+      return spec.customText?.trim() || '自定义条件'
     case 'topN':
       return `前 ${Math.max(1, spec.rankN ?? 1)} 名过关`
     case 'rank':
@@ -719,6 +729,8 @@ export interface ClassRuleSnapshotItem {
   rankN?: number
   rankFrom?: number
   rankTo?: number
+  /** v30.2：自定义条件说明（condition='custom' 时使用） */
+  customText?: string
   enabled: boolean
   /** 是否来自规则库（false = 旧版内嵌规则） */
   fromLibrary: boolean
@@ -771,7 +783,12 @@ export interface ClassActivityRecord extends SyncFields {
   createdAt: number
   /** 本次加分写入的积分流水 id（v17）：撤销/改判时用于冲销，避免积分残留 */
   ledgerId?: string | null
-  /** 手动档位规则选中的规则 id（v20）：mode='tier' 的规则据此计分 */
+  /**
+   * 手动「覆盖」选中的规则 id（v30.2 起语义扩展）：
+   * 非空 → 该生得分**只取这条规则的分值**（覆盖自动累加）；
+   * 空 → 按 status/名次 + 各规则的加分条件**自动累加**。
+   * 旧版用于 mode='tier' 的手动档位，语义兼容。
+   */
   selectedRuleId?: string | null
 }
 

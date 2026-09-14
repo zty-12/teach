@@ -619,6 +619,12 @@ export async function updateCheckInTaskDays(
 /**
  * 课程完成后自动创建「课后打卡」周期任务（幂等：每门课程只建一次）。
  * 打卡日 = 下课次日起连续 7 天；参与者 = 本次实际出勤的学生（无出席数据时回退）。
+ *
+ * v30.2 去重修正：**只被「存活」任务阻挡**。此前的判定把「任何非 revert 的墓碑」
+ * （老版本 markDeleted 未写 reason 的 undefined、或被旧版取消完成误标为 manual 的墓碑）
+ * 都当成「已存在」而永久跳过 —— 于是「完成 → 取消 → 再完成」后再也不生成打卡，
+ * 且旧墓碑无法自动修复（用户实测：打卡与课堂活动同时消失）。
+ * 完成上课是老师的明确动作，理应始终为该课补齐自动打卡；墓碑一律不阻断重建。
  */
 export async function ensureAutoCheckInTask(input: {
   courseId: string
@@ -633,7 +639,7 @@ export async function ensureAutoCheckInTask(input: {
   fallbackStudentIds: string[]
 }): Promise<{ created: boolean }> {
   const existing = (await db.checkInTasks.toArray()).find(
-    (t) => t.courseId === input.courseId && (!t.deletedAt || t.deletedReason !== 'revert'),
+    (t) => t.courseId === input.courseId && !t.deletedAt,
   )
   if (existing) return { created: false }
 

@@ -76,6 +76,7 @@ export function resolveClassRules(
         rankN: spec?.rankN,
         rankFrom: spec?.rankFrom,
         rankTo: spec?.rankTo,
+        customText: spec?.customText,
         enabled: r.enabled,
         fromLibrary: true,
       })
@@ -99,6 +100,22 @@ export function resolveClassRules(
 /** 取活动里所有处于「手动档位」模式的启用规则 */
 export function tierRules(rules: ResolvedClassRule[]): ResolvedClassRule[] {
   return rules.filter((r) => r.mode === 'tier' && r.enabled)
+}
+
+/**
+ * v30.2「按钮覆盖」判定：这条规则是否属于**手动覆盖**类（而非按条件自动累加）。
+ *
+ *  - `mode === 'tier'`（旧版手动档位）→ 覆盖类；
+ *  - `condition === 'custom'`（自定义加分条件）→ 覆盖类 —— 自定义条件无法自动求值，
+ *    只能由老师点按钮手动指定。
+ *  其余（pass/fail/first/topN/rank/range 或无条件的自动累加规则）→ 自动累加类。
+ *
+ * 语义差异（见 resettleActivity）：
+ *  - 覆盖类被点选 → 该生得分**只取这条规则的分值**；
+ *  - 自动累加类被点选 → 只标记学生的过关/未过关状态，得分仍由全部自动规则按条件累加。
+ */
+export function isOverrideRule(r: ResolvedClassRule): boolean {
+  return r.mode === 'tier' || r.condition === 'custom'
 }
 
 /**
@@ -161,6 +178,7 @@ export async function buildSnapshotForRuleIds(
       rankN: spec?.rankN,
       rankFrom: spec?.rankFrom,
       rankTo: spec?.rankTo,
+      customText: spec?.customText,
       enabled: r.enabled,
       fromLibrary: true,
     })
@@ -180,6 +198,8 @@ function condHit(rule: ResolvedClassRule, rank: number, status: 'pass' | 'fail')
   // 无条件：所有过关学生都加
   if (rule.condition === null) return status === 'pass'
   if (rule.condition === 'fail') return status === 'fail'
+  // v30.2：自定义条件无法自动求值 —— 一律由老师点按钮手动覆盖，不参与自动累加。
+  if (rule.condition === 'custom') return false
   if (status !== 'pass' || rank < 1) return false
   switch (rule.condition) {
     case 'pass':
@@ -242,6 +262,21 @@ export function passedOrder(records: ClassActivityRecord[]): ClassActivityRecord
     .sort((a, b) => (a.checkedAt ?? 0) - (b.checkedAt ?? 0))
 }
 
+/**
+ * v30.2（UI 用）：判断某条**自动累加类**规则此刻是否命中该学生，
+ * 用于学生行按钮上的「已生效」标识。覆盖类规则恒返回 false（由选中态决定高亮）。
+ */
+export function ruleAppliesNow(
+  rule: ResolvedClassRule,
+  rank: number,
+  status: 'pending' | 'pass' | 'fail',
+): boolean {
+  if (!rule.enabled) return false
+  if (isOverrideRule(rule)) return false
+  if (status === 'pending') return false
+  return condHit(rule, rank, status)
+}
+
 /** 学生在活动中当前的名次（1 起）；未过关返回 0 */
 export function rankOf(records: ClassActivityRecord[], studentId: string): number {
   const idx = passedOrder(records).findIndex((r) => r.studentId === studentId)
@@ -295,29 +330,41 @@ export async function resettleActivity(
   const rankMap = new Map(
     passedOrder(siblings).map((r, i) => [r.studentId, i + 1]),
   )
-  const tierName = new Map(tierRules(rules).map((r) => [r.id, r.name]))
-  // 当前活动能生效的档位规则 id 集合（v29：用于识别「悬空档位」——选中的规则已删/失效）
-  const tierIds = new Set(tierRules(rules).map((r) => r.id))
+  // v30.2：规则按钮「自动累加 + 手动覆盖」模型 ——
+  //   · selectedRuleId 非空 = 该生被**手动覆盖**为某条规则 → 得分只取该规则分值；
+  //   · selectedRuleId 为空 = **自动累加** → 按 status/名次 + 各规则的加分条件累加。
+  const ruleName = new Map(rules.map((r) => [r.id, r.name]))
+  // v30.2：当前活动生效的规则 id 集合。
+  // selectedRuleId 可指向「任意」生效规则（含自动累加类）；只有当所选规则已不在 rules 中
+  // （被删 / ruleIds 被改）时才算悬空，需清空并按自动累加重算。
+  const ruleIds = new Set(rules.map((r) => r.id))
 
   const updates: ClassActivityRecord[] = []
   for (const rec of siblings) {
     const rank = rankMap.get(rec.studentId) ?? 0
-    // v29 档位兜底：`selectedRuleId` 指向的档位规则已不在当前规则集合（已删 / ruleIds 被改）时，
-    // 按「无档位」重算，并把失效引用清空 —— 避免历史档位分凭空消失、又永久残留一条悬空 id。
-    const staleTier = Boolean(rec.selectedRuleId) && !tierIds.has(rec.selectedRuleId!)
+    // 悬空判定：选中的规则已不在当前活动规则集合（已删/失效）时，按「自动累加」重算并清空失效引用，
+    // 避免历史分值凭空消失、又永久残留一条悬空 id。
+    const staleTier = Boolean(rec.selectedRuleId) && !ruleIds.has(rec.selectedRuleId!)
     const effectiveSelected = staleTier ? null : rec.selectedRuleId
-    // 过关 → 按名次计分（可叠加所选档位）；
-    // 未过关 → 无档位时按「未过关者加」；有档位时视为独立「档位态」，只按该档位计分
-    //          （如「不熟练 +0.5」不叠加过关/未过关的自动规则）；
-    // 待检查 → 不计分
-    const expected =
-      rec.status === 'pass'
-        ? awardedPoints(rules, rank, 'pass', effectiveSelected)
-        : rec.status === 'fail'
-          ? effectiveSelected
-            ? tierOnlyPoints(rules, effectiveSelected)
-            : awardedPoints(rules, 0, 'fail', null)
-          : 0
+    // v30.2 计分优先级：
+    //  1) 手动覆盖（selectedRuleId）→ 只取该规则分值；
+    //  2) 否则按 status/名次 + 条件**自动累加**（兼容历史遗留数据）：
+    //       · 过关 → 全部「过关类」自动规则按名次累加（如 过关+1、第一个额外+1 → 第一名 +2）；
+    //       · 未过关 → 有档位时只按该档位，否则按「未过关者加」；
+    //       · 待检查 → 0。
+    let expected: number
+    if (rec.selectedRuleId) {
+      const sel = rules.find((r) => r.id === rec.selectedRuleId)
+      expected = sel ? sel.points : 0
+    } else if (rec.status === 'pass') {
+      expected = awardedPoints(rules, rank, 'pass', effectiveSelected)
+    } else if (rec.status === 'fail') {
+      expected = effectiveSelected
+        ? tierOnlyPoints(rules, effectiveSelected)
+        : awardedPoints(rules, 0, 'fail', null)
+    } else {
+      expected = 0
+    }
     const hasLedger = Boolean(rec.ledgerId)
     const forced = opts.force?.has(rec.id) ?? false
     // 结果未变化则跳过，避免每次标记都产生新流水
@@ -326,7 +373,7 @@ export async function resettleActivity(
     }
 
     await revokeLedger(rec.ledgerId)
-    const suffix = rec.selectedRuleId ? tierName.get(rec.selectedRuleId) : undefined
+    const suffix = rec.selectedRuleId ? ruleName.get(rec.selectedRuleId) : undefined
     const ledgerId =
       expected !== 0
         ? await adjustPoints(
@@ -402,6 +449,72 @@ export function setActivityTierOutcome(
   return serializeActivity(activity.id, () =>
     doSetActivityStatus(activity, { ...record, selectedRuleId: tierId }, 'fail', rules),
   )
+}
+
+/**
+ * 规则按钮点击（v30.2，UI 用）：「自动累加 + 手动覆盖」。
+ *
+ * 活动引用的**每一条规则**都是学生行上的可选按钮，点击行为按规则类别分两种：
+ *  - **覆盖类**（`mode='tier'` 或 `condition='custom'`）：
+ *      点选 → 该生得分**只取这条规则的分值**（覆盖自动累加）；再点一次 → 取消覆盖、回到待检查。
+ *  - **自动累加类**（过关/未过关/第N名/前N名/X~Y名 等可自动求值的条件）：
+ *      点选 → 只把该生标记为「过关/未过关」（视条件而定），得分仍由**全部自动规则按条件累加**
+ *      （如 过关+1 与 第一个额外+1 同时命中 → 第一名共 +2）。
+ *      幂等：重复点击不取消（避免误清过关标记），清空请用 `ruleId=null`「撤销」。
+ *
+ * 传 `ruleId=null` 表示**撤销**：清空状态与覆盖，回到待检查。
+ */
+export function setActivityRuleOutcome(
+  activity: ClassActivity,
+  record: ClassActivityRecord,
+  ruleId: string | null,
+  rules: ResolvedClassRule[],
+): Promise<void> {
+  return serializeActivity(activity.id, () =>
+    doSetActivityRuleOutcome(activity, record, ruleId, rules),
+  )
+}
+
+async function doSetActivityRuleOutcome(
+  activity: ClassActivity,
+  record: ClassActivityRecord,
+  ruleId: string | null,
+  rules: ResolvedClassRule[],
+): Promise<void> {
+  const act = await ensureClassRuleSnapshot(activity, rules)
+  const effectiveRules =
+    Array.isArray(act.classRuleSnapshot) && act.classRuleSnapshot.length > 0
+      ? ((act.classRuleSnapshot as ClassRuleSnapshotItem[]) as ResolvedClassRule[])
+      : rules
+  const sel = ruleId ? effectiveRules.find((r) => r.id === ruleId) ?? null : null
+  // 以库中最新记录为准判断「是否已是当前选中态」（调用方传入的可能是过期快照）
+  const fresh = (await db.classActivityRecords.get(record.id)) ?? record
+
+  let updated: ClassActivityRecord
+  if (!sel) {
+    // 撤销：清空状态与覆盖，回到待检查
+    updated = { ...fresh, selectedRuleId: null, status: 'pending', checkedAt: null }
+  } else if (isOverrideRule(sel)) {
+    const isActive = fresh.selectedRuleId === sel.id
+    updated = isActive
+      ? // 再点当前覆盖项 → 取消覆盖，回到待检查
+        { ...fresh, selectedRuleId: null, status: 'pending', checkedAt: null }
+      : // 覆盖为该规则：得分只取这条规则分值
+        { ...fresh, selectedRuleId: sel.id, status: 'pass', checkedAt: Date.now() }
+  } else {
+    // 自动累加类：只标记状态（未过关条件 → 'fail'，其余 → 'pass'），得分走自动累加。
+    // 幂等：重复点击不会取消（否则给已过关的学生点「第一个额外」会误清过关标记）；
+    // 需要清空请用「撤销」。
+    const target: 'pass' | 'fail' = sel.condition === 'fail' ? 'fail' : 'pass'
+    if (fresh.status === target && !fresh.selectedRuleId) return
+    updated = { ...fresh, selectedRuleId: null, status: target, checkedAt: Date.now() }
+  }
+  await db.classActivityRecords.put(touch(updated))
+  const merged = await freshActivityRecords(activity.id, updated)
+  await resettleActivity(act, merged, {
+    rules: effectiveRules,
+    force: new Set([updated.id]),
+  })
 }
 
 /** 按活动 id 串行执行的 Promise 队列（v29）：同活动的写入线性化，避免并发重算竞态。 */
@@ -745,26 +858,20 @@ export async function ensureAutoClassActivityForCourse(input: {
     (a) => a.groupId === input.groupId && a.activityDate === dayStart,
   )
 
-  // 去重（v30 改为「按课程精确匹配」，与 ensureAutoCheckInTask 同款）：
-  //  1) 本课程自己已生成过（存活 / 被 revert 回收过之外的任何存活墓碑）→ 幂等跳过。
-  //  2) 老师手动删掉过「本课程绑定」的活动 → 尊重其意图，不再重建。
-  //  3) 若当天该班课存在「尚未归属任何课程」的自动活动（课堂积分页按排课预生成的孤儿活动）
+  // 去重（v30.2：**只被「存活」活动阻挡**，墓碑一律不阻断重建）：
+  //  1) 本课程自己已生成过且存活 → 幂等跳过。
+  //  2) 当天该班课存在「尚未归属任何课程」的存活自动活动（课堂积分页按排课预生成的孤儿）
   //     → **认领**为本课程：这样「取消完成」能精确回收它、「重新完成」又能重建。
-  //     ⚠ 旧实现用「同班同天」兜底去重，会把这种孤儿活动也算作「已存在」，
-  //       导致「完成课程」不建活动，而「取消完成」又因 sourceCourseId 对不上回收不掉 ——
-  //       于是「取消完成 → 再完成」永远看不到本课的课堂活动（用户实测）。
+  //  3) 当天该班课已有其它存活活动（老师手动新建 / 已归属别的课）→ 不重复建。
+  //  4) 否则新建。
+  //  ⚠ 旧实现有两处「manual 墓碑拦截」（本课程被手动删过 / 当天该班课有 manual 墓碑就永久不再建）：
+  //     老版本「取消完成」用默认 reason(manual) 软删活动 → 墓碑永久阻断重建，
+  //     于是「完成 → 取消 → 再完成」再也看不到本课的课堂活动（用户实测，与打卡同时消失）。
+  //     完成上课是老师的明确动作，理应始终补齐活动；因此移除这两处拦截（v30.2）。
   const owned = sameDay.find(
     (a) => !a.deletedAt && a.sourceCourseId === input.courseId,
   )
   if (owned) return { created: false, activityId: owned.id }
-
-  const manualDeletedOwned = sameDay.find(
-    (a) =>
-      a.deletedAt &&
-      a.deletedReason === 'manual' &&
-      a.sourceCourseId === input.courseId,
-  )
-  if (manualDeletedOwned) return { created: false }
 
   const orphan = sameDay.find(
     (a) => !a.deletedAt && a.auto === true && !a.sourceCourseId,
@@ -776,14 +883,9 @@ export async function ensureAutoClassActivityForCourse(input: {
     return { created: false, activityId: orphan.id }
   }
 
-  // 4) 当天该班课已有其它存活活动（老师手动新建 / 已归属别的课）→ 不重复建。
+  // 当天该班课已有其它存活活动（老师手动新建 / 已归属别的课）→ 不重复建。
   const otherAlive = sameDay.find((a) => !a.deletedAt)
   if (otherAlive) return { created: false, activityId: otherAlive.id }
-
-  // 5) 老师手动删除过「当天该班课」的活动 → 视为明确不要，不重建。
-  if (sameDay.some((a) => a.deletedAt && a.deletedReason === 'manual')) {
-    return { created: false }
-  }
 
   const ruleIds = await defaultClassRuleIds()
   const now = Date.now()
