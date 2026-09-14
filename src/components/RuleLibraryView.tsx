@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Coins, Pencil, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react'
-import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { db, isRuleOrderSafe, markDeleted, touch, withSyncFields } from '@/lib/db'
 import {
   Badge,
   Button,
@@ -34,7 +34,7 @@ import {
   conditionNeedsRank,
   describeClassRuleCondition,
 } from '@/lib/types'
-import { ensureDefaultClassRules } from '@/lib/classPoints'
+import { ensureDefaultClassRules, nextRuleOrder } from '@/lib/classPoints'
 
 /**
  * 积分规则（v20）
@@ -203,6 +203,10 @@ export default function RuleLibraryView() {
         open={open}
         scope={scope}
         rule={editing}
+        // 新建时的排序值：同范围最大 order + 1。
+        // 这里必须传函数（在弹窗保存时求值），不能用 Date.now()
+        // —— 云端该列是 int4，时间戳会溢出导致整张表推送失败（v30.5）。
+        nextOrder={() => nextRuleOrder(live, scope)}
         onClose={() => setOpen(false)}
       />
     </div>
@@ -264,11 +268,14 @@ function RuleModal({
   open,
   scope,
   rule,
+  nextOrder,
   onClose,
 }: {
   open: boolean
   scope: RuleScope
   rule: PointRule | null
+  /** 新建规则的排序值（同范围最大 order + 1） */
+  nextOrder: () => number
   onClose: () => void
 }) {
   const [name, setName] = useState('')
@@ -366,7 +373,8 @@ function RuleModal({
       condition: nextCondition,
       classCondition: nextClassCond,
       enabled: rule?.enabled ?? true,
-      order: rule?.order ?? nextOrder(),
+      // 编辑时保留原排序值；原值非法（旧版时间戳脏数据 / NaN）则重新分配，避免脏值继续传播
+      order: rule && isRuleOrderSafe(rule.order) ? rule.order : nextOrder(),
     }
     if (rule) {
       await db.pointRules.put(touch({ ...rule, ...payload }))
@@ -598,7 +606,10 @@ function describeDraft(d: {
   return `当「${POINT_METRIC_LABEL[d.checkinCond]} ${opText} ${d.value}」时自动 ${fmtPoints(d.points)} 分。`
 }
 
-/** 追加到末尾的排序值（时间戳单调递增，保证新建规则排在最后） */
-function nextOrder(): number {
-  return Date.now()
-}
+/*
+ * ⚠ 已移除旧版 `nextOrder()`（返回 `Date.now()`）：
+ *   云端 `pointRules."order"` 是 integer（int4，上限 2147483647），毫秒时间戳会溢出 →
+ *   PostgREST 报 `value "1789311709042" is out of range for type integer` →
+ *   **整张 pointRules 推送失败**（v30.5 修复）。
+ *   现改为 `nextRuleOrder()`（classPoints.ts，同范围最大 order + 1），便于回归脚本测到同一份代码。
+ */

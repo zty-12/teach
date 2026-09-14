@@ -242,6 +242,33 @@ export class EduDB extends Dexie {
           .modify(fill as (r: Record<string, unknown>) => void)
       }
     })
+
+    // v15（v30.5）：修复 pointRules.order 溢出 int4 导致的整表推送失败。
+    //  实测报错：[pointRules] 推送失败: value "1789311709042" is out of range for type integer
+    //  根因：RuleLibraryView 新建规则时用 `order: Date.now()`（本意是「排到最后」），
+    //        而云端 pointRules."order" 是 **integer（int4，上限 2147483647）**，
+    //        毫秒时间戳（约 1.8e12）远超上限 → PostgREST 拒绝整批 → **整张表推送失败**。
+    //        （本地 IndexedDB 无类型限制，脏值能存下，所以是「本地好好的、同步一直失败」。）
+    //  做法：① RuleLibraryView 改用 nextRuleOrder()（同范围最大 order + 1）——治根因；
+    //        ② 这里把本地已存的脏 order 归一化（**只改脏行**，合法行原样不动，最小侵入），
+    //           并置 dirty=1 把修正推回云端；
+    //        ③ 归一化规则抽到 planPointRuleOrderFixes（同名导出），回归脚本测同一份代码。
+    this.version(15).upgrade(async (tx) => {
+      const rows = (await tx.table('pointRules').toArray()) as Array<Record<string, unknown>>
+      const fixes = planPointRuleOrderFixes(rows)
+      if (fixes.length === 0) return
+      const byId = new Map(fixes.map((f) => [f.id, f.order]))
+      await tx
+        .table('pointRules')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          const fixed = byId.get(String(r.id))
+          if (fixed === undefined) return
+          r.order = fixed
+          // 必须置脏，否则修正只留在本地、云端仍是旧值（推送按 dirty=1 选行）
+          r.dirty = 1
+        })
+    })
   }
 }
 
@@ -287,6 +314,70 @@ export const SYNC_FIELD_FILLERS: Record<string, (r: Record<string, unknown>) => 
     if (typeof r.scope !== 'string') r.scope = 'checkin'
     if (typeof r.mode !== 'string') r.mode = 'auto'
   },
+}
+
+/**
+ * 规则排序值（`pointRules.order`）的**合理上限**。
+ *
+ * 背景：云端该列是 `integer`（int4，上限 2147483647）。早期新建规则用
+ *   `order: Date.now()`（毫秒时间戳约 1.8e12）→ 溢出 →
+ *   PostgREST 报 `value "1789311709042" is out of range for type integer`
+ *   → **整张 pointRules 推送失败**（本地 IndexedDB 无类型限制，脏值能存下）。
+ *
+ * 阈值取 **100 万**：远大于任何真实规则数（不可能有上百万条规则），
+ * 又远小于 int4 上限 —— 于是「最大 order + 1」永不溢出 int4，
+ * 同时能把时间戳类脏值准确判出来。
+ *
+ * 不变量：`planPointRuleOrderFixes` 与 `nextRuleOrder` 的输出**必定**满足
+ * `isRuleOrderSafe`（否则迁移不收敛，会反复改同一条数据）。
+ */
+export const MAX_RULE_ORDER = 1_000_000
+
+/** order 是否为可用的合法序号（有限数、非负、不超上限） */
+export function isRuleOrderSafe(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_RULE_ORDER
+}
+
+/**
+ * v30.5：找出 `pointRules.order` 里「不可用」的脏值，给出归一化后的序号。
+ *
+ * **脏值怎么来的**：早期新建规则用 `order: Date.now()`（本意是「排到最后」），
+ * 本地 IndexedDB 无类型限制照单全收，但云端该列是 `integer` →
+ * PostgREST 报 `value "1789311709042" is out of range for type integer`，
+ * **整张 pointRules 推送失败**（本地看着好好的，同步却一直失败）。
+ *
+ * **归一化策略（最小侵入）**：
+ *  - 合法行（见 `isRuleOrderSafe`）**原样不动**，保留老师手动调整过的顺序；
+ *  - 脏行按 `scope` 分组，接在该 scope 现有最大 order 之后依次编号，
+ *    保持脏行之间的相对先后（原数组顺序 = 原有先后关系）；
+ *  - 序号封顶 `MAX_RULE_ORDER`，保证结果一定合法（迁移收敛）。
+ *
+ * 返回需要写回的补丁列表；空数组表示没有脏值、无需迁移。
+ */
+export function planPointRuleOrderFixes(
+  rows: ReadonlyArray<Record<string, unknown>>,
+): Array<{ id: string; order: number }> {
+  const scopeOf = (r: Record<string, unknown>): string =>
+    typeof r.scope === 'string' && r.scope ? r.scope : 'checkin'
+
+  // 1) 每个 scope 的合法最大 order（无合法行则为 -1 → 从 0 开始编号）
+  const nextSeq = new Map<string, number>()
+  for (const r of rows) {
+    if (!isRuleOrderSafe(r.order)) continue
+    const s = scopeOf(r)
+    nextSeq.set(s, Math.max(nextSeq.get(s) ?? -1, r.order))
+  }
+
+  // 2) 脏行依次补号（封顶 MAX_RULE_ORDER，杜绝「+1 又超上限」）
+  const fixes: Array<{ id: string; order: number }> = []
+  for (const r of rows) {
+    if (isRuleOrderSafe(r.order)) continue
+    const s = scopeOf(r)
+    const next = Math.min((nextSeq.get(s) ?? -1) + 1, MAX_RULE_ORDER)
+    nextSeq.set(s, next)
+    fixes.push({ id: String(r.id), order: next })
+  }
+  return fixes
 }
 
 export const db = new EduDB()

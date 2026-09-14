@@ -17,7 +17,7 @@
  *  5) 自动生成：班课按排课当天自动建活动（用当前启用的课堂规则）。
  */
 import { startOfDay } from 'date-fns'
-import { db, markDeleted, touch, withSyncFields } from './db'
+import { db, isRuleOrderSafe, markDeleted, touch, withSyncFields, MAX_RULE_ORDER } from './db'
 import { adjustPoints } from './points'
 import type {
   ClassActivity,
@@ -26,6 +26,7 @@ import type {
   ClassRuleSnapshotItem,
   Group,
   PointRule,
+  RuleScope,
 } from './types'
 
 /**
@@ -718,6 +719,30 @@ export async function ensureDefaultClassRules(): Promise<number> {
   )
   await db.pointRules.bulkPut(rows)
   return rows.length
+}
+
+/**
+ * 新建规则时的排序值 = 同范围内已有规则的**最大 order + 1**（保证新建的排在最后）。
+ *
+ * ⚠ **不要用 `Date.now()`**：云端 `pointRules."order"` 是 `integer`（int4，上限 2147483647），
+ *   毫秒时间戳约 1.8e12 会溢出 → PostgREST 报
+ *   `value "1789311709042" is out of range for type integer` → **整张 pointRules 推送失败**
+ *   （本地 IndexedDB 无类型限制，脏值能存下，所以表现为「本地正常、同步一直失败」）。
+ *   v30.5 修复根因；历史脏值由 db.ts v15 迁移经 `planPointRuleOrderFixes` 归一化。
+ *
+ * 同时**忽略非法 order**（历史脏值 / NaN / 负数 / 超上限），避免脏值把新序号一起带飞。
+ * 返回值封顶 `MAX_RULE_ORDER`，保证一定满足 `isRuleOrderSafe`（不变量）。
+ */
+export function nextRuleOrder(
+  rules: ReadonlyArray<{ scope?: RuleScope; order?: number }>,
+  scope: RuleScope,
+): number {
+  let max = -1
+  for (const r of rules) {
+    if ((r.scope ?? 'checkin') !== scope) continue
+    if (isRuleOrderSafe(r.order)) max = Math.max(max, r.order)
+  }
+  return Math.min(max + 1, MAX_RULE_ORDER)
 }
 
 /** 取当前「启用中」的课堂规则 id 列表（新建活动时的默认适用范围） */
