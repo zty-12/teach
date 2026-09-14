@@ -200,6 +200,31 @@ export class EduDB extends Dexie {
           if (typeof r.status !== 'string') r.status = 'pending'
         })
     })
+
+    // v13（v30.3）：规则按钮改「全体叠加」模型 + 班课可指定自动活动规则。
+    //  - classActivityRecords.manualRuleIds：手动叠加规则 id 列表；
+    //    把旧版单一 selectedRuleId 迁移进来（语义由「覆盖」变「叠加」，历史档位选择不丢）；
+    //  - groups.autoClassRuleIds：自动生成的课堂活动引用哪些规则（默认空 = 全部启用项）。
+    // 提醒：这两个字段云端需要对应列（见 supabase/schema.sql 的 alter 段），
+    //       本地先补全，推送时才会带上真实值而不是被 PostgREST 补成 null。
+    this.version(13).upgrade(async (tx) => {
+      await tx
+        .table('classActivityRecords')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          const legacy = typeof r.selectedRuleId === 'string' ? r.selectedRuleId : null
+          if (!Array.isArray(r.manualRuleIds)) {
+            r.manualRuleIds = legacy ? [legacy] : []
+          }
+          if (r.selectedRuleId === undefined) r.selectedRuleId = null
+        })
+      await tx
+        .table('groups')
+        .toCollection()
+        .modify((g: Record<string, unknown>) => {
+          if (!Array.isArray(g.autoClassRuleIds)) g.autoClassRuleIds = []
+        })
+    })
   }
 }
 

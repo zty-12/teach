@@ -709,6 +709,70 @@ export async function ensureAutoCheckInTask(input: {
   return { created: true }
 }
 
+/**
+ * v30.3 自愈：打开打卡页时，为「今天已完成」的班课补上缺失的「课后自动打卡」任务。
+ *
+ * 背景：自动打卡只在「完成课程」那一刻创建；若那一步静默失败、任务又被
+ * 「取消完成」回收过（或历史版本留下墓碑），老师打开打卡页时就会觉得
+ * 「完成 → 取消 → 再完成」后打卡没了。这里做一次幂等补偿：
+ *  - 只针对**今天已完成**的班课课程（未完成 / 已取消的课不补 —— 那是老师的明确意图）；
+ *  - 该课已有存活任务 → 跳过；
+ *  - 班课关掉了「课后自动打卡」→ 跳过。
+ *
+ * 幂等、可重复调用；失败不抛（由调用方兜底）。
+ */
+export async function ensureTodayAutoCheckInTasks(
+  dayAt: number = Date.now(),
+): Promise<{ created: number }> {
+  const dayStart = startOfDay(new Date(dayAt)).getTime()
+  const [courses, groups, tasks, members, atts] = await Promise.all([
+    db.courses.toArray(),
+    db.groups.toArray(),
+    db.checkInTasks.toArray(),
+    db.groupMembers.toArray(),
+    db.courseAttendances.toArray(),
+  ])
+  const doneToday = courses.filter(
+    (c) =>
+      !c.deletedAt &&
+      !!c.groupId &&
+      c.status === 'done' &&
+      startOfDay(new Date(c.startAt)).getTime() === dayStart,
+  )
+  if (doneToday.length === 0) return { created: 0 }
+
+  const groupMap = new Map(groups.filter((g) => !g.deletedAt).map((g) => [g.id, g]))
+  let created = 0
+  for (const c of doneToday) {
+    // 已有存活任务 → 幂等跳过
+    if (tasks.some((t) => t.courseId === c.id && !t.deletedAt)) continue
+    const g = c.groupId ? groupMap.get(c.groupId) : undefined
+    if (!g) continue
+    if (g.checkInAuto === false) continue
+    const presentIds = atts
+      .filter((a) => !a.deletedAt && a.courseId === c.id && a.present)
+      .map((a) => a.studentId)
+    const memberIds = members
+      .filter((m) => !m.deletedAt && m.groupId === g.id)
+      .map((m) => m.studentId)
+    if (presentIds.length === 0 && memberIds.length === 0) continue
+    try {
+      const res = await ensureAutoCheckInTask({
+        courseId: c.id,
+        groupId: g.id,
+        courseEndAt: c.startAt + Math.max(0, c.durationMin || 0) * 60_000,
+        title: g.name,
+        presentStudentIds: presentIds,
+        fallbackStudentIds: memberIds,
+      })
+      if (res.created) created += 1
+    } catch {
+      // 单个班课失败不影响其它班课
+    }
+  }
+  return { created }
+}
+
 /** 更新单条打卡记录（状态 / 备注 / 计分档位），并幂等重算该批次积分 */
 export async function updateCheckInRecord(
   record: CheckInRecord,

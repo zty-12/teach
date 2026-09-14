@@ -11,3 +11,6 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+/** 构建标识（由 vite.config.ts 的 define 注入，见 __BUILD_ID__） */
+declare const __BUILD_ID__: string

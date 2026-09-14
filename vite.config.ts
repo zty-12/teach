@@ -91,7 +91,20 @@ function spa404Plugin(): Plugin {
   }
 }
 
+/**
+ * 构建标识（v30.3）：显示在界面角落，用来一眼确认「线上跑的是哪一版」——
+ * 排查「部署了但页面还是旧行为」（Service Worker / HTTP 缓存）时非常有用。
+ */
+const BUILD_ID = (() => {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `v30.3 · ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+})()
+
 export default defineConfig({
+  define: {
+    __BUILD_ID__: JSON.stringify(BUILD_ID),
+  },
   plugins: [
     react(),
     tailwindcss(),

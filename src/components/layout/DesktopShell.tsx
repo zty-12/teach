@@ -45,6 +45,8 @@ export default function DesktopShell({ children }: { children: ReactNode }) {
           数据保存在本机浏览器
           <br />
           可配置云端同步
+          <br />
+          <span className="text-text-3/70">{__BUILD_ID__}</span>
         </div>
       </aside>
 

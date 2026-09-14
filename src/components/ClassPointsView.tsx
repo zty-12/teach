@@ -34,7 +34,8 @@ import {
   defaultClassRuleIds,
   deleteClassActivity,
   ensureTodayClassActivities,
-  isOverrideRule,
+  isManualRule,
+  manualIdsOf,
   rankOf,
   resolveClassRules,
   ruleAppliesNow,
@@ -375,9 +376,10 @@ function ActivityCard({
             </div>
           )}
           <p className="mt-2 text-[11px] text-text-3">
-            规则都会作为学生行的可选按钮：「过关 / 未过关 / 名次」类点选即按条件自动累加
-            （过关+1 且第一个过关额外+1 → 第一名共 +2）；带「自定义加分条件」或「手动档位」的规则
-            点选后则只按该规则分值覆盖（适合「不熟练 +0.5」这类主观档）。
+            每条规则都是学生行上的按钮，全部叠加计分：「过关 / 未过关 / 名次」类点选即按条件
+            自动累加（过关+1 且第一个过关额外+1 → 第一名共 +2）；「手动档位 / 自定义加分条件」类
+            点选后把该规则分值叠加上去（不覆盖自动分，可同时叠加多条，如「不熟练 +0.5」）。
+            自动类命中会显示「✓」；手动类点亮即生效，再点取消。
           </p>
         </div>
       </div>
@@ -401,20 +403,21 @@ function ActivityCard({
               if (!student) return null
               const bal = balances.get(rec.studentId)
               const isPass = rec.status === 'pass'
-              // v30.2：手动「覆盖」选中的规则（非空表示该生被覆盖为这条规则的分值）
-              const overrideRule = rec.selectedRuleId
-                ? rules.find((r) => r.id === rec.selectedRuleId) ?? null
-                : null
+              // v30.3：该生手动「叠加」的规则（可多条）
+              const manualIds = manualIdsOf(rec).filter((id) => rules.some((r) => r.id === id))
+              const manualRules = manualIds
+                .map((id) => rules.find((r) => r.id === id))
+                .filter((r): r is ResolvedClassRule => Boolean(r))
               // 名次只看本活动的记录，避免跨活动同名次串味（按标记先后）
               const rank = isPass ? rankOf(records, rec.studentId) : 0
-              const marked = rec.status !== 'pending' || Boolean(overrideRule)
+              const marked = rec.status !== 'pending' || manualRules.length > 0
 
               return (
                 <div
                   key={rec.id}
                   className={cn(
                     'flex items-center justify-between gap-2 rounded-lg border px-3 py-2',
-                    overrideRule
+                    manualRules.length > 0
                       ? 'border-amber-300/60 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/20'
                       : isPass
                         ? 'border-done/30 bg-surface-0'
@@ -452,21 +455,20 @@ function ActivityCard({
                   </div>
 
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                    {/* v30.2：活动引用的每一条规则都出按钮。
-                        自动累加类 → 点选只标记过关/未过关（得分按全部自动规则累加）；
-                        覆盖类（手动档位/自定义条件）→ 点选后该生只取这条规则分值。 */}
+                    {/* v30.3：活动引用的每一条规则都出按钮，全部叠加计分。
+                        自动类 → 点选标记过关/未过关（得分按全部自动规则累加）；
+                        手动类（手动档位/自定义条件）→ 点选把该规则分值叠加上去（可多条）。 */}
                     {rules.length === 0 ? (
                       <span className="text-[11px] text-text-3">该活动未引用任何规则</span>
                     ) : (
                       rules.map((r) => {
-                        const isOverride = isOverrideRule(r)
-                        const selected = isOverride && rec.selectedRuleId === r.id
-                        const applied =
-                          !isOverride && ruleAppliesNow(r, rank, rec.status)
-                        const title = isOverride
+                        const isManual = isManualRule(r)
+                        const selected = isManual && manualIds.includes(r.id)
+                        const applied = !isManual && ruleAppliesNow(r, rank, rec.status)
+                        const title = isManual
                           ? selected
-                            ? `当前覆盖：${r.name}（+${r.points} 分），再点取消覆盖`
-                            : `覆盖为「${r.name}」：该生只 +${r.points} 分（不再自动累加）`
+                            ? `已叠加：${r.name}（+${r.points} 分），再点取消叠加`
+                            : `叠加「${r.name}」：在自动分之上再 +${r.points} 分`
                           : applied
                             ? `已生效：${r.name}（+${r.points} 分）；要取消请点行末「撤销」`
                             : `标记为「过关」：本规则按条件自动累加，命中时 +${r.points} 分`
@@ -477,9 +479,7 @@ function ActivityCard({
                             size="sm"
                             disabled={!r.enabled}
                             title={title}
-                            className={cn(
-                              applied && 'border border-done/40 text-done',
-                            )}
+                            className={cn(applied && 'border border-done/40 text-done')}
                             onClick={() => onRule(activity, rec, r.id)}
                           >
                             {applied ? '✓ ' : ''}
@@ -490,7 +490,9 @@ function ActivityCard({
                     )}
                     {marked && (
                       <span className="flex items-center gap-1 text-[12px] font-medium text-amber-600 dark:text-amber-400">
-                        {overrideRule ? `${overrideRule.name}，` : ''}
+                        {manualRules.length > 0
+                          ? `${manualRules.map((r) => r.name).join(' + ')}，`
+                          : ''}
                         共 +{rec.pointsAwarded} 分
                       </span>
                     )}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useSearchParams } from 'react-router-dom'
 import { format } from 'date-fns'
@@ -39,6 +39,7 @@ import {
   createCheckInTask,
   defaultCheckInRuleIds,
   deleteCheckInTask,
+  ensureTodayAutoCheckInTasks,
   formatCadenceLabel,
   recomputeTaskPoints,
   redeemReward,
@@ -102,6 +103,15 @@ export default function CheckInPage() {
   const liveRewards = (rewardItems ?? []).filter((r) => !r.deletedAt)
   const liveRedemptions = (redemptions ?? []).filter((r) => !r.deletedAt)
   const liveClassCount = (classActivities ?? []).filter((a) => !a.deletedAt).length
+
+  // v30.3 自愈：进入「打卡与积分」页时，为「今天已完成」的班课补齐缺失的自动打卡任务
+  // （课堂积分活动的自愈在 ClassPointsView 里做）。幂等，一次挂载只跑一次。
+  const autoHealRan = useRef(false)
+  useEffect(() => {
+    if (autoHealRan.current) return
+    autoHealRan.current = true
+    void ensureTodayAutoCheckInTasks()
+  }, [])
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
 

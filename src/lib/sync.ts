@@ -87,11 +87,15 @@ const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
     pointsAwarded: 0,
     note: '',
     status: 'pending',
+    // v30.3：手动叠加规则列表（云端为 jsonb，缺键会被补成 null → 这里兜底空数组）
+    manualRuleIds: [],
   },
   // v21：云端 groups.classActivityAuto / checkInTasks.auto 为 NOT NULL DEFAULT，
   //      批量 upsert 时缺键会被补成 null → 违反非空约束，这里兜底。
   groups: {
     classActivityAuto: true,
+    // v30.3：自动活动引用的规则 id（云端 jsonb）
+    autoClassRuleIds: [],
   },
   checkInTasks: {
     auto: false,

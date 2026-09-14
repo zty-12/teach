@@ -206,18 +206,38 @@ export async function persistAttendance(
 }
 
 /**
+ * 完成课程时「自动生成」的结果状态：
+ *  - `created`  ：本次新建
+ *  - `exists`   ：已有存活实体（幂等跳过）
+ *  - `disabled` ：班课设置里关闭了自动生成 / 本课不适用（1对1 无课堂活动）
+ *  - `failed`   ：生成过程抛错（错误信息在 message，便于排查）
+ */
+export type AutoGenOutcome = 'created' | 'exists' | 'disabled' | 'failed'
+
+export interface CompleteResult {
+  checkIn: AutoGenOutcome
+  classActivity: AutoGenOutcome
+  /** 失败时的错误信息（用于提示老师，避免静默失败被忽略） */
+  messages: string[]
+}
+
+/**
  * 按「已保存的出席记录」完成课程：
  *  - 重新读取最新出席（用户已在弹窗里勾选），据此计算课酬、扣减预付课时；
  *  - applyCompletion 内部会写入 feeCents 并把课程状态置为 done；
  *  - 完成后再按班课配置，自动生成「课后打卡」与「课堂积分活动」
  *    （两者都可在「取消完成」时被精确回收）。
+ *
+ * v30.3：返回自动生成的结果状态；失败不再静默吞掉，而是记录进 `messages`
+ * 供 UI 提示老师（此前失败只 console.warn，老师看不到，误以为「没生成」）。
  */
 export async function completeCourseWithAttendance(
   course: Course,
   liveMembers: GroupMember[],
   studentMap: Map<string, Student>,
   groupMap: Map<string, Group>,
-): Promise<void> {
+): Promise<CompleteResult> {
+  const result: CompleteResult = { checkIn: 'disabled', classActivity: 'disabled', messages: [] }
   const allAtts = (await db.courseAttendances.toArray()).filter(
     (a) => !a.deletedAt && a.courseId === course.id,
   )
@@ -234,7 +254,7 @@ export async function completeCourseWithAttendance(
       : course.studentId
         ? [course.studentId]
         : []
-    await ensureAutoCheckInTask({
+    const r = await ensureAutoCheckInTask({
       courseId: course.id,
       groupId: course.groupId,
       courseEndAt: course.startAt + effectiveDurationMin(course, groupMap) * 60_000,
@@ -242,8 +262,11 @@ export async function completeCourseWithAttendance(
       presentStudentIds: presentIds,
       fallbackStudentIds: fallbackIds,
     })
-  } catch {
-    // 打卡任务创建失败不影响课程完成
+    result.checkIn = r.created ? 'created' : 'exists'
+  } catch (e) {
+    result.checkIn = 'failed'
+    result.messages.push(`课后打卡生成失败：${e instanceof Error ? e.message : String(e)}`)
+    console.warn('[completeCourse] 课后打卡自动生成失败（不影响课程完成）：', e)
   }
 
   // v21：完成后自动生成当天的「课堂积分活动」（仅班课；受班课 classActivityAuto 控制）
@@ -251,18 +274,22 @@ export async function completeCourseWithAttendance(
     if (course.groupId) {
       const presentIds = allAtts.filter((a) => a.present).map((a) => a.studentId)
       const memberIds = groupMems.map((m) => m.studentId)
-      await ensureAutoClassActivityForCourse({
+      const r = await ensureAutoClassActivityForCourse({
         courseId: course.id,
         groupId: course.groupId,
         activityDate: course.startAt,
         studentIds: presentIds.length > 0 ? presentIds : memberIds,
         title: courseTitle(course, studentMap, groupMap),
       })
+      result.classActivity = r.created ? 'created' : 'exists'
     }
   } catch (e) {
-    // 课堂活动创建失败不影响课程完成，但需可见以便排查
+    result.classActivity = 'failed'
+    result.messages.push(`课堂活动生成失败：${e instanceof Error ? e.message : String(e)}`)
     console.warn('[completeCourse] 课堂活动自动生成失败（不影响课程完成）：', e)
   }
+
+  return result
 }
 
 /**

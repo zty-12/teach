@@ -700,7 +700,11 @@ export default function DashboardPage() {
         onClose={() => setAttendanceFor(null)}
         onSave={async (courseId, atts) => persistAttendance(courseId, atts)}
         onComplete={async (course) => {
-          await completeCourseWithAttendance(course, liveMembers, studentMap, groupMap)
+          const r = await completeCourseWithAttendance(course, liveMembers, studentMap, groupMap)
+          // v30.3：自动生成失败时给出可见提示（此前静默 console.warn，老师以为「没生成」）
+          if (r.messages.length > 0) {
+            window.alert(`课程已完成，但自动生成出问题：\n${r.messages.join('\n')}`)
+          }
           setAttendanceFor(null)
         }}
       />

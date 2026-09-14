@@ -24,6 +24,7 @@ import {
 import { cn, initialOf, subjectColorVar } from '@/lib/utils'
 import type { Group, GroupMember, Student } from '@/lib/types'
 import { exportGroups } from '@/lib/exporters'
+import { RulePicker } from '@/components/RulePicker'
 
 export default function GroupsPage() {
   const bp = useBreakpoint()
@@ -337,6 +338,8 @@ function GroupModal({
       ),
       // v21：完成课程后自动生成课堂积分活动（与课后自动打卡并列）
       classActivityAuto: form.classActivityAuto,
+      // v30.3：自动活动引用哪些课堂规则（空数组 = 用当前启用的全部课堂规则）
+      autoClassRuleIds: form.autoClassRuleIds.filter(Boolean),
     }
     if (group) {
       // 计算新计划时长
@@ -574,6 +577,24 @@ function GroupModal({
           </label>
         </Field>
 
+        {/* v30.3：自动生成的课堂活动「出哪些规则按钮」——不选=沿用当前启用的全部课堂规则 */}
+        {form.classActivityAuto && (
+          <Field
+            label="自动活动的计分规则"
+            hint="决定自动生成的课堂积分活动出哪些规则按钮；不选=沿用当前启用的全部课堂规则"
+          >
+            <RulePicker
+              scope="class"
+              value={form.autoClassRuleIds}
+              onChange={(ids) => patch({ autoClassRuleIds: ids })}
+            />
+            <p className="mt-1 text-[11px] text-text-3">
+              留空时自动活动引用「积分规则 → 课堂规则」里全部启用项；已选规则若之后被删除/停用，
+              会自动回退为全部启用项，不会生成零规则的空活动。
+            </p>
+          </Field>
+        )}
+
         <Field label="配色">
           <div className="flex flex-wrap gap-2">
             {Array.from({ length: 8 }, (_, i) => i + 1).map((slot) => (
@@ -750,6 +771,10 @@ interface GroupForm {
   checkInWeekdays: number[]
   /** v21：完成课程后是否自动生成「课堂积分活动」（与课后自动打卡并列） */
   classActivityAuto: boolean
+  /**
+   * v30.3：自动生成的课堂积分活动引用哪些课堂规则（规则 id）。空 = 用当前启用的全部课堂规则。
+   */
+  autoClassRuleIds: string[]
 }
 
 const emptyForm = (): GroupForm => ({
@@ -767,6 +792,7 @@ const emptyForm = (): GroupForm => ({
   checkInStartOffset: 1,
   checkInWeekdays: [],
   classActivityAuto: true,
+  autoClassRuleIds: [],
 })
 
 const toForm = (g: Group): GroupForm => ({
@@ -786,4 +812,7 @@ const toForm = (g: Group): GroupForm => ({
     ? Array.from(new Set(g.checkInWeekdays.filter((d) => d >= 0 && d <= 6))).sort((a, b) => a - b)
     : [],
   classActivityAuto: g.classActivityAuto !== false,
+  autoClassRuleIds: Array.isArray(g.autoClassRuleIds)
+    ? g.autoClassRuleIds.filter(Boolean)
+    : [],
 })

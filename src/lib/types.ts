@@ -101,6 +101,12 @@ export interface Group extends SyncFields {
   // ---- v21：班课「课堂积分活动」自动生成配置（与课后自动打卡并列）----
   /** 该班课每次完成后是否自动生成课堂积分活动；缺省 true（向后兼容） */
   classActivityAuto?: boolean
+  /**
+   * v30.3：该班课自动生成的课堂积分活动要引用哪些课堂规则（规则 id 列表）。
+   * 空 / 缺省 → 沿用「当前启用的全部课堂规则」（defaultClassRuleIds）。
+   * 在「班课设置 → 自动生成课堂活动」里选择，决定自动活动出哪些规则按钮。
+   */
+  autoClassRuleIds?: string[]
 }
 
 export interface GroupMember extends SyncFields {
@@ -784,10 +790,17 @@ export interface ClassActivityRecord extends SyncFields {
   /** 本次加分写入的积分流水 id（v17）：撤销/改判时用于冲销，避免积分残留 */
   ledgerId?: string | null
   /**
-   * 手动「覆盖」选中的规则 id（v30.2 起语义扩展）：
-   * 非空 → 该生得分**只取这条规则的分值**（覆盖自动累加）；
-   * 空 → 按 status/名次 + 各规则的加分条件**自动累加**。
-   * 旧版用于 mode='tier' 的手动档位，语义兼容。
+   * v30.3：手动叠加的规则 id 列表（「全体叠加」模型）。
+   *
+   * 计分 = 自动累加分（过关 / 未过关 / 名次类规则按条件命中）+ 这里列出的
+   * 手动规则分值之和。手动规则 = `mode='tier'`（手动档位）或 `condition='custom'`
+   * （自定义加分条件）。可同时叠加多条（如「不熟练 +0.5」与「紧张 +0.5」）。
+   * 点学生行上的规则按钮即在此列表里增删。
+   */
+  manualRuleIds?: string[]
+  /**
+   * @deprecated v30.3 起改用 `manualRuleIds`。旧版「手动覆盖」语义：非空表示
+   * 该生得分只取这条规则分值。读取时会被合并进 `manualRuleIds`（见 classPoints）。
    */
   selectedRuleId?: string | null
 }

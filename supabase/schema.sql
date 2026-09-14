@@ -69,7 +69,9 @@ create table if not exists groups (
   "checkInStartOffset" integer not null default 1,
   "checkInWeekdays" jsonb not null default '[]'::jsonb,
   -- v21：完成课程后自动生成「课堂积分活动」
-  "classActivityAuto" boolean not null default true
+  "classActivityAuto" boolean not null default true,
+  -- v30.3：自动生成的课堂积分活动引用哪些课堂规则（规则 id 数组）
+  "autoClassRuleIds" jsonb not null default '[]'::jsonb
 );
 create index if not exists groups_updated_idx on groups ("updatedAt");
 create index if not exists groups_weekday_idx on groups (weekday);
@@ -560,6 +562,12 @@ alter table "classActivities" add column if not exists "deletedReason" text;
 -- v26：课程「单位课酬基准」快照（分）。首次完成结算时写入当时单价，
 --      之后班课 / 学生单价变更不再改写这节课的历史课酬（重算只随出席人数变化）。
 alter table courses add column if not exists "feeUnitCents" integer;
+
+-- v30.3：规则按钮改「全体叠加」+ 班课可指定自动活动的计分规则
+--       · classActivityRecords.manualRuleIds：该生手动叠加的规则 id 列表（jsonb）
+--       · groups.autoClassRuleIds：自动生成的课堂积分活动引用哪些课堂规则（jsonb）
+alter table "classActivityRecords" add column if not exists "manualRuleIds" jsonb;
+alter table groups add column if not exists "autoClassRuleIds" jsonb not null default '[]'::jsonb;
 
 
 -- ============================================================
