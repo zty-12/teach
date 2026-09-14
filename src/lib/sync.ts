@@ -67,10 +67,23 @@ export interface SyncResult {
  * （其它设备 / 未跑迁移的旧数据同样受益）。
  */
 const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
+  // ⚠ PostgREST 批量 upsert 的坑：它用「整批对象键的并集」拼一条 INSERT，
+  //   数组里缺某个键的行会被填成 **null**（而不是走列 DEFAULT）→ 若该列是 NOT NULL
+  //   就报 `null value in column "x" violates not-null constraint`，**整张表推送失败**。
+  //   故凡是「云端 NOT NULL + 本地可能整键缺失」的列，都要在这里兜底。
+  //
+  //   ⚠ 反例（不要兜底）：`classActivities.ruleIds` / `checkInTasks.ruleIds`
+  //   的 `undefined` 与 `[]` **语义不同**（undefined = 沿用旧内嵌规则 / 回退全部启用规则；
+  //   [] = 明确不引用任何规则）。若兜底成 [] 会把历史活动的规则清空、积分归零。
+  //   这两列改为让**云端列可空**（见 supabase/schema.sql），缺键补 null 后
+  //   `Array.isArray(null) === false` 仍走旧回退分支，语义正确。
+  //
   // pointRules.kind 云端是 NOT NULL DEFAULT 'base'，而 v20 起新规则不再写该字段；
-  // PostgREST 批量 upsert 会把缺失键补成 null → 违反非空约束，这里兜底补 'base'。
+  // scope / mode 同理（旧规则可能整键缺失）——统一兜底，值取云端 DEFAULT。
   pointRules: {
     kind: 'base',
+    scope: 'checkin',
+    mode: 'auto',
   },
   classActivities: {
     auto: false,
@@ -90,15 +103,26 @@ const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
     // v30.3：手动叠加规则列表（云端为 jsonb，缺键会被补成 null → 这里兜底空数组）
     manualRuleIds: [],
   },
-  // v21：云端 groups.classActivityAuto / checkInTasks.auto 为 NOT NULL DEFAULT，
-  //      批量 upsert 时缺键会被补成 null → 违反非空约束，这里兜底。
+  // v21/v30.4：云端 groups 有 6 个 NOT NULL 列，而 TS 类型里全是可选
+  //           （v8~v21 之间创建的班课可能整键缺失）→ 缺键被补 null，整表推送失败
+  //           （实测：`[groups] 推送失败: null value in column "checkInWeekdays"`）。
+  //           这些字段的「缺省值」与「空值」语义等价（见各 resolve 处的守卫），兜底安全。
   groups: {
+    checkInAuto: true,
+    checkInDays: 7,
+    checkInStartOffset: 1,
+    checkInWeekdays: [],
     classActivityAuto: true,
-    // v30.3：自动活动引用的规则 id（云端 jsonb）
     autoClassRuleIds: [],
   },
   checkInTasks: {
     auto: false,
+    // days 缺省 [] = 「未指定」，下游用 dueAt 兜底（与 undefined 语义一致）
+    days: [],
+  },
+  knowledgePoints: {
+    // tags 云端 NOT NULL（下游 p.tags.map 无守卫，不能置空）
+    tags: [],
   },
 }
 

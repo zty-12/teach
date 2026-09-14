@@ -225,7 +225,68 @@ export class EduDB extends Dexie {
           if (!Array.isArray(g.autoClassRuleIds)) g.autoClassRuleIds = []
         })
     })
+
+    // v14（v30.4）：修复「PostgREST 批量 upsert 把缺失键补成 null」导致的整表推送失败。
+    //  实测报错：[groups] 推送失败: null value in column "checkInWeekdays" violates not-null constraint
+    //  根因：v8/v21 给班课陆续加了 checkInWeekdays 等可选字段，但更早创建的班课整键缺失；
+    //        云端这些列是 NOT NULL DEFAULT，而 PostgREST 用「整批对象键的并集」拼 INSERT，
+    //        缺键的行被填成 NULL（不是走 DEFAULT）→ 违反非空约束 → **整张表推送失败**。
+    //  做法：本地是真源，先把这些字段补全，推送时自然带上真实值；
+    //        sync.ts 的 PUSH_DEFAULTS 作为「其它设备尚未跑迁移」的第二道保险。
+    //  填充逻辑抽到 SYNC_FIELD_FILLERS（同名导出），便于回归脚本直接测到**同一份**代码。
+    this.version(14).upgrade(async (tx) => {
+      for (const [table, fill] of Object.entries(SYNC_FIELD_FILLERS)) {
+        await tx
+          .table(table)
+          .toCollection()
+          .modify(fill as (r: Record<string, unknown>) => void)
+      }
+    })
   }
+}
+
+/**
+ * v30.4：把「云端 NOT NULL、但本地可能整键缺失」的字段补全（就地修改）。
+ *
+ * **为什么需要**：PostgREST 批量 upsert 用「整批对象键的并集」拼一条 INSERT，
+ * 数组里缺某个键的行会被填成 `null`（而不是走列 DEFAULT）→ 若列是 NOT NULL，
+ * 报 `null value in column "x" violates not-null constraint`，**整张表推送失败**。
+ *
+ * ⚠ 刻意**不**补 `classActivities.ruleIds` / `checkInTasks.ruleIds`：
+ *   它们的 `undefined` 与 `[]` 语义不同（undefined = 沿用旧内嵌规则 / 回退全部启用规则；
+ *   [] = 明确不引用任何规则），补 [] 会把历史活动的规则清空、积分算成 0。
+ *   这两列改为让**云端列可空**（见 supabase/schema.sql），缺键补 null 后
+ *   `Array.isArray(null) === false` 仍走旧回退分支，语义正确。
+ */
+export const SYNC_FIELD_FILLERS: Record<string, (r: Record<string, unknown>) => void> = {
+  groups: (g) => {
+    if (typeof g.checkInAuto !== 'boolean') g.checkInAuto = true
+    if (typeof g.checkInDays !== 'number') g.checkInDays = 7
+    if (typeof g.checkInStartOffset !== 'number') g.checkInStartOffset = 1
+    if (!Array.isArray(g.checkInWeekdays)) g.checkInWeekdays = []
+    if (typeof g.classActivityAuto !== 'boolean') g.classActivityAuto = true
+    if (!Array.isArray(g.autoClassRuleIds)) g.autoClassRuleIds = []
+  },
+  checkInTasks: (t) => {
+    if (!Array.isArray(t.days)) t.days = []
+    if (typeof t.auto !== 'boolean') t.auto = false
+  },
+  classActivities: (a) => {
+    if (!Array.isArray(a.rules)) a.rules = []
+    if (typeof a.auto !== 'boolean') a.auto = false
+    if (a.groupId === undefined) a.groupId = null
+    if (a.activityDate === undefined) a.activityDate = null
+    if (a.sourceCourseId === undefined) a.sourceCourseId = null
+    if (typeof a.note !== 'string') a.note = ''
+    if (typeof a.title !== 'string') a.title = ''
+  },
+  knowledgePoints: (k) => {
+    if (!Array.isArray(k.tags)) k.tags = []
+  },
+  pointRules: (r) => {
+    if (typeof r.scope !== 'string') r.scope = 'checkin'
+    if (typeof r.mode !== 'string') r.mode = 'auto'
+  },
 }
 
 export const db = new EduDB()

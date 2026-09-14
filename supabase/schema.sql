@@ -569,6 +569,40 @@ alter table courses add column if not exists "feeUnitCents" integer;
 alter table "classActivityRecords" add column if not exists "manualRuleIds" jsonb;
 alter table groups add column if not exists "autoClassRuleIds" jsonb not null default '[]'::jsonb;
 
+-- 补漏：learningReports.title 在「建表语句」里就有，但该表若早已建过，
+--       create table if not exists 不会补列；此前漏写了对应 alter，
+--       导致云端该表缺 title → 带 title 的 upsert 被 PostgREST 400 拒绝，
+--       整张 learningReports 从未同步成功（2026-09-14 线上核查发现）。
+--       title 为前端必填字段（LearningReport.title），必须补。
+alter table "learningReports" add column if not exists title text not null default '';
+
+-- v30.4：放开「可空即安全」的列的非空约束，彻底避免 upsert 缺键卡死整张表。
+--   背景：PostgREST 批量 upsert 用「整批对象键的并集」拼 INSERT，数组里缺某个键的行
+--         会被填成 **null**（而不是走列 DEFAULT）→ 若列是 NOT NULL 就整表推送失败。
+--         实测：`[groups] 推送失败: null value in column "checkInWeekdays" violates not-null constraint`。
+--   下面这些列在 TS 类型里本就是可选，且下游消费处都做了守卫（`Array.isArray(...)` /
+--         `?? 默认值`），null 与「缺省」语义等价，放开后不会有副作用：
+--       · groups.checkInWeekdays   → Array.isArray 守卫，空/ null = 不限星期几
+--       · groups.checkInAuto       → `=== false` 判断，null = 启用
+--       · groups.checkInDays       → `?? 7`
+--       · groups.checkInStartOffset→ `?? 1`
+--       · groups.classActivityAuto → `=== false` 判断，null = 启用
+--       · groups.autoClassRuleIds  → Array.isArray 守卫，空/ null = 回退全部启用规则
+--       · classActivities.ruleIds  → Array.isArray 守卫，null 走「旧内嵌 rules」回退（语义正确）
+--       · checkInTasks.ruleIds     → Array.isArray 守卫，null 走「全部启用规则」回退（语义正确）
+--   注意：`checkInTasks.days` / `knowledgePoints.tags` **保持 NOT NULL**
+--         （下游有 `t.days.length` / `p.tags.map()` 这类无守卫写法），改由
+--         sync.ts 的 PUSH_DEFAULTS + db.ts 的 v14 迁移保证非空。
+--   `drop not null` 幂等，重复执行安全。
+alter table groups alter column "checkInWeekdays" drop not null;
+alter table groups alter column "checkInAuto" drop not null;
+alter table groups alter column "checkInDays" drop not null;
+alter table groups alter column "checkInStartOffset" drop not null;
+alter table groups alter column "classActivityAuto" drop not null;
+alter table groups alter column "autoClassRuleIds" drop not null;
+alter table "classActivities" alter column "ruleIds" drop not null;
+alter table "checkInTasks" alter column "ruleIds" drop not null;
+
 
 -- ============================================================
 -- 第 3 部分：行级安全策略（单人自用：anon 全权读写）
