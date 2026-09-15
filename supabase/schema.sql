@@ -347,7 +347,7 @@ create table if not exists "pointRules" (
   id text primary key,
   name text not null default '',
   kind text not null default 'base',
-  points integer not null default 1,
+  points double precision not null default 1,
   condition jsonb,
   scope text not null default 'checkin',
   mode text not null default 'auto',
@@ -364,7 +364,7 @@ create index if not exists "pointRules_updated_idx" on "pointRules" ("updatedAt"
 create table if not exists "pointLedgers" (
   id text primary key,
   "studentId" text not null default '',
-  delta integer not null default 0,
+  delta double precision not null default 0,
   kind text not null default 'earn',
   reason text not null default '',
   "taskId" text,
@@ -458,7 +458,7 @@ create table if not exists "classActivityRecords" (
   "activityId" text not null,
   "studentId" text not null,
   "status" text not null default 'pending',  -- pending | pass | fail
-  "pointsAwarded" integer not null default 0,
+  "pointsAwarded" double precision not null default 0,
   "note" text not null default '',
   "checkedAt" bigint,
   "ledgerId" text,
@@ -602,6 +602,24 @@ alter table groups alter column "classActivityAuto" drop not null;
 alter table groups alter column "autoClassRuleIds" drop not null;
 alter table "classActivities" alter column "ruleIds" drop not null;
 alter table "checkInTasks" alter column "ruleIds" drop not null;
+
+
+-- v30.9：修复 pointLedgers.delta / classActivityRecords.pointsAwarded / pointRules.points
+--        的 **int4 精度问题**（课堂积分允许小数，如「进步 +0.5」）。
+--   实测报错：`[pointLedgers] 推送失败: invalid input syntax for type integer: "0.5"`
+--   根因：课堂规则分值可为小数（RuleLibraryView 的 `step="0.5"`），
+--         点选后流水 delta = 0.5 → 云端 delta 是 **integer** → PostgREST 报整数语法错
+--         → **整张 pointLedgers 推送失败** → 所有积分同步卡住。
+--   做法：把这三列统一放宽为 **double precision**。
+--     · delta          = 单条流水增减（必须支持 0.5）
+--     · pointsAwarded  = 该生在活动中的得分（与 delta 同源，必须支持 0.5）
+--     · points         = 规则分值（老师本来就能填小数，之前只是侥幸没超范围）
+--   客户端侧：db.ts v17 迁移把存量 delta 换算成「最小单位 0.5 分」的整数分制；
+--            sync.ts 的 sanitizeInt4ForPush 已扩大到这三列做「推送前自愈」。
+--   `type double precision` 对已是该类型的列重复执行安全（幂等）。
+alter table "pointLedgers" alter column "delta" type double precision;
+alter table "classActivityRecords" alter column "pointsAwarded" type double precision;
+alter table "pointRules" alter column "points" type double precision;
 
 
 -- ============================================================

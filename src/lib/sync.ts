@@ -145,34 +145,58 @@ function applyPushDefaults(
 }
 
 /**
- * v30.6：推送前对「云端 int4 列」做兜底归一化，避免整批 upsert 被 PostgREST 拒绝。
+ * v30.6 / v30.9：推送前对「数值列」做兜底归一化，避免整批 upsert 被 PostgREST 拒绝。
  *
- * 背景：pointRules."order" / "points" 是 integer（int4，上限 2147483647）。
+ * 背景一（v30.6）：pointRules."order" / "points" 是 integer（int4，上限 2147483647）。
  *   早期代码用 `order: Date.now()`（毫秒时间戳 ≈1.8e12）写入本地 IndexedDB，
  *   一旦本地残留此类脏值，推送时 PostgREST 报
  *   `value "1789311709042" is out of range for type integer` → **整张表推送失败**。
  *   复用 db.ts 的 planPointRuleOrderFixes（与 v15 迁移同源），保证「本地迁移」
  *   与「推送自愈」语义完全一致；同时把干净值写回本地，避免下次再推脏值。
+ *
+ * 背景二（v30.9）：积分相关列曾经是 integer，但课堂规则允许**小数分值**
+ *   （如「进步 +0.5」）→ 流水 delta=0.5 推送时报
+ *   `invalid input syntax for type integer: "0.5"` → **整张 pointLedgers 推送失败**。
+ *   根因已在 schema.sql 放宽为 `double precision`；这里再做一层「推送前自愈」：
+ *   把非有限值 / 越界值归一化，并**取整到 0.5 的整数倍**（当前全链路最小单位）。
+ *   ⚠ 注意此层自愈是**兜底**，正常路径不该触发；真正的修复是「列改为可存小数」。
  */
 const INT4_MAX = 2147483647
 const INT4_MIN = -2147483648
+/** 数值列：云端列名 → 兜底策略 */
+const NUMERIC_GUARDS: Partial<Record<SyncTableName, string[]>> = {
+  pointRules: ['points'],
+  pointLedgers: ['delta'],
+  classActivityRecords: ['pointsAwarded'],
+}
+/** 把任意值归一化为「0.5 的整数倍」的安全数字；非有限值 → 0 */
+function toHalfStep(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0
+  const clamped = Math.max(INT4_MIN, Math.min(INT4_MAX, v))
+  return Math.round(clamped * 2) / 2
+}
 function sanitizeInt4ForPush(
   table: SyncTableName,
   rows: Record<string, unknown>[],
 ): Record<string, unknown>[] {
-  if (table !== 'pointRules') return rows
-  const fixes = planPointRuleOrderFixes(rows)
-  const orderById = new Map(fixes.map((f) => [String(f.id), f.order]))
+  const cols = NUMERIC_GUARDS[table]
+  if (!cols || cols.length === 0) return rows
+  // pointRules.order 有专门的归一化（同范围重排），需复用 planPointRuleOrderFixes
+  const orderById =
+    table === 'pointRules'
+      ? new Map(
+          planPointRuleOrderFixes(rows).map((f) => [String(f.id), f.order]),
+        )
+      : null
   return rows.map((r) => {
     const out: Record<string, unknown> = { ...r }
-    const id = String(out.id)
-    if (orderById.has(id)) out.order = orderById.get(id)
-    // points 同样为 int4：非有限整数 / 越界 → 归 0（正常分值不会触发此分支）
-    const p = out.points
-    if (typeof p !== 'number' || !Number.isFinite(p) || p > INT4_MAX || p < INT4_MIN) {
-      out.points = 0
-    } else {
-      out.points = Math.trunc(p)
+    if (orderById) {
+      const id = String(out.id)
+      if (orderById.has(id)) out.order = orderById.get(id)
+    }
+    for (const c of cols) {
+      const fixed = toHalfStep(out[c])
+      if (out[c] !== fixed) out[c] = fixed
     }
     return out
   })

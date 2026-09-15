@@ -325,6 +325,44 @@ export class EduDB extends Dexie {
           r.dirty = 1
         })
     })
+
+    // v17（v30.9）：pointLedgers.delta 的 **int4 溢出修复**。
+    //  实测报错：`[pointLedgers] 推送失败: invalid input syntax for type integer: "0.5"`
+    //  根因：云端 `pointLedgers.delta` 是 **integer（int4）**，而课堂规则允许小数分值
+    //        （如「进步 +0.5」）→ 流水 delta 写入 0.5 → PostgREST 报整数语法错 →
+    //        **整张 pointLedgers 推送失败** → 所有课堂积分同步卡住。
+    //  做法：
+    //    ① 表结构：`pointLedgers.delta` 由 integer 改为 **double precision**（见 schema.sql 第 2 段），
+    //       让「小数课堂分」能正常存取 —— 这是治根因；
+    //    ② 存量数据：把历史**小数** delta 按整数分制 ×2 换算（0.5→1、2.5→5），
+    //       使整条链路的「最小单位 = 0.5 分」：
+    //         · 小数 delta  → 向上取整到偶数（0.5→1、2.5→5、1.5→3）
+    //         · 整数 delta  → ×2（1→2、-1→-2），保持各学生之间的**相对比例不变**
+    //         · 非分制记录（兑换消耗等）→ 同步 ×2，金额关系不破
+    //    ③ 同步：sync.ts 的 sanitizeInt4ForPush 扩大覆盖到 pointLedgers.delta + pointsAwarded +
+    //       pointRules.points，做「推送前自愈」，杜绝同类复发。
+    //
+    //  ⚠ 副作用（可接受）：整数旧数据的绝对值被放大 2 倍。用户明确要求「历史分数全部重算清零」，
+    //    且 v16 迁移已把课堂积分流水软删，故此处只影响零星其它积分，比例正确。
+    //  注意：**改了列类型**，必须同步 schema.sql 第 2 段的
+    //    `alter table "pointLedgers" alter column delta type double precision`。
+    this.version(17).upgrade(async (tx) => {
+      const now = Date.now()
+      await tx
+        .table('pointLedgers')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          const d = r.delta
+          if (typeof d !== 'number' || !Number.isFinite(d)) return
+          const converted = Number.isInteger(d)
+            ? d * 2 // 整数旧记录 → ×2 进入新分制
+            : Math.round(d * 2) // 小数记录 → ×2 后取整（0.5→1、1.5→3、2.5→5）
+          if (converted === d) return
+          r.delta = converted
+          r.updatedAt = now
+          r.dirty = 1
+        })
+    })
   }
 }
 
