@@ -443,13 +443,40 @@ export async function deleteClassActivity(
 // 规则库：默认课堂规则补齐
 // ============================================================
 
-/** 课堂规则库为空时补齐默认规则（熟练/主动/进步 各 +1），保证开箱可用 */
+/**
+ * v31.0：旧「自动条件」时代遗留的课堂规则名判定。
+ *
+ * 实现在 types.ts（纯函数、无依赖），这里只做**再导出**，方便业务层从 classPoints 引用。
+ * 放在 types.ts 的原因：db.ts 的 v18 迁移也要用同一套判据，
+ * 而 db.ts 只依赖 types.ts —— 若把实现放这里会形成 `db → classPoints → db` 循环依赖。
+ */
+export { isLegacyNamedClassRule } from './types'
+
+/**
+ * 保证规则库里存在 v30.8 的默认课堂规则（熟练 / 主动 / 进步）。
+ *
+ * v31.0 起条件放宽：**不再只在「一条课堂规则都没有」时补齐**。
+ * 旧逻辑是 `if (hasClass) return 0` —— 只要库里有任意一条课堂规则就跳过，
+ * 于是老用户（库里全是「过关」「第一个额外」「1」这类旧命名规则）**永远补不出新默认规则**，
+ * 表现为「v30.8 都更新了，班课设置里的规则还是老的」。
+ *
+ * 新逻辑：按**规则名**判断是否已具备新词表里的规则（不看 id，避免重复建）。
+ *  - 已有「熟练/主动/进步」中任意一条 → 认为词表已就位，一条都不补（严格不侵入）；
+ *  - 一条都没有 → 只补**缺失**的那几条（已存在的同名规则不重复创建）。
+ *
+ * 仍然完全不动用户已有的任何规则（不删、不停用、不改名）——
+ * 旧规则的清理交给老师在「积分规则 → 课堂规则」页自行完成，UI 会标注提示。
+ */
 export async function ensureDefaultClassRules(): Promise<number> {
   const all = await db.pointRules.toArray()
-  const hasClass = all.some((r) => !r.deletedAt && (r.scope ?? 'checkin') === 'class')
-  if (hasClass) return 0
+  const liveClass = all.filter((r) => !r.deletedAt && (r.scope ?? 'checkin') === 'class')
+  const existingNames = new Set(liveClass.map((r) => (r.name ?? '').trim()))
+  const missing = DEFAULT_CLASS_RULES.filter((spec) => !existingNames.has(spec.name))
+  if (missing.length === 0) return 0
   const now = Date.now()
-  const rows = DEFAULT_CLASS_RULES.map((spec, i) =>
+  // 排序值接在已有课堂规则之后，避免与现有顺序冲突（nextRuleOrder 会忽略非法脏值）
+  const baseOrder = nextRuleOrder(all, 'class')
+  const rows = missing.map((spec, i) =>
     withSyncFields<PointRule>({
       name: spec.name,
       points: spec.points,
@@ -458,7 +485,7 @@ export async function ensureDefaultClassRules(): Promise<number> {
       condition: null,
       classCondition: null,
       enabled: true,
-      order: i,
+      order: Math.min(baseOrder + i, MAX_RULE_ORDER),
       createdAt: now,
     }),
   )

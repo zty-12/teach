@@ -1,7 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks'
-import { Coins, Info } from 'lucide-react'
+import { Coins, Info, TriangleAlert } from 'lucide-react'
 import { db } from '@/lib/db'
 import { cn } from '@/lib/utils'
+import { isLegacyNamedClassRule } from '@/lib/classPoints'
 import { RULE_MODE_LABEL, RULE_SCOPE_LABEL } from '@/lib/types'
 import type { PointRule, RuleScope } from '@/lib/types'
 
@@ -67,11 +68,30 @@ export function RulePicker({
 
   const enabledIds = list.filter((r) => r.enabled).map((r) => r.id)
 
+  // v31.0：识别「旧自动条件时代」遗留的规则名（过关/第一个额外/1 …）。
+  // 它们能正常计分，但名字是旧模型的产物，容易让人误以为「v30.8 的更新没生效」。
+  // 这里只做**提示**，不自动删改用户数据。
+  const legacyRules =
+    scope === 'class' ? list.filter((r) => r.enabled && isLegacyNamedClassRule(r)) : []
+  const legacyBanner =
+    legacyRules.length > 0 ? (
+      <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-text-2">
+        <TriangleAlert size={11} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+        <span className="min-w-0 flex-1">
+          有 {legacyRules.length} 条规则仍是旧「自动条件」时代的命名（
+          {legacyRules.map((r) => r.name).join('、')}），v30.8 之后它们只作为普通按钮使用。
+          想换成新词表，可到「积分规则 → 课堂规则」停用或删除，系统会自动补上「熟练 / 主动 / 进步」。
+        </span>
+      </div>
+    ) : null
+
   return (
     <div className="space-y-2">
+      {legacyBanner}
       <div className="flex flex-wrap gap-1.5">
         {list.map((r) => {
           const on = value.includes(r.id)
+          const legacy = scope === 'class' && isLegacyNamedClassRule(r)
           return (
             <button
               key={r.id}
@@ -83,8 +103,11 @@ export function RulePicker({
                   ? 'border-accent bg-accent-soft text-accent-text'
                   : 'border-line-1 bg-surface-0 text-text-3 hover:border-accent/50',
                 !r.enabled && 'opacity-60',
+                legacy && 'border-dashed',
               )}
-              title={`${RULE_MODE_LABEL[r.mode ?? 'auto']} · ${r.points > 0 ? '+' : ''}${r.points} 分`}
+              title={`${RULE_MODE_LABEL[r.mode ?? 'auto']} · ${r.points > 0 ? '+' : ''}${r.points} 分${
+                legacy ? '（旧自动条件时代的命名，建议在「积分规则」页清理）' : ''
+              }`}
             >
               <Coins size={11} />
               <span>{r.name}</span>
@@ -93,6 +116,11 @@ export function RulePicker({
                 {r.points}
               </span>
               {!on && <span className="opacity-60">未用</span>}
+              {legacy && (
+                <span className="rounded bg-amber-500/20 px-1 text-[10px] text-amber-700 dark:text-amber-300">
+                  旧
+                </span>
+              )}
             </button>
           )
         })}

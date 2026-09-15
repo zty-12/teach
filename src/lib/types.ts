@@ -604,6 +604,42 @@ export interface PointRule extends SyncFields {
   kind?: PointRuleKind
 }
 
+/**
+ * v31.0：旧「自动条件」时代遗留的课堂规则名（用于提示与一次清退）。
+ *
+ * 背景：v30.7 及更早，课堂规则的语义由 `classCondition`（过关 / 名次 / 第一个 / 自定义）
+ * 决定，规则名通常直接写成条件名（如「过关」「第一个额外」「不熟练」），
+ * 甚至出现无意义的占位名（「1」「不」）。v30.8 改为「手动按钮」后，
+ * db.ts 的迁移只归一化了 `mode` / `classCondition`，**规则名不会被改写**，
+ * 于是这些旧规则继续出现在「积分规则」页与「班课设置 → 自动活动的计分规则」选择器里，
+ * 看起来就像「v30.8 的更新没生效」。
+ *
+ * 该判定**纯展示/清理用途**，不参与任何计分。
+ * 放在 types.ts 是为了让 db.ts（迁移）与 UI 组件都能引用，且不引入循环依赖
+ * （db.ts 只从 types.ts 取类型/纯函数）。
+ */
+const LEGACY_CLASS_RULE_NAMES: ReadonlySet<string> = new Set([
+  '过关',
+  '未过关',
+  '不熟练',
+  '第一个',
+  '第一个额外',
+  '第一个加',
+  '自定义',
+])
+
+/** 判断一条课堂规则是否属于「旧自动条件时代的遗留命名」 */
+export function isLegacyNamedClassRule(r: { name?: string }): boolean {
+  const name = (r.name ?? '').trim()
+  if (name === '') return true
+  if (LEGACY_CLASS_RULE_NAMES.has(name)) return true
+  // 纯数字 / 纯带号数字的占位名（历史脏数据，如「1」「+1」「0.5」）
+  if (/^[+\-]?\d+(\.\d+)?$/.test(name)) return true
+  // 「前 N 名」「第 N 名」这类名次语义
+  if (/^(前|第)\s*\d+\s*名?/.test(name)) return true
+  return false
+}
+
 /** 积分流水（ earn / spend / adjust ） */
 export interface PointLedger extends SyncFields {
   studentId: string

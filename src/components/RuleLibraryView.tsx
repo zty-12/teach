@@ -29,7 +29,7 @@ import {
   RULE_SCOPE_HINT,
   RULE_SCOPE_LABEL,
 } from '@/lib/types'
-import { ensureDefaultClassRules, nextRuleOrder } from '@/lib/classPoints'
+import { ensureDefaultClassRules, isLegacyNamedClassRule, nextRuleOrder } from '@/lib/classPoints'
 
 /**
  * 积分规则（v30.8）
@@ -165,6 +165,9 @@ export default function RuleLibraryView() {
                       {r.points}
                     </Badge>
                     {!r.enabled && <Badge variant="warning">已停用</Badge>}
+                    {scope === 'class' && r.enabled && isLegacyNamedClassRule(r) && (
+                      <Badge variant="warning">旧命名</Badge>
+                    )}
                   </div>
                   <p className="mt-1 text-[12px] text-text-2">{describeRule(r)}</p>
                 </div>

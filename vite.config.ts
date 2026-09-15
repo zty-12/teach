@@ -94,11 +94,16 @@ function spa404Plugin(): Plugin {
 /**
  * 构建标识（v30.3）：显示在界面角落，用来一眼确认「线上跑的是哪一版」——
  * 排查「部署了但页面还是旧行为」（Service Worker / HTTP 缓存）时非常有用。
+ *
+ * ⚠ 发版时**记得同步改这里的版本号**（v31.0 起作为发版检查项）。
+ *   此前一直停留在 v30.3，导致线上显示与真实版本不符，
+ *   排查「v30.8 没生效」时反而被误导（实际是页面跑着旧缓存 / 版本号没更新）。
  */
+const APP_VERSION = 'v31.0'
 const BUILD_ID = (() => {
   const d = new Date()
   const p = (n: number) => String(n).padStart(2, '0')
-  return `v30.3 · ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  return `${APP_VERSION} · ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 })()
 
 export default defineConfig({

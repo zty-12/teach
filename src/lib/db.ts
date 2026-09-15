@@ -1,4 +1,5 @@
 import Dexie, { type Table } from 'dexie'
+import { isLegacyNamedClassRule } from './types'
 import type {
   AppSettings,
   CheckInRecord,
@@ -361,6 +362,79 @@ export class EduDB extends Dexie {
           r.delta = converted
           r.updatedAt = now
           r.dirty = 1
+        })
+    })
+
+    // v18（v31.0）：课堂规则「旧命名」清退 + 相关分数清零。
+    //  背景：v30.8 把课堂积分改为「纯手动按钮」模型，但**只给空规则库补了新的默认规则**
+    //        （熟练/主动/进步）；旧用户库里那些用旧条件语义命名的规则（「过关」「第一个额外」
+    //        甚至占位符「1」）被 v16 迁移归一化成了 mode='manual'，**名字却原样保留**，
+    //        于是它们继续出现在「积分规则」页和「班课设置 → 自动活动的计分规则」选择器里，
+    //        表现为「v30.8 更新了但班课设置里还是老规则」（用户 2026-09-15 反馈 + 截图）。
+    //  做法（经用户确认「一起清零」）：
+    //    ① 把**仍启用**的、旧命名（isLegacyNamedClassRule）的课堂规则软删 + 停用
+    //       —— 名字里的旧语义（过关/名次）在新模型下已无意义，留着只会持续误导；
+    //    ② 引用这些规则的**存活**课堂活动记录 → 分数/选中规则一并归零
+    //       （与 v16 对历史课堂分的处理保持一致：新模型从 0 开始）；
+    //    ③ 引用这些规则的流水按 reason 前缀「课堂积分」软删，把学生钱包里的旧分冲销。
+    //  注意：只改值，不加列，无需改 schema.sql；改过的行一律置 dirty=1 推回云端。
+    //  补默认规则交给 ensureDefaultClassRules()（v31.0 起按名字判断缺失，不再要求库为空）。
+    this.version(18).upgrade(async (tx) => {
+      const now = Date.now()
+      // 1) 找出需要清退的课堂规则 id（存活 + 启用 + 旧命名）
+      const rules = (await tx.table('pointRules').toArray()) as Array<Record<string, unknown>>
+      const retireIds = new Set(
+        rules
+          .filter(
+            (r) =>
+              !r.deletedAt &&
+              (r.scope ?? 'checkin') === 'class' &&
+              r.enabled !== false &&
+              isLegacyNamedClassRule({ name: String(r.name ?? '') }),
+          )
+          .map((r) => String(r.id)),
+      )
+      if (retireIds.size === 0) return
+      // 1a) 软删 + 停用这些规则
+      await tx
+        .table('pointRules')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          if (!retireIds.has(String(r.id))) return
+          r.enabled = false
+          r.deletedAt = now
+          r.updatedAt = now
+          r.dirty = 1
+        })
+      // 2) 清零引用了这些规则的存活课堂活动记录
+      await tx
+        .table('classActivityRecords')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          if (r.deletedAt) return
+          const ids = Array.isArray(r.manualRuleIds) ? (r.manualRuleIds as unknown[]) : []
+          const hit = ids.some((id) => retireIds.has(String(id)))
+          if (!hit) return
+          r.status = 'pending'
+          r.pointsAwarded = 0
+          r.ledgerId = null
+          r.manualRuleIds = []
+          r.selectedRuleId = null
+          r.checkedAt = null
+          r.updatedAt = now
+          r.dirty = 1
+        })
+      // 3) 冲销相关流水（reason 以「课堂积分」开头 —— 与 v16 同一判据）
+      await tx
+        .table('pointLedgers')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          if (r.deletedAt) return
+          if (typeof r.reason === 'string' && r.reason.startsWith('课堂积分')) {
+            r.deletedAt = now
+            r.updatedAt = now
+            r.dirty = 1
+          }
         })
     })
   }
