@@ -16,6 +16,7 @@ import type {
   PointRule,
   PointRuleCondition,
   Redemption,
+  RuleMode,
   Student,
 } from './types'
 import { startOfDay } from 'date-fns'
@@ -30,7 +31,8 @@ export interface ResolvedCheckInRule {
   id: string
   name: string
   points: number
-  mode: 'auto' | 'tier'
+  /** v30.8：统一为 RuleMode（打卡范围实际只用 auto / tier） */
+  mode: RuleMode
   /** 度量条件（连续天数 / 准时率等）；null = 无条件（所有已打卡学生都加） */
   condition: PointRuleCondition | null
   enabled: boolean

@@ -1,20 +1,25 @@
 /**
- * 课堂积分业务逻辑（v20）
+ * 课堂积分业务逻辑（v30.8「纯手动按钮」模型）
  * ------------------------------------------------------------
- * 场景：课上检查背诵/听写等，教师标记「过关 / 未过关」，按规则自动计分。
+ * 场景：课上检查背诵/听写等，老师**按自己判断**点亮规则按钮给学生加分。
  *
  * 设计要点：
- *  1) **规则集中在「积分规则」页**（pointRules，scope='class'）。活动通过 ruleIds 引用，
- *     同一活动可混用「自动累加」与「手动档位」两类规则：
- *       - auto：达标学生自动加分（如「过关 +1」「全部学生 +1」「第一个被检查额外 +1（与过关解耦）」「前 3 名 +2」）
- *       - tier：标记学生时手动选一条（如「背诵熟练 +1 / 不熟练 +0.5」），
- *               选择结果记在 ClassActivityRecord.selectedRuleId 上
+ *  1) **规则集中在「积分规则 → 课堂规则」页**（pointRules，scope='class'）。
+ *     每条规则 = 一个自定义的「名称 + 分值」，在活动里渲染成一枚按钮：
+ *       **点选即加该规则分值、再点取消**，可同时选中多条（如「熟练 +1」+「主动 +1」= +2）。
+ *     v30.8 起课堂规则**不再有**「过关 / 名次 / 任何自动条件」——一律由老师手动决定，
+ *     记录里选中的规则 id 存在 ClassActivityRecord.manualRuleIds。
  *  2) 计分复用 pointLedgers 流水（与打卡积分同一账户体系），
- *     每条课堂加分都记下 ledgerId，撤销/改判/换档时精确冲销，不留残分。
- *  3) 名次与积分「整体重算」：任何一次标记/改判/撤销后调用 resettleActivity，
- *     按过关时间升序重排名次并重算所有人得分（名次仅用于展示与名次类规则）。
- *  4) 兼容旧数据：没有 ruleIds 的历史活动仍按内嵌 rules 计分，行为完全不变。
+ *     每条课堂加分都记下 ledgerId，取消/改选时精确冲销，不留残分。
+ *  3) 积分「整体重算」：任何一次按钮变更后调用 resettleActivity，
+ *     重算该活动每人得分（幂等）。
+ *  4) 兼容旧数据：没有 ruleIds 的历史活动仍按内嵌 rules 计分。
+ *     旧规则/旧快照里可能残留 condition / mode / status 字段，计分时**一律忽略**
+ *     —— v30.8 的计分只认「该生 manualRuleIds 里命中的规则分值之和」。
  *  5) 自动生成：班课按排课当天自动建活动（用当前启用的课堂规则）。
+ *
+ * ⚠️ 历史自动计分（过关/名次/档位）已随 v30.8 迁移（db.ts v16）全部清零，
+ *    之后课堂积分只由老师点按钮产生，不再有任何自动求值。
  */
 import { startOfDay } from 'date-fns'
 import { db, isRuleOrderSafe, markDeleted, touch, withSyncFields, MAX_RULE_ORDER } from './db'
@@ -22,7 +27,6 @@ import { adjustPoints } from './points'
 import type {
   ClassActivity,
   ClassActivityRecord,
-  ClassRuleConditionSpec,
   ClassRuleSnapshotItem,
   Group,
   PointRule,
@@ -33,15 +37,19 @@ import type {
  * 归一化后的课堂规则：库规则引用 or 旧版内嵌规则，引擎只认这个形状。
  * 结构与持久化快照 `ClassRuleSnapshotItem`（types.ts）完全一致，
  * 因此 `resolveClassRules`（优先读快照时可把快照数组直接当 ResolvedClassRule[] 返回）。
+ *
+ * 注意：快照里的 `mode` / `condition` / `rankN` 等字段**已不参与 v30.8 计分**，
+ * 仅为旧数据兼容保留（即使某条旧快照是 `mode:'tier'` 或 `condition:'pass'`，
+ * 也一律当成「手动按钮」处理 —— 只看它是否被选中）。
  */
 export interface ResolvedClassRule extends ClassRuleSnapshotItem {}
 
-/** 新建课堂活动时的默认计分规则（库为空时补齐用） */
-export const DEFAULT_CLASS_RULES: ClassRuleConditionSpec[] = [
-  { condition: 'pass' },
-  { condition: 'first' },
+/** 新建课堂活动时的默认计分规则（库为空时补齐用）。v30.8：纯「名称 + 分值」，无自动条件。 */
+export const DEFAULT_CLASS_RULES: { name: string; points: number }[] = [
+  { name: '熟练', points: 1 },
+  { name: '主动', points: 1 },
+  { name: '进步', points: 1 },
 ]
-export const DEFAULT_CLASS_RULE_NAMES = ['过关', '第一个额外']
 
 /**
  * 解析一个活动实际生效的规则列表。
@@ -52,6 +60,8 @@ export const DEFAULT_CLASS_RULE_NAMES = ['过关', '第一个额外']
  *  3. 无 ruleIds（undefined）→ 回退到旧版内嵌 rules（历史活动兼容）。
  *
  * 注意：`[]` 与 `undefined` 语义不同 —— 规则全清空写 `[]`，旧数据为 `undefined`。
+ *
+ * ⚠️ v30.8：解析结果里的 `mode` / `condition` 仅作展示/兼容，计分一律忽略。
  */
 export function resolveClassRules(
   activity: ClassActivity,
@@ -73,7 +83,7 @@ export function resolveClassRules(
         id: r.id,
         name: r.name,
         points: r.points,
-        mode: r.mode ?? 'auto',
+        mode: r.mode ?? 'manual',
         condition: spec?.condition ?? null,
         rankN: spec?.rankN,
         rankFrom: spec?.rankFrom,
@@ -89,7 +99,7 @@ export function resolveClassRules(
     id: `legacy:${i}`,
     name: r.name,
     points: r.points,
-    mode: 'auto' as const,
+    mode: 'manual' as const,
     condition: r.condition,
     rankN: r.rankN,
     rankFrom: r.rankFrom,
@@ -98,32 +108,6 @@ export function resolveClassRules(
     fromLibrary: false,
   }))
 }
-
-/** 取活动里所有处于「手动档位」模式的启用规则 */
-export function tierRules(rules: ResolvedClassRule[]): ResolvedClassRule[] {
-  return rules.filter((r) => r.mode === 'tier' && r.enabled)
-}
-
-/**
- * v30.3「全体叠加」判定：这条规则是否属于**手动规则**（不按条件自动求值）。
- *
- *  - `mode === 'tier'`（手动档位）→ 手动规则；
- *  - `condition === 'custom'`（自定义加分条件）→ 手动规则 —— 自定义条件无法自动求值，
- *    只能由老师点按钮加上去。
- *  其余（pass/fail/first/topN/rank/range / 无条件）→ 自动规则：命中条件即加分。
- *
- * 计分模型（见 resettleActivity）：
- *  **总分 = 所有命中的自动规则分值之和 + 所有被点选的手动规则分值之和**，
- *  两类都**叠加**（不再互相覆盖）。手动规则可同时命中多条（如「不熟练 +0.5」+「紧张 +0.5」）。
- */
-export function isManualRule(r: ResolvedClassRule): boolean {
-  return r.mode === 'tier' || r.condition === 'custom'
-}
-
-/**
- * @deprecated v30.3 起改名为 `isManualRule`（语义由「覆盖」变为「叠加」）。保留别名兼容旧代码。
- */
-export const isOverrideRule = isManualRule
 
 /**
  * 取某条记录当前「手动叠加」的规则 id 列表。
@@ -195,7 +179,7 @@ export async function buildSnapshotForRuleIds(
       id: r.id,
       name: r.name,
       points: r.points,
-      mode: r.mode ?? 'auto',
+      mode: r.mode ?? 'manual',
       condition: spec?.condition ?? null,
       rankN: spec?.rankN,
       rankFrom: spec?.rankFrom,
@@ -209,157 +193,29 @@ export async function buildSnapshotForRuleIds(
 }
 
 // ============================================================
-// 计分核心
+// 计分核心（v30.8：纯手动按钮）
 // ============================================================
 
 /**
- * 判断一条「自动累加」规则是否命中某学生的状态 / 名次。
- * @param rank 过关名次（1 起）；未过关或待检查时为 0
- * @param checkRank 检查名次（1 起）：按「被点名 / 过关/未过关都算」的先后排序，
- *   第 1 个被检查的学生 checkRank=1，用于 `first` 与「过关」解耦（v30.7）。
- */
-function condHit(
-  rule: ResolvedClassRule,
-  rank: number,
-  status: 'pending' | 'pass' | 'fail',
-  checkRank = 0,
-): boolean {
-  // 待检查：任何自动规则都不命中（只有老师点选的手动规则才计分）
-  if (status === 'pending') return false
-  // 无条件：所有过关学生都加
-  if (rule.condition === null) return status === 'pass'
-  if (rule.condition === 'fail') return status === 'fail'
-  // v30.3：自定义条件无法自动求值 —— 一律由老师点按钮手动叠加，不参与自动累加。
-  if (rule.condition === 'custom') return false
-  // v30.7：全部学生（不论过关与否）—— 命中任何已检查状态
-  if (rule.condition === 'all') return true
-  // v30.7：第一个加1分 与「过关」解耦 —— 按检查先后（含未过关）取第 1 个被点名者
-  if (rule.condition === 'first') return checkRank === 1
-  // 以下名次类规则仍按「过关先后」计算：必须先过关
-  if (status !== 'pass' || rank < 1) return false
-  switch (rule.condition) {
-    case 'pass':
-      return true
-    case 'topN':
-      return rank <= Math.max(1, rule.rankN ?? 1)
-    case 'rank':
-      return rank === Math.max(1, rule.rankN ?? 1)
-    case 'range': {
-      const from = Math.max(1, rule.rankFrom ?? 1)
-      const to = Math.max(from, rule.rankTo ?? from)
-      return rank >= from && rank <= to
-    }
-    default:
-      return false
-  }
-}
-
-/**
- * 计算某学生在某状态 / 名次下应得积分（v30.3「全体叠加」模型）。
+ * v30.8：**一条记录在该活动下的得分 = 其选中的规则分值之和**。
  *
- * **总分 = 命中的自动规则分值之和 + 被点选的手动规则分值之和**，两类都叠加、互不覆盖。
- *  - 自动规则（过关 / 未过关 / 全部学生 / 第 N 名 / 前 N 名 / X~Y 名 / 无条件）：`condHit` 命中即加分；
- *  - 手动规则（手动档位 / 自定义条件）：只有出现在 `manualIds` 里才加分，可同时命中多条；
- *  - 若某条规则既命中条件又被手动点选，也只计一次（不会重复加分）。
+ * 不再有任何「过关 / 名次 / 自动条件」求值 —— 全部由老师点选按钮决定。
+ * 仅对「启用中」且「被该生选中（出现在 manualIds 里）」的规则累加。
  *
- * @param rank 过关名次，从 1 开始（1 = 第一个过关）；未过关 / 待检查传 0
- * @param status 学生状态（'pending' 时自动规则一律不命中）
- * @param manualIds 该生被手动叠加的规则 id 列表
- * @param checkRank 检查名次（从 1 开始，第 1 个被点名者 = 1）；用于 `first` 条件与「过关」解耦
+ * @param manualIds 该生被手动选中的规则 id 列表（ClassActivityRecord.manualRuleIds）
  */
 export function awardedPoints(
   rules: ResolvedClassRule[],
-  rank: number,
-  status: 'pending' | 'pass' | 'fail' = 'pass',
   manualIds?: string[] | null,
-  checkRank = 0,
 ): number {
   const manual = new Set(manualIds ?? [])
   let total = 0
   for (const r of rules) {
     if (!r.enabled) continue
-    if (isManualRule(r)) {
-      // 手动规则：点选了才计分
-      if (manual.has(r.id)) total += r.points
-      continue
-    }
-    // 自动规则：条件命中即计分；被手动点选同样计分（二者取其一，不重复）
-    if (manual.has(r.id) || condHit(r, rank, status, checkRank)) total += r.points
+    if (manual.has(r.id)) total += r.points
   }
   return total
 }
-
-/** 已过关记录按「过关时间升序」排列：index 0 即第一个过关的学生 */
-export function passedOrder(records: ClassActivityRecord[]): ClassActivityRecord[] {
-  return records
-    .filter((r) => r.status === 'pass')
-    .sort((a, b) => (a.checkedAt ?? 0) - (b.checkedAt ?? 0))
-}
-
-/**
- * v30.7：按「检查先后」排列的已检查记录（过关 / 未过关都算），用于 `first` 与「过关」解耦。
- * index 0 即第一个被点名（无论过关与否）的学生。
- */
-export function checkOrder(records: ClassActivityRecord[]): ClassActivityRecord[] {
-  return records
-    .filter((r) => r.status === 'pass' || r.status === 'fail')
-    .sort((a, b) => (a.checkedAt ?? 0) - (b.checkedAt ?? 0))
-}
-
-/** 学生在活动中当前的「过关名次」（1 起）；未过关返回 0 */
-export function rankOf(records: ClassActivityRecord[], studentId: string): number {
-  const idx = passedOrder(records).findIndex((r) => r.studentId === studentId)
-  return idx < 0 ? 0 : idx + 1
-}
-
-/** 学生在活动中当前的「检查名次」（1 起，过关/未过关都算）；尚未被检查返回 0 */
-export function checkRankOf(records: ClassActivityRecord[], studentId: string): number {
-  const idx = checkOrder(records).findIndex((r) => r.studentId === studentId)
-  return idx < 0 ? 0 : idx + 1
-}
-
-/**
- * v30.3（UI 用）：判断某条**自动规则**此刻是否命中该学生，
- * 用于学生行按钮上的「已生效」标识。手动规则恒返回 false（由点选态决定高亮）。
- * @param checkRank 检查名次（见 condHit），用于 `first` 条件
- */
-export function ruleAppliesNow(
-  rule: ResolvedClassRule,
-  rank: number,
-  status: 'pending' | 'pass' | 'fail',
-  checkRank = 0,
-): boolean {
-  if (!rule.enabled) return false
-  if (isManualRule(rule)) return false
-  return condHit(rule, rank, status, checkRank)
-}
-
-/**
- * 预览：若此刻把某学生标为「过关」，他能拿多少分（不含手动叠加）。
- * 用于学生行上的「+N 分」提示，避免老师误判规则。
- */
-export function previewPassPoints(
-  activity: ClassActivity,
-  rules: ResolvedClassRule[],
-  records: ClassActivityRecord[],
-  studentId: string,
-): number {
-  const siblings = records.filter(
-    (r) => r.activityId === activity.id && !r.deletedAt && r.studentId !== studentId,
-  )
-  // v30.7：检查名次也同步预览（供「第一个被检查 +1」正确估算）
-  return awardedPoints(
-    rules,
-    passedOrder(siblings).length + 1,
-    'pass',
-    null,
-    checkOrder(siblings).length + 1,
-  )
-}
-
-// ============================================================
-// 写入：标记 / 撤销 / 换档 / 重算
-// ============================================================
 
 /** 冲销一条积分流水（软删，随同步传播） */
 async function revokeLedger(ledgerId: string | null | undefined): Promise<void> {
@@ -370,11 +226,13 @@ async function revokeLedger(ledgerId: string | null | undefined): Promise<void> 
 }
 
 /**
- * 重算整个活动：按过关时间升序重排名次、重算每人得分，
+ * 重算整个活动：按当前每条记录的 manualRuleIds 重算每人得分，
  * 先冲销旧流水再按新结果写入（幂等）。
  *
+ * v30.8：计分只看 manualRuleIds，不再涉及任何名次 / 过关状态。
+ *
  * @param allRecords 该活动的最新记录集合（调用方负责含刚写入的那条）
- * @param opts.force   需要强制重算的记录 id（如换档后，即使分值相同也重建流水事由）
+ * @param opts.force   需要强制重算的记录 id（如按钮变更后，即使分值相同也重建流水事由）
  */
 export async function resettleActivity(
   activity: ClassActivity,
@@ -385,18 +243,6 @@ export async function resettleActivity(
   const siblings = allRecords.filter(
     (r) => r.activityId === activity.id && !r.deletedAt,
   )
-  const rankMap = new Map(
-    passedOrder(siblings).map((r, i) => [r.studentId, i + 1]),
-  )
-  // v30.7：检查名次（过关/未过关都算，按 checkedAt 升序）—— 供 `first` 与「过关」解耦。
-  // 注意这是**独立**的排名体系：第一个被点名（哪怕未过关）checkRank=1。
-  const checkRankMap = new Map(
-    checkOrder(siblings).map((r, i) => [r.studentId, i + 1]),
-  )
-  // v30.3「全体叠加」模型 ——
-  //   · 自动规则：按 status/名次 + 加分条件命中即加分；
-  //   · 手动规则（手动档位 / 自定义条件）：只有出现在 manualRuleIds 里才加分；
-  //   · 两者相加，互不覆盖（如「过关 +1」+「不熟练 +0.5」= +1.5）。
   const ruleName = new Map(rules.map((r) => [r.id, r.name]))
   // 当前活动生效的规则 id 集合：手动叠加列表里若残留了「已删 / 已改」的规则 id，
   // 视为悬空 —— 计分时忽略，并顺手把它从记录里清掉，避免永久残留。
@@ -404,15 +250,13 @@ export async function resettleActivity(
 
   const updates: ClassActivityRecord[] = []
   for (const rec of siblings) {
-    const rank = rankMap.get(rec.studentId) ?? 0
-    const checkRank = checkRankMap.get(rec.studentId) ?? 0
     const rawManual = manualIdsOf(rec)
     const manual = rawManual.filter((id) => ruleIds.has(id))
     const staleManual = manual.length !== rawManual.length
-    const expected = awardedPoints(rules, rank, rec.status, manual, checkRank)
+    const expected = awardedPoints(rules, manual)
     const hasLedger = Boolean(rec.ledgerId)
     const forced = opts.force?.has(rec.id) ?? false
-    // 结果未变化则跳过，避免每次标记都产生新流水
+    // 结果未变化则跳过，避免每次点击都产生新流水
     if (
       !forced &&
       !staleManual &&
@@ -451,86 +295,12 @@ export async function resettleActivity(
 }
 
 /**
- * 设置某学生的状态（过关 / 未过关 / 待检查），随后整体重算名次与积分。
- * 撤销（→ pending）后，后面学生的名次会自动前移。
+ * 规则按钮点击（v30.8「纯手动按钮」）：
+ *  - 点某规则 id → 该规则的分值**叠加**到该生总分（不清空、不覆盖）；
+ *    若已选中则**取消**叠加（再点一次）。可同时选中多条（如「熟练 +1」+「主动 +1」= +2）。
+ *  - 传 `ruleId=null` 表示**撤销**：清空该生全部已选规则，回到 0 分。
  *
- * v29 并发安全：同活动的写串行化（活动级队列），配合「从库重读」，
- * 彻底消除并发过关时的名次错乱与重复发流水（两个 resettle 对同一批记录并发改时的竞态）。
- */
-export function setActivityStatus(
-  activity: ClassActivity,
-  record: ClassActivityRecord,
-  status: 'pending' | 'pass' | 'fail',
-  _allRecords: ClassActivityRecord[], // 保留签名兼容；v29 起从库重读，不再信任调用方快照
-  rules: ResolvedClassRule[],
-): Promise<void> {
-  return serializeActivity(activity.id, () => doSetActivityStatus(activity, record, status, rules))
-}
-
-/** 设置某学生的「手动档位」（选中的 tier 规则 id；null = 不选），随后重算。 */
-export function setActivityTier(
-  activity: ClassActivity,
-  record: ClassActivityRecord,
-  ruleId: string | null,
-  _allRecords: ClassActivityRecord[], // 保留签名兼容；v29 起从库重读
-  rules: ResolvedClassRule[],
-): Promise<void> {
-  return serializeActivity(activity.id, () =>
-    doSetActivityTier(activity, record, ruleId, rules),
-  )
-}
-
-/**
- * 三态标记（v30，UI 用）：过关 / 未过关 / 重置为待检查。
- *
- * **三态互斥** —— 落状态时一并清空手动叠加列表，
- * 避免出现「未过关 + 残留手动档位」这种半吊子状态（用户反馈：点过关后仍带着旧档位）。
- * 注意：自动类规则按钮走的是另一条路（`setActivityRuleOutcome`），不会清手动叠加。
- */
-export function setActivityOutcome(
-  activity: ClassActivity,
-  record: ClassActivityRecord,
-  status: 'pending' | 'pass' | 'fail',
-  rules: ResolvedClassRule[],
-): Promise<void> {
-  return serializeActivity(activity.id, () =>
-    doSetActivityStatus(
-      activity,
-      { ...record, manualRuleIds: [], selectedRuleId: null },
-      status,
-      rules,
-    ),
-  )
-}
-
-/**
- * @deprecated v30.3 起 UI 改用 `setActivityRuleOutcome`（手动叠加模型）。
- * 保留此函数仅为旧测试/调用兼容：落 `status='fail' + selectedRuleId=tierId`。
- */
-export function setActivityTierOutcome(
-  activity: ClassActivity,
-  record: ClassActivityRecord,
-  tierId: string,
-  rules: ResolvedClassRule[],
-): Promise<void> {
-  return serializeActivity(activity.id, () =>
-    doSetActivityStatus(activity, { ...record, selectedRuleId: tierId }, 'fail', rules),
-  )
-}
-
-/**
- * 规则按钮点击（v30.3，UI 用）：「全体叠加」。
- *
- * 活动引用的**每一条规则**都是学生行上的可选按钮，点击行为按规则类别分两种：
- *  - **手动类**（`mode='tier'` 手动档位 或 `condition='custom'` 自定义加分条件）：
- *      点选 → 该规则的分值**叠加**到该生总分上（不清状态、不覆盖自动分）；再点一次 → 取消叠加。
- *      可同时叠加多条（如「不熟练 +0.5」+「紧张 +0.5」= +1）。
- *  - **自动类**（过关/未过关/第N名/前N名/X~Y名 等可自动求值的条件）：
- *      点选 → 只把该生标记为「过关/未过关」（视条件而定），得分由**全部自动规则按条件累加**
- *      （如 过关+1 与 第一个额外+1 同时命中 → 第一名共 +2）。
- *      幂等：重复点击不取消（避免误清过关标记），清空请用 `ruleId=null`「撤销」。
- *
- * 传 `ruleId=null` 表示**撤销**：清空状态与全部手动叠加，回到待检查。
+ * 计分时只维护 `manualRuleIds`；`status` 字段已 deprecated（v30.8 清零迁移），不再参与计分。
  */
 export function setActivityRuleOutcome(
   activity: ClassActivity,
@@ -554,13 +324,12 @@ async function doSetActivityRuleOutcome(
     Array.isArray(act.classRuleSnapshot) && act.classRuleSnapshot.length > 0
       ? ((act.classRuleSnapshot as ClassRuleSnapshotItem[]) as ResolvedClassRule[])
       : rules
-  const sel = ruleId ? effectiveRules.find((r) => r.id === ruleId) ?? null : null
   // 以库中最新记录为准判断「是否已是当前选中态」（调用方传入的可能是过期快照）
   const fresh = (await db.classActivityRecords.get(record.id)) ?? record
 
   let updated: ClassActivityRecord
-  if (!sel) {
-    // 撤销：清空状态与全部手动叠加，回到待检查
+  if (!ruleId) {
+    // 撤销：清空全部手动规则选择，回到零分
     updated = {
       ...fresh,
       manualRuleIds: [],
@@ -568,20 +337,13 @@ async function doSetActivityRuleOutcome(
       status: 'pending',
       checkedAt: null,
     }
-  } else if (isManualRule(sel)) {
-    // 手动类：在「手动叠加列表」里增删这条规则（可叠加多条，互不影响）
-    const cur = manualIdsOf(fresh)
-    const next = cur.includes(sel.id)
-      ? cur.filter((id) => id !== sel.id)
-      : [...cur, sel.id]
-    updated = { ...fresh, manualRuleIds: next, selectedRuleId: null }
   } else {
-    // 自动类：只标记状态（未过关条件 → 'fail'，其余 → 'pass'），得分由自动规则按条件累加。
-    // 幂等：重复点击不会取消（否则给已过关的学生点「第一个额外」会误清过关标记）；
-    // 需要清空请用「撤销」。
-    const target: 'pass' | 'fail' = sel.condition === 'fail' ? 'fail' : 'pass'
-    if (fresh.status === target) return
-    updated = { ...fresh, status: target, checkedAt: Date.now() }
+    // 在「手动规则列表」里增删这条规则（可叠加多条，互不影响）
+    const cur = manualIdsOf(fresh)
+    const next = cur.includes(ruleId)
+      ? cur.filter((id) => id !== ruleId)
+      : [...cur, ruleId]
+    updated = { ...fresh, manualRuleIds: next, selectedRuleId: null }
   }
   await db.classActivityRecords.put(touch(updated))
   const merged = await freshActivityRecords(activity.id, updated)
@@ -603,62 +365,6 @@ function serializeActivity<T>(activityId: string, task: () => Promise<T>): Promi
     run.catch(() => {}),
   )
   return run
-}
-
-async function doSetActivityStatus(
-  activity: ClassActivity,
-  record: ClassActivityRecord,
-  status: 'pending' | 'pass' | 'fail',
-  rules: ResolvedClassRule[],
-): Promise<void> {
-  // v29：写入前先固化「该活动当时生效的规则快照」。
-  // 若活动已有快照，传入的 rules 可能是从「已改后的规则库」实时解的，会污染重算；
-  // 因此这里一律以固化快照为准（无快照时传入 rules 正是「当时的规则」，正好用于固化）。
-  const act = await ensureClassRuleSnapshot(activity, rules)
-  const effectiveRules =
-    Array.isArray(act.classRuleSnapshot) && act.classRuleSnapshot.length > 0
-      ? ((act.classRuleSnapshot as ClassRuleSnapshotItem[]) as ResolvedClassRule[])
-      : rules
-
-  const updated: ClassActivityRecord = {
-    ...record,
-    status,
-    // 过关时间决定名次：非过关清空，过关刷新为当下
-    checkedAt: status === 'pending' ? null : Date.now(),
-  }
-  await db.classActivityRecords.put(touch(updated))
-
-  // v29 并发修复：不信任调用方传入的 allRecords 快照（两次并发共用同一份过期的将各判各的第一）。
-  // 以库里最新记录为准计算名次，则并发的第二次运行时能读到第一次已提交的状态。
-  const merged = await freshActivityRecords(activity.id, updated)
-  await resettleActivity(act, merged, {
-    rules: effectiveRules,
-    force: new Set([updated.id]),
-  })
-}
-
-async function doSetActivityTier(
-  activity: ClassActivity,
-  record: ClassActivityRecord,
-  ruleId: string | null,
-  rules: ResolvedClassRule[],
-): Promise<void> {
-  const act = await ensureClassRuleSnapshot(activity, rules)
-  const effectiveRules =
-    Array.isArray(act.classRuleSnapshot) && act.classRuleSnapshot.length > 0
-      ? ((act.classRuleSnapshot as ClassRuleSnapshotItem[]) as ResolvedClassRule[])
-      : rules
-
-  const updated: ClassActivityRecord = { ...record, selectedRuleId: ruleId }
-  await db.classActivityRecords.put(touch(updated))
-  // 未标记状态时选档位：视为「过关」，方便先选档再确认。
-  // 直接调底层 doSetActivityStatus，避免经过 serializeActivity 造成同活动自死锁。
-  if (updated.status === 'pending') {
-    await doSetActivityStatus(act, updated, 'pass', effectiveRules)
-    return
-  }
-  const merged = await freshActivityRecords(activity.id, updated)
-  await resettleActivity(act, merged, { rules: effectiveRules, force: new Set([updated.id]) })
 }
 
 /**
@@ -737,7 +443,7 @@ export async function deleteClassActivity(
 // 规则库：默认课堂规则补齐
 // ============================================================
 
-/** 课堂规则库为空时补齐默认规则（过关 +1 / 第一个过关额外 +1），保证开箱可用 */
+/** 课堂规则库为空时补齐默认规则（熟练/主动/进步 各 +1），保证开箱可用 */
 export async function ensureDefaultClassRules(): Promise<number> {
   const all = await db.pointRules.toArray()
   const hasClass = all.some((r) => !r.deletedAt && (r.scope ?? 'checkin') === 'class')
@@ -745,12 +451,12 @@ export async function ensureDefaultClassRules(): Promise<number> {
   const now = Date.now()
   const rows = DEFAULT_CLASS_RULES.map((spec, i) =>
     withSyncFields<PointRule>({
-      name: DEFAULT_CLASS_RULE_NAMES[i] ?? `规则 ${i + 1}`,
-      points: 1,
+      name: spec.name,
+      points: spec.points,
       scope: 'class',
-      mode: 'auto',
+      mode: 'manual',
       condition: null,
-      classCondition: spec,
+      classCondition: null,
       enabled: true,
       order: i,
       createdAt: now,

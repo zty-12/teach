@@ -269,6 +269,62 @@ export class EduDB extends Dexie {
           r.dirty = 1
         })
     })
+
+    // v16（v30.8）：课堂积分改为「纯手动按钮」模型前，把历史自动算出 / 档位加的分全部清零。
+    //  背景：v30.8 之前课堂分由「过关/名次/档位」自动条件算出，老师无法精细控制；
+    //        新模型下课堂分只由老师点按钮产生。为彻底甩掉旧语义，发布时做一次全量重置：
+    //          · 所有存活的课堂活动记录 → 分数/状态/选中规则一并归零（status 字段已 deprecated，统一置 'pending'）；
+    //          · 历史「课堂积分」类流水（reason 以「课堂积分」开头）软删，把学生钱包里旧自动分一并清掉。
+    //        这样老活动不迁移、不保留自动分，老师之后从 0 开始手动计分。
+    //  注意：只改值、不加列，无需改 schema.sql；置 dirty=1 + 刷新 updatedAt 让清零推回云端。
+    this.version(16).upgrade(async (tx) => {
+      const now = Date.now()
+      // 1) 清零所有存活的课堂活动记录
+      await tx
+        .table('classActivityRecords')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          if (r.deletedAt) return
+          r.status = 'pending'
+          r.pointsAwarded = 0
+          r.ledgerId = null
+          r.manualRuleIds = []
+          r.selectedRuleId = null
+          r.checkedAt = null
+          r.updatedAt = now
+          r.dirty = 1
+        })
+      // 2) 冲销历史「课堂积分」类流水（reason 以「课堂积分」开头）
+      await tx
+        .table('pointLedgers')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          if (r.deletedAt) return
+          if (typeof r.reason === 'string' && r.reason.startsWith('课堂积分')) {
+            r.deletedAt = now
+            r.updatedAt = now
+            r.dirty = 1
+          }
+        })
+      // 3) 归一化既有课堂规则：一律转为「手动按钮」——清掉历史 condition / classCondition，
+      //    否则规则库列表会按旧 mode 显示「自动累加」徽标，而实际已按手动按钮计分（自相矛盾）。
+      //    仅改 scope='class' 的规则，打卡规则不受影响。
+      await tx
+        .table('pointRules')
+        .toCollection()
+        .modify((r: Record<string, unknown>) => {
+          if (r.deletedAt) return
+          if ((r.scope ?? 'checkin') !== 'class') return
+          const alreadyClean =
+            r.mode === 'manual' && r.classCondition == null && r.condition == null
+          if (alreadyClean) return
+          r.mode = 'manual'
+          r.classCondition = null
+          r.condition = null
+          r.updatedAt = now
+          r.dirty = 1
+        })
+    })
   }
 }
 

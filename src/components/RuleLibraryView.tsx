@@ -16,8 +16,6 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/utils'
 import type {
-  ClassRuleCondition,
-  ClassRuleConditionSpec,
   PointMetric,
   PointRule,
   PointRuleCondition,
@@ -25,25 +23,23 @@ import type {
   RuleScope,
 } from '@/lib/types'
 import {
-  CLASS_RULE_CONDITION_LABEL,
   POINT_METRIC_LABEL,
   RULE_MODE_HINT,
   RULE_MODE_LABEL,
   RULE_SCOPE_HINT,
   RULE_SCOPE_LABEL,
-  conditionNeedsRank,
-  describeClassRuleCondition,
 } from '@/lib/types'
 import { ensureDefaultClassRules, nextRuleOrder } from '@/lib/classPoints'
 
 /**
- * 积分规则（v20）
+ * 积分规则（v30.8）
  * ------------------------------------------------------------
  * 所有规则集中在这里定义，分「打卡规则 / 课堂规则」两套：
- *  - 打卡规则：打卡任务引用它们计分
- *  - 课堂规则：课堂积分活动引用它们计分
- * 每条规则 = 名称 + 分值 + 计算方式 +（可选）条件；
- * 计算方式分「自动累加」（达标学生自动加）与「手动档位」（标记时逐人选一条）。
+ *  - 打卡规则（scope='checkin'）：打卡任务引用它们计分；
+ *    计算方式分「自动累加」（达标学生自动加）与「手动档位」（标记时逐人选一条）。
+ *  - 课堂规则（scope='class'）：v30.8 起**只有「手动按钮」一种形态** ——
+ *    每条规则 = 名称 + 分值，在课堂活动里渲染成一枚按钮，点选即加该规则分值（可多条叠加）。
+ *    不再有「过关 / 名次 / 自定义条件」等任何自动求值设置。
  * 活动里只做规则的引用增减，不再各自维护一份规则。
  */
 export default function RuleLibraryView() {
@@ -132,7 +128,7 @@ export default function RuleLibraryView() {
           description={
             scope === 'checkin'
               ? '例：提交作业 +2、连续打卡 7 天 +5；打卡任务会按这些规则加分'
-              : '例：过关 +1、第一个过关额外 +1、背诵熟练 +1 / 不熟练 +0.5'
+              : '例：背诵熟练 +1、主动发言 +1、声音洪亮 +1（点选即加分，可多条叠加）'
           }
           action={
             <div className="flex items-center gap-2">
@@ -217,23 +213,15 @@ export default function RuleLibraryView() {
 // 规则说明
 // ============================================================
 
-/** 把一条规则描述成中文短句（含条件与名次参数） */
+/** 把一条规则描述成中文短句 */
 export function describeRule(r: PointRule): string {
   const scope = r.scope ?? 'checkin'
   const mode = r.mode ?? 'auto'
+  if (scope === 'class') {
+    return `课堂活动中作为按钮，点选即 ${fmtPoints(r.points)} 分（可多条叠加）`
+  }
   if (mode === 'tier') {
     return `标记学生时可选档位：选中「${r.name}」得 ${fmtPoints(r.points)} 分`
-  }
-  if (scope === 'class') {
-    const spec = r.classCondition
-    if (!spec) return `所有过关学生自动 ${fmtPoints(r.points)} 分`
-    if (spec.condition === 'fail') {
-      return `未过关的学生自动 ${fmtPoints(r.points)} 分`
-    }
-    if (spec.condition === 'custom') {
-      return `手动点选「${spec.customText?.trim() || r.name}」→ ${fmtPoints(r.points)} 分（覆盖自动累加）`
-    }
-    return `当「${describeClassRuleCondition(spec)}」时自动 ${fmtPoints(r.points)} 分`
   }
   if (!r.condition) return `每次「已打卡」自动 ${fmtPoints(r.points)} 分`
   const opText = r.condition.operator === '>=' ? '≥' : r.condition.operator === '>' ? '>' : '='
@@ -247,20 +235,6 @@ function fmtPoints(p: number): string {
 // ============================================================
 // 新建 / 编辑规则
 // ============================================================
-
-/** 课堂条件的界面键：none = 无条件（所有过关学生） */
-type ClassCondKey = 'none' | Exclude<ClassRuleCondition, 'pass'>
-
-const CLASS_COND_KEY_LABEL: Record<ClassCondKey, string> = {
-  none: '所有过关学生（无附加条件）',
-  fail: CLASS_RULE_CONDITION_LABEL.fail,
-  all: CLASS_RULE_CONDITION_LABEL.all,
-  first: CLASS_RULE_CONDITION_LABEL.first,
-  topN: CLASS_RULE_CONDITION_LABEL.topN,
-  rank: CLASS_RULE_CONDITION_LABEL.rank,
-  range: CLASS_RULE_CONDITION_LABEL.range,
-  custom: '自定义…（手动按钮，不自动累加）',
-}
 
 /** 打卡条件键：none = 无条件 */
 type CheckinCondKey = 'none' | PointMetric
@@ -282,11 +256,6 @@ function RuleModal({
   const [name, setName] = useState('')
   const [points, setPoints] = useState('1')
   const [mode, setMode] = useState<RuleMode>('auto')
-  const [classCond, setClassCond] = useState<ClassCondKey>('none')
-  const [customText, setCustomText] = useState('')
-  const [rankN, setRankN] = useState('3')
-  const [rankFrom, setRankFrom] = useState('1')
-  const [rankTo, setRankTo] = useState('3')
   const [checkinCond, setCheckinCond] = useState<CheckinCondKey>('none')
   const [op, setOp] = useState<PointRuleCondition['operator']>('>=')
   const [value, setValue] = useState('7')
@@ -300,17 +269,6 @@ function RuleModal({
     setName(r?.name ?? '')
     setPoints(String(r?.points ?? 1))
     setMode(r?.mode ?? 'auto')
-    // 课堂条件
-    const spec = r?.classCondition
-    if (spec && spec.condition !== 'pass') {
-      setClassCond(spec.condition as ClassCondKey)
-    } else {
-      setClassCond('none')
-    }
-    setCustomText(spec?.customText ?? '')
-    setRankN(String(spec?.rankN ?? 3))
-    setRankFrom(String(spec?.rankFrom ?? 1))
-    setRankTo(String(spec?.rankTo ?? spec?.rankFrom ?? 3))
     // 打卡条件
     if (r?.condition) {
       setCheckinCond(r.condition.metric)
@@ -337,26 +295,6 @@ function RuleModal({
       return
     }
 
-    let nextClassCond: ClassRuleConditionSpec | null = null
-    if (targetScope === 'class' && mode === 'auto' && classCond !== 'none') {
-      if (classCond === 'topN' || classCond === 'rank') {
-        nextClassCond = { condition: classCond, rankN: Math.max(1, Number(rankN) || 1) }
-      } else if (classCond === 'range') {
-        const from = Math.max(1, Number(rankFrom) || 1)
-        const to = Math.max(from, Number(rankTo) || from)
-        nextClassCond = { condition: 'range', rankFrom: from, rankTo: to }
-      } else if (classCond === 'custom') {
-        const txt = customText.trim()
-        if (!txt) {
-          alert('请填写自定义加分条件（如「背得不熟练」）')
-          return
-        }
-        nextClassCond = { condition: 'custom', customText: txt }
-      } else {
-        nextClassCond = { condition: classCond }
-      }
-    }
-
     let nextCondition: PointRuleCondition | null = null
     if (targetScope === 'checkin' && mode === 'auto' && checkinCond !== 'none') {
       nextCondition = {
@@ -366,13 +304,14 @@ function RuleModal({
       }
     }
 
+    // v30.8：课堂规则一律为「手动按钮」——只存 name + points，不再有任何自动条件。
     const payload = {
       name: trimmed,
       points: pts,
       scope: targetScope,
-      mode,
-      condition: nextCondition,
-      classCondition: nextClassCond,
+      mode: targetScope === 'class' ? 'manual' : mode,
+      condition: targetScope === 'class' ? null : nextCondition,
+      classCondition: null,
       enabled: rule?.enabled ?? true,
       // 编辑时保留原排序值；原值非法（旧版时间戳脏数据 / NaN）则重新分配，避免脏值继续传播
       order: rule && isRuleOrderSafe(rule.order) ? rule.order : nextOrder(),
@@ -416,7 +355,7 @@ function RuleModal({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder={
-              targetScope === 'checkin' ? '如：提交作业 / 连续打卡 7 天' : '如：背诵熟练 / 第一个过关'
+              targetScope === 'checkin' ? '如：提交作业 / 连续打卡 7 天' : '如：背诵熟练 / 主动发言'
             }
             autoFocus
           />
@@ -431,86 +370,27 @@ function RuleModal({
               onChange={(e) => setPoints(e.target.value)}
             />
           </Field>
-          <Field label="计算方式">
-            <Select value={mode} onChange={(e) => setMode(e.target.value as RuleMode)}>
-              {(Object.keys(RULE_MODE_LABEL) as RuleMode[]).map((m) => (
-                <option key={m} value={m}>
-                  {RULE_MODE_LABEL[m]}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </div>
-        <p className="-mt-1 text-[11px] text-text-3">{RULE_MODE_HINT[mode]}</p>
-
-        {mode === 'auto' && targetScope === 'class' && (
-          <div className="space-y-2 rounded-lg border border-line-1 bg-surface-0 p-3">
-            <Field label="加分条件">
-              <Select
-                value={classCond}
-                onChange={(e) => setClassCond(e.target.value as ClassCondKey)}
-              >
-                {(Object.keys(CLASS_COND_KEY_LABEL) as ClassCondKey[]).map((k) => (
-                  <option key={k} value={k}>
-                    {CLASS_COND_KEY_LABEL[k]}
+          {targetScope === 'class' ? (
+            <Field label="计算方式">
+              <div className="flex h-9 items-center rounded-md border border-line-1 bg-surface-2 px-3 text-[13px] text-text-2">
+                手动按钮（点选即加分）
+              </div>
+            </Field>
+          ) : (
+            <Field label="计算方式">
+              <Select value={mode} onChange={(e) => setMode(e.target.value as RuleMode)}>
+                {(Object.keys(RULE_MODE_LABEL) as RuleMode[]).map((m) => (
+                  <option key={m} value={m}>
+                    {RULE_MODE_LABEL[m]}
                   </option>
                 ))}
               </Select>
             </Field>
-            {conditionNeedsRank(classCond === 'none' ? 'pass' : classCond) === 'single' && (
-              <div className="flex items-center gap-2">
-                <span className="text-[12px] text-text-3">第</span>
-                <Input
-                  type="number"
-                  min={1}
-                  value={rankN}
-                  onChange={(e) => setRankN(e.target.value)}
-                  className="w-20"
-                />
-                <span className="text-[12px] text-text-3">名过关</span>
-              </div>
-            )}
-            {classCond === 'range' && (
-              <div className="flex items-center gap-2">
-                <span className="text-[12px] text-text-3">第</span>
-                <Input
-                  type="number"
-                  min={1}
-                  value={rankFrom}
-                  onChange={(e) => setRankFrom(e.target.value)}
-                  className="w-20"
-                />
-                <span className="text-[12px] text-text-3">~</span>
-                <Input
-                  type="number"
-                  min={1}
-                  value={rankTo}
-                  onChange={(e) => setRankTo(e.target.value)}
-                  className="w-20"
-                />
-                <span className="text-[12px] text-text-3">名过关</span>
-              </div>
-            )}
-            {classCond === 'custom' && (
-              <Field label="自定义条件说明">
-                <Input
-                  value={customText}
-                  onChange={(e) => setCustomText(e.target.value)}
-                  placeholder="如：背得不熟练 / 只完成一半 / 声音太小"
-                />
-              </Field>
-            )}
-            <p className="text-[11px] text-text-3">
-              {classCond === 'custom'
-                ? '自定义条件无法自动判断，因此这条规则会作为「手动按钮」——在活动页点选后该生得此分值，不参与自动累加。'
-                : classCond === 'all'
-                  ? '全部已检查的学生都会加分，不论过关与否（待检查的学生不计入）。'
-                  : classCond === 'first'
-                    ? '按「被点名的先后」取第 1 个被检查的学生（不论过关与否），加此分值；其余名次类规则仍按过关先后。'
-                    : '名次按「过关先后」计算（第 1 名 = 最先过关的学生）。'}
-            </p>
-          </div>
-        )}
+          )}
+        </div>
+        <p className="-mt-1 text-[11px] text-text-3">
+          {targetScope === 'class' ? RULE_MODE_HINT.manual : RULE_MODE_HINT[mode]}
+        </p>
 
         {mode === 'auto' && targetScope === 'checkin' && (
           <div className="space-y-2 rounded-lg border border-line-1 bg-surface-0 p-3">
@@ -558,11 +438,6 @@ function RuleModal({
             points: Number(points) || 0,
             scope: targetScope,
             mode,
-            classCond,
-            customText,
-            rankN: Number(rankN) || 1,
-            rankFrom: Number(rankFrom) || 1,
-            rankTo: Number(rankTo) || 1,
             checkinCond,
             op,
             value: Number(value) || 0,
@@ -579,32 +454,15 @@ function describeDraft(d: {
   points: number
   scope: RuleScope
   mode: RuleMode
-  classCond: ClassCondKey
-  customText: string
-  rankN: number
-  rankFrom: number
-  rankTo: number
   checkinCond: CheckinCondKey
   op: PointRuleCondition['operator']
   value: number
 }): string {
+  if (d.scope === 'class') {
+    return `课堂活动中作为按钮，点选「${d.name}」即 ${fmtPoints(d.points)} 分（可多条叠加）。`
+  }
   if (d.mode === 'tier') {
     return `标记学生时会出现「${d.name}」档位，选中后得 ${fmtPoints(d.points)} 分。`
-  }
-  if (d.scope === 'class') {
-    if (d.classCond === 'none') return `每个过关的学生自动 ${fmtPoints(d.points)} 分。`
-    if (d.classCond === 'fail') return `每个未过关的学生自动 ${fmtPoints(d.points)} 分。`
-    if (d.classCond === 'custom') {
-      const label = d.customText.trim() || d.name
-      return `手动点选「${label}」按钮 → 该生得 ${fmtPoints(d.points)} 分（覆盖自动累加）。`
-    }
-    const text = describeClassRuleCondition({
-      condition: d.classCond,
-      rankN: d.rankN,
-      rankFrom: d.rankFrom,
-      rankTo: d.rankTo,
-    })
-    return `满足「${text}」的学生自动 ${fmtPoints(d.points)} 分。`
   }
   if (d.checkinCond === 'none') return `每次「已打卡」自动 ${fmtPoints(d.points)} 分。`
   const opText = d.op === '>=' ? '≥' : d.op === '>' ? '>' : '='

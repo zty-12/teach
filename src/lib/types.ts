@@ -530,25 +530,29 @@ export const RULE_SCOPE_LABEL: Record<RuleScope, string> = {
 
 export const RULE_SCOPE_HINT: Record<RuleScope, string> = {
   checkin: '用于「打卡任务」，如「提交作业 +2」「连续打卡 7 天 +5」',
-  class: '用于「课堂积分」活动，如「背诵熟练 +1」「第一个过关额外 +1」',
+  class: '用于「课堂积分」活动，如「背诵熟练 +1」「主动发言 +1」（在活动中显示为按钮，点选即加分）',
 }
 
 /**
  * 规则计分方式（v20）
  *  - auto：自动累加 —— 达标学生自动加分（如「提交作业 +2」，所有完成的学生都加）
  *  - tier：手动档位 —— 标记学生时从该活动的档位规则里选一条（如「熟练 +1 / 不熟练 +0.5」）
- * 两种方式可在同一个活动里混用。
+ *  - manual：手动按钮（v30.8）—— **课堂规则的唯一模式**：规则只是一枚按钮，
+ *            点选即加该规则分值、再点取消，可同时叠加多条，全部由老师手动判断。
+ *            （v30.8 起课堂规则不再有「过关/名次」等自动条件。）
  */
-export type RuleMode = 'auto' | 'tier'
+export type RuleMode = 'auto' | 'tier' | 'manual'
 
 export const RULE_MODE_LABEL: Record<RuleMode, string> = {
   auto: '自动累加',
   tier: '手动档位',
+  manual: '手动按钮',
 }
 
 export const RULE_MODE_HINT: Record<RuleMode, string> = {
   auto: '达标学生自动加，无需手动选',
   tier: '标记学生时手动选一条（如 熟练 +1 / 不熟练 +0.5）',
+  manual: '在活动里作为按钮显示，点选即加该分值、再点取消，可叠加多条',
 }
 
 /** 加分条件的度量维度 */
@@ -583,11 +587,14 @@ export interface PointRule extends SyncFields {
   points: number
   /** 适用范围：打卡 / 课堂 */
   scope: RuleScope
-  /** 计分方式：自动累加 / 手动档位 */
+  /** 计分方式：打卡可 auto/tier；课堂固定 manual（点选按钮加分） */
   mode: RuleMode
   /** 打卡范围的条件（如连续打卡 7 天）；null = 无条件（所有已打卡学生都加） */
   condition: PointRuleCondition | null
-  /** 课堂范围的名次/状态条件（如第一个过关、前 3 名）；null = 无条件（所有过关学生都加） */
+  /**
+   * @deprecated v30.8 起课堂规则不再有「过关/名次」等自动条件（一律手动按钮），
+   * 该字段仅为旧数据兼容保留，新建/编辑课堂规则时恒为 null。
+   */
   classCondition: ClassRuleConditionSpec | null
   enabled: boolean
   /** 排序（从小到大生效） */
@@ -615,6 +622,11 @@ export interface PointLedger extends SyncFields {
 
 /**
  * 课堂活动计分规则的条件类型（v19 起支持自定义加分条件）。
+ *
+ * ⚠️ **v30.8 起已废弃**：课堂规则不再区分过关 / 名次 / 任何自动条件，
+ * 一律是「手动按钮」（点选即加分）。本类型/下表仅用于**解析历史数据与旧快照**，
+ * 不再由规则库写入、也不参与任何计分。
+ *
  * - pass  ：每个过关的学生都加（如「过关 +1」）
  * - fail  ：未过关的学生加（如「参与鼓励 +1」）
  * - all   ：全部学生都加，**不论过关与否**（v30.7 新增；与 null 区别：null=所有过关者）
@@ -743,13 +755,19 @@ export interface ClassRuleSnapshotItem {
   id: string
   name: string
   points: number
-  mode: 'auto' | 'tier'
-  /** 状态/名次条件；null = 所有过关学生都加 */
+  /**
+   * v30.8 起课堂规则一律 `'manual'`（点选按钮加分）。
+   * 旧快照可能是 `'auto' | 'tier'`，计分时**一律按手动按钮处理**（只看是否被选中）。
+   */
+  mode: 'auto' | 'tier' | 'manual'
+  /**
+   * @deprecated v30.8 起不再参与计分（课堂规则无自动条件），仅为旧快照兼容保留。
+   */
   condition: ClassRuleCondition | null
   rankN?: number
   rankFrom?: number
   rankTo?: number
-  /** v30.2：自定义条件说明（condition='custom' 时使用） */
+  /** @deprecated v30.8 起不再使用（旧的自定义条件说明） */
   customText?: string
   enabled: boolean
   /** 是否来自规则库（false = 旧版内嵌规则） */
@@ -796,25 +814,28 @@ export interface ClassActivity extends SyncFields {
 export interface ClassActivityRecord extends SyncFields {
   activityId: string
   studentId: string
+  /**
+   * @deprecated v30.8 起课堂积分不再有「过关/未过关」状态，该字段不再参与计分，
+   * 也不在 UI 上体现（历史记录会被迁移为 'pending'）。保留字段仅为云端列兼容。
+   */
   status: 'pending' | 'pass' | 'fail'
+  /** 该生在本活动当前得的分（= 选中规则分值之和） */
   pointsAwarded: number
   note: string
   checkedAt: number | null
   createdAt: number
-  /** 本次加分写入的积分流水 id（v17）：撤销/改判时用于冲销，避免积分残留 */
+  /** 本次加分写入的积分流水 id（v17）：撤销/改选时用于冲销，避免积分残留 */
   ledgerId?: string | null
   /**
-   * v30.3：手动叠加的规则 id 列表（「全体叠加」模型）。
+   * 该生在本活动「选中」的规则 id 列表（v30.8 起为**唯一**计分依据）。
    *
-   * 计分 = 自动累加分（过关 / 未过关 / 名次类规则按条件命中）+ 这里列出的
-   * 手动规则分值之和。手动规则 = `mode='tier'`（手动档位）或 `condition='custom'`
-   * （自定义加分条件）。可同时叠加多条（如「不熟练 +0.5」与「紧张 +0.5」）。
-   * 点学生行上的规则按钮即在此列表里增删。
+   * 计分 = 这里列出的规则分值之和（全部按手动按钮处理，不再有任何按条件自动累加）。
+   * 点学生行上的规则按钮即在此列表里增删，可同时选中多条。
+   * 历史（v30.3）该字段用于「手动叠加」，语义与现在一致。
    */
   manualRuleIds?: string[]
   /**
-   * @deprecated v30.3 起改用 `manualRuleIds`。旧版「手动覆盖」语义：非空表示
-   * 该生得分只取这条规则分值。读取时会被合并进 `manualRuleIds`（见 classPoints）。
+   * @deprecated v30.3 起改用 `manualRuleIds`。读取时会被合并进 `manualRuleIds`（见 classPoints）。
    */
   selectedRuleId?: string | null
 }
