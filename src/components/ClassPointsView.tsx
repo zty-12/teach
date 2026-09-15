@@ -37,6 +37,7 @@ import {
   isManualRule,
   manualIdsOf,
   rankOf,
+  checkRankOf,
   resolveClassRules,
   ruleAppliesNow,
   setActivityRuleOutcome,
@@ -410,6 +411,8 @@ function ActivityCard({
                 .filter((r): r is ResolvedClassRule => Boolean(r))
               // 名次只看本活动的记录，避免跨活动同名次串味（按标记先后）
               const rank = isPass ? rankOf(records, rec.studentId) : 0
+              // v30.7：检查名次（过关/未过关都算）供「第一个被检查」条件高亮
+              const checkRank = checkRankOf(records, rec.studentId)
               const marked = rec.status !== 'pending' || manualRules.length > 0
 
               return (
@@ -464,7 +467,7 @@ function ActivityCard({
                       rules.map((r) => {
                         const isManual = isManualRule(r)
                         const selected = isManual && manualIds.includes(r.id)
-                        const applied = !isManual && ruleAppliesNow(r, rank, rec.status)
+                        const applied = !isManual && ruleAppliesNow(r, rank, rec.status, checkRank)
                         const title = isManual
                           ? selected
                             ? `已叠加：${r.name}（+${r.points} 分），再点取消叠加`

@@ -617,7 +617,9 @@ export interface PointLedger extends SyncFields {
  * 课堂活动计分规则的条件类型（v19 起支持自定义加分条件）。
  * - pass  ：每个过关的学生都加（如「过关 +1」）
  * - fail  ：未过关的学生加（如「参与鼓励 +1」）
- * - first ：仅第 1 名过关额外加
+ * - all   ：全部学生都加，**不论过关与否**（v30.7 新增；与 null 区别：null=所有过关者）
+ * - first ：第 **1 个被检查**的学生额外加；v30.7 起与「过关」解耦 —— 按点名先后取，
+ *           即使是未过关的学生，只要他是第一个被点名的，也算「第一个」。
  * - topN  ：前 N 名过关额外加（配 rankN）
  * - rank  ：第 N 名过关额外加（配 rankN）
  * - range ：第 X ~ Y 名过关额外加（配 rankFrom / rankTo）
@@ -626,12 +628,21 @@ export interface PointLedger extends SyncFields {
  *   不参与按条件自动累加。
  * 旧的 pass / first 数据继续有效，无需迁移。
  */
-export type ClassRuleCondition = 'pass' | 'fail' | 'first' | 'topN' | 'rank' | 'range' | 'custom'
+export type ClassRuleCondition =
+  | 'pass'
+  | 'fail'
+  | 'all'
+  | 'first'
+  | 'topN'
+  | 'rank'
+  | 'range'
+  | 'custom'
 
 export const CLASS_RULE_CONDITION_LABEL: Record<ClassRuleCondition, string> = {
   pass: '过关者都加',
   fail: '未过关者加',
-  first: '仅第一个过关',
+  all: '全部学生都加',
+  first: '仅第一个被检查',
   topN: '前 N 名过关',
   rank: '第 N 名过关',
   range: '第 X~Y 名过关',
@@ -645,6 +656,7 @@ export const CLASS_RULE_CONDITION_PARAM: Record<
 > = {
   pass: 'none',
   fail: 'none',
+  all: 'none',
   first: 'none',
   topN: 'single',
   rank: 'single',
@@ -684,6 +696,8 @@ export function describeClassRuleCondition(spec: {
   switch (spec.condition) {
     case 'custom':
       return spec.customText?.trim() || '自定义条件'
+    case 'all':
+      return '全部学生（不论过关与否）'
     case 'topN':
       return `前 ${Math.max(1, spec.rankN ?? 1)} 名过关`
     case 'rank':

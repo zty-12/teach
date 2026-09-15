@@ -6,7 +6,7 @@
  * 设计要点：
  *  1) **规则集中在「积分规则」页**（pointRules，scope='class'）。活动通过 ruleIds 引用，
  *     同一活动可混用「自动累加」与「手动档位」两类规则：
- *       - auto：达标学生自动加分（如「过关 +1」「第一个过关额外 +1」「前 3 名 +2」）
+ *       - auto：达标学生自动加分（如「过关 +1」「全部学生 +1」「第一个被检查额外 +1（与过关解耦）」「前 3 名 +2」）
  *       - tier：标记学生时手动选一条（如「背诵熟练 +1 / 不熟练 +0.5」），
  *               选择结果记在 ClassActivityRecord.selectedRuleId 上
  *  2) 计分复用 pointLedgers 流水（与打卡积分同一账户体系），
@@ -215,11 +215,14 @@ export async function buildSnapshotForRuleIds(
 /**
  * 判断一条「自动累加」规则是否命中某学生的状态 / 名次。
  * @param rank 过关名次（1 起）；未过关或待检查时为 0
+ * @param checkRank 检查名次（1 起）：按「被点名 / 过关/未过关都算」的先后排序，
+ *   第 1 个被检查的学生 checkRank=1，用于 `first` 与「过关」解耦（v30.7）。
  */
 function condHit(
   rule: ResolvedClassRule,
   rank: number,
   status: 'pending' | 'pass' | 'fail',
+  checkRank = 0,
 ): boolean {
   // 待检查：任何自动规则都不命中（只有老师点选的手动规则才计分）
   if (status === 'pending') return false
@@ -228,12 +231,15 @@ function condHit(
   if (rule.condition === 'fail') return status === 'fail'
   // v30.3：自定义条件无法自动求值 —— 一律由老师点按钮手动叠加，不参与自动累加。
   if (rule.condition === 'custom') return false
+  // v30.7：全部学生（不论过关与否）—— 命中任何已检查状态
+  if (rule.condition === 'all') return true
+  // v30.7：第一个加1分 与「过关」解耦 —— 按检查先后（含未过关）取第 1 个被点名者
+  if (rule.condition === 'first') return checkRank === 1
+  // 以下名次类规则仍按「过关先后」计算：必须先过关
   if (status !== 'pass' || rank < 1) return false
   switch (rule.condition) {
     case 'pass':
       return true
-    case 'first':
-      return rank === 1
     case 'topN':
       return rank <= Math.max(1, rule.rankN ?? 1)
     case 'rank':
@@ -252,19 +258,21 @@ function condHit(
  * 计算某学生在某状态 / 名次下应得积分（v30.3「全体叠加」模型）。
  *
  * **总分 = 命中的自动规则分值之和 + 被点选的手动规则分值之和**，两类都叠加、互不覆盖。
- *  - 自动规则（过关 / 未过关 / 第 N 名 / 前 N 名 / X~Y 名 / 无条件）：`condHit` 命中即加分；
+ *  - 自动规则（过关 / 未过关 / 全部学生 / 第 N 名 / 前 N 名 / X~Y 名 / 无条件）：`condHit` 命中即加分；
  *  - 手动规则（手动档位 / 自定义条件）：只有出现在 `manualIds` 里才加分，可同时命中多条；
  *  - 若某条规则既命中条件又被手动点选，也只计一次（不会重复加分）。
  *
  * @param rank 过关名次，从 1 开始（1 = 第一个过关）；未过关 / 待检查传 0
  * @param status 学生状态（'pending' 时自动规则一律不命中）
  * @param manualIds 该生被手动叠加的规则 id 列表
+ * @param checkRank 检查名次（从 1 开始，第 1 个被点名者 = 1）；用于 `first` 条件与「过关」解耦
  */
 export function awardedPoints(
   rules: ResolvedClassRule[],
   rank: number,
   status: 'pending' | 'pass' | 'fail' = 'pass',
   manualIds?: string[] | null,
+  checkRank = 0,
 ): number {
   const manual = new Set(manualIds ?? [])
   let total = 0
@@ -276,7 +284,7 @@ export function awardedPoints(
       continue
     }
     // 自动规则：条件命中即计分；被手动点选同样计分（二者取其一，不重复）
-    if (manual.has(r.id) || condHit(r, rank, status)) total += r.points
+    if (manual.has(r.id) || condHit(r, rank, status, checkRank)) total += r.points
   }
   return total
 }
@@ -289,23 +297,41 @@ export function passedOrder(records: ClassActivityRecord[]): ClassActivityRecord
 }
 
 /**
+ * v30.7：按「检查先后」排列的已检查记录（过关 / 未过关都算），用于 `first` 与「过关」解耦。
+ * index 0 即第一个被点名（无论过关与否）的学生。
+ */
+export function checkOrder(records: ClassActivityRecord[]): ClassActivityRecord[] {
+  return records
+    .filter((r) => r.status === 'pass' || r.status === 'fail')
+    .sort((a, b) => (a.checkedAt ?? 0) - (b.checkedAt ?? 0))
+}
+
+/** 学生在活动中当前的「过关名次」（1 起）；未过关返回 0 */
+export function rankOf(records: ClassActivityRecord[], studentId: string): number {
+  const idx = passedOrder(records).findIndex((r) => r.studentId === studentId)
+  return idx < 0 ? 0 : idx + 1
+}
+
+/** 学生在活动中当前的「检查名次」（1 起，过关/未过关都算）；尚未被检查返回 0 */
+export function checkRankOf(records: ClassActivityRecord[], studentId: string): number {
+  const idx = checkOrder(records).findIndex((r) => r.studentId === studentId)
+  return idx < 0 ? 0 : idx + 1
+}
+
+/**
  * v30.3（UI 用）：判断某条**自动规则**此刻是否命中该学生，
  * 用于学生行按钮上的「已生效」标识。手动规则恒返回 false（由点选态决定高亮）。
+ * @param checkRank 检查名次（见 condHit），用于 `first` 条件
  */
 export function ruleAppliesNow(
   rule: ResolvedClassRule,
   rank: number,
   status: 'pending' | 'pass' | 'fail',
+  checkRank = 0,
 ): boolean {
   if (!rule.enabled) return false
   if (isManualRule(rule)) return false
-  return condHit(rule, rank, status)
-}
-
-/** 学生在活动中当前的名次（1 起）；未过关返回 0 */
-export function rankOf(records: ClassActivityRecord[], studentId: string): number {
-  const idx = passedOrder(records).findIndex((r) => r.studentId === studentId)
-  return idx < 0 ? 0 : idx + 1
+  return condHit(rule, rank, status, checkRank)
 }
 
 /**
@@ -321,7 +347,14 @@ export function previewPassPoints(
   const siblings = records.filter(
     (r) => r.activityId === activity.id && !r.deletedAt && r.studentId !== studentId,
   )
-  return awardedPoints(rules, passedOrder(siblings).length + 1, 'pass', null)
+  // v30.7：检查名次也同步预览（供「第一个被检查 +1」正确估算）
+  return awardedPoints(
+    rules,
+    passedOrder(siblings).length + 1,
+    'pass',
+    null,
+    checkOrder(siblings).length + 1,
+  )
 }
 
 // ============================================================
@@ -355,6 +388,11 @@ export async function resettleActivity(
   const rankMap = new Map(
     passedOrder(siblings).map((r, i) => [r.studentId, i + 1]),
   )
+  // v30.7：检查名次（过关/未过关都算，按 checkedAt 升序）—— 供 `first` 与「过关」解耦。
+  // 注意这是**独立**的排名体系：第一个被点名（哪怕未过关）checkRank=1。
+  const checkRankMap = new Map(
+    checkOrder(siblings).map((r, i) => [r.studentId, i + 1]),
+  )
   // v30.3「全体叠加」模型 ——
   //   · 自动规则：按 status/名次 + 加分条件命中即加分；
   //   · 手动规则（手动档位 / 自定义条件）：只有出现在 manualRuleIds 里才加分；
@@ -367,10 +405,11 @@ export async function resettleActivity(
   const updates: ClassActivityRecord[] = []
   for (const rec of siblings) {
     const rank = rankMap.get(rec.studentId) ?? 0
+    const checkRank = checkRankMap.get(rec.studentId) ?? 0
     const rawManual = manualIdsOf(rec)
     const manual = rawManual.filter((id) => ruleIds.has(id))
     const staleManual = manual.length !== rawManual.length
-    const expected = awardedPoints(rules, rank, rec.status, manual)
+    const expected = awardedPoints(rules, rank, rec.status, manual, checkRank)
     const hasLedger = Boolean(rec.ledgerId)
     const forced = opts.force?.has(rec.id) ?? false
     // 结果未变化则跳过，避免每次标记都产生新流水

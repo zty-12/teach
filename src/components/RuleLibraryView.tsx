@@ -254,6 +254,7 @@ type ClassCondKey = 'none' | Exclude<ClassRuleCondition, 'pass'>
 const CLASS_COND_KEY_LABEL: Record<ClassCondKey, string> = {
   none: '所有过关学生（无附加条件）',
   fail: CLASS_RULE_CONDITION_LABEL.fail,
+  all: CLASS_RULE_CONDITION_LABEL.all,
   first: CLASS_RULE_CONDITION_LABEL.first,
   topN: CLASS_RULE_CONDITION_LABEL.topN,
   rank: CLASS_RULE_CONDITION_LABEL.rank,
@@ -502,7 +503,11 @@ function RuleModal({
             <p className="text-[11px] text-text-3">
               {classCond === 'custom'
                 ? '自定义条件无法自动判断，因此这条规则会作为「手动按钮」——在活动页点选后该生得此分值，不参与自动累加。'
-                : '名次按「过关先后」计算（第 1 名 = 最先过关的学生）。'}
+                : classCond === 'all'
+                  ? '全部已检查的学生都会加分，不论过关与否（待检查的学生不计入）。'
+                  : classCond === 'first'
+                    ? '按「被点名的先后」取第 1 个被检查的学生（不论过关与否），加此分值；其余名次类规则仍按过关先后。'
+                    : '名次按「过关先后」计算（第 1 名 = 最先过关的学生）。'}
             </p>
           </div>
         )}
