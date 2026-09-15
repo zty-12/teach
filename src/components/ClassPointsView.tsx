@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { format, startOfDay } from 'date-fns'
 import {
+  CalendarDays,
   CheckCircle2,
+  ChevronDown,
   Coins,
   Plus,
   RotateCcw,
@@ -42,6 +44,7 @@ import {
 import type {
   ClassActivity,
   ClassActivityRecord,
+  Course,
   Group,
   PointRule,
   Student,
@@ -69,8 +72,12 @@ export default function ClassPointsView() {
   const groupMembers = useLiveQuery(() => db.groupMembers.toArray(), [])
   const ledgers = useLiveQuery(() => db.pointLedgers.toArray(), [])
   const pointRules = useLiveQuery(() => db.pointRules.toArray(), [])
+  // v31.1：活动卡上显示「课程时间」而不是「实际创建时间」，需要课程表
+  const courses = useLiveQuery(() => db.courses.toArray(), [])
 
   const [showCreate, setShowCreate] = useState(false)
+  // v31.1：默认全部折叠（避免多个活动把页面拉得很长），点击卡头展开
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const autoRan = useRef(false)
   // v29：正在处理中的活动 id（活动级提交锁，防并发改判导致名次错乱）
   const processingRef = useRef(new Set<string>())
@@ -114,6 +121,16 @@ export default function ClassPointsView() {
   const groupMap = useMemo(
     () => new Map(liveGroups.map((g) => [g.id, g])),
     [liveGroups],
+  )
+  // v31.1：活动 → 来源课程（取 startAt 显示「课程时间」）
+  const courseMap = useMemo(
+    () =>
+      new Map(
+        (courses ?? [])
+          .filter((c) => !c.deletedAt)
+          .map((c) => [c.id, c]),
+      ),
+    [courses],
   )
   const membersByGroup = useMemo(() => {
     const map = new Map<string, string[]>()
@@ -160,6 +177,16 @@ export default function ClassPointsView() {
   function memberIdsOf(activity: ClassActivity): string[] {
     if (activity.groupId) return membersByGroup.get(activity.groupId) ?? []
     return liveStudents.map((s) => s.id)
+  }
+
+  /** v31.1：展开 / 折叠某个活动卡 */
+  function toggleExpanded(id: string) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }
 
   async function handleRule(
@@ -233,8 +260,11 @@ export default function ClassPointsView() {
             rules={ruleMap.get(activity.id) ?? []}
             studentMap={studentMap}
             groupMap={groupMap}
+            courseMap={courseMap}
             balances={balances}
             isToday={activity.activityDate === todayStart}
+            expanded={expandedIds.has(activity.id)}
+            onToggle={() => toggleExpanded(activity.id)}
             onRule={handleRule}
             onAddStudents={handleAddStudents}
             onDelete={handleDelete}
@@ -262,8 +292,11 @@ function ActivityCard({
   rules,
   studentMap,
   groupMap,
+  courseMap,
   balances,
   isToday,
+  expanded,
+  onToggle,
   onRule,
   onAddStudents,
   onDelete,
@@ -273,8 +306,13 @@ function ActivityCard({
   rules: ResolvedClassRule[]
   studentMap: Map<string, Student>
   groupMap: Map<string, Group>
+  /** v31.1：活动来源课程（用于显示「课程时间」而非实际创建时间） */
+  courseMap: Map<string, Course>
   balances: Map<string, PointBalance>
   isToday: boolean
+  /** v31.1：是否展开（默认折叠，避免占地方） */
+  expanded: boolean
+  onToggle: () => void
   onRule: (
     activity: ClassActivity,
     record: ClassActivityRecord,
@@ -287,11 +325,46 @@ function ActivityCard({
   const scored = records.filter((r) => (r.pointsAwarded || 0) > 0)
   const totalAwarded = records.reduce((s, r) => s + (r.pointsAwarded || 0), 0)
 
+  // v31.1：显示「课程时间」而非「实际创建时间」。
+  //  自动生成的活动挂在本节课上（sourceCourseId / courseId）→ 取该课的 startAt；
+  //  找不到课程（手动新建 / 课已被删）→ 回退活动日期，再回退创建时间。
+  const sourceCourse = (() => {
+    const cid = activity.sourceCourseId ?? activity.courseId
+    return cid ? (courseMap.get(cid) ?? null) : null
+  })()
+  const timeLabel = sourceCourse
+    ? format(sourceCourse.startAt, 'M月d日 HH:mm')
+    : activity.activityDate
+      ? format(activity.activityDate, 'M月d日')
+      : format(activity.createdAt, 'M月d日 HH:mm')
+
   return (
     <Card>
-      <div className="flex items-start justify-between gap-3 border-b border-line-1 px-4 py-3">
+      {/* v31.1：整条卡头可点击展开 / 折叠（默认折叠，多个活动不再把页面拉得很长） */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onToggle()
+          }
+        }}
+        className={cn(
+          'flex cursor-pointer items-start justify-between gap-3 px-4 py-3 transition-colors',
+          expanded ? 'border-b border-line-1' : 'hover:bg-surface-1',
+        )}
+      >
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
+            <ChevronDown
+              size={14}
+              className={cn(
+                'shrink-0 text-text-3 transition-transform',
+                !expanded && '-rotate-90',
+              )}
+            />
             <Trophy size={15} className="text-amber-500" />
             <h3 className="text-[15px] font-medium text-text-1">{activity.title}</h3>
             {group && <Badge variant="primary">{group.name}</Badge>}
@@ -302,8 +375,11 @@ function ActivityCard({
             )}
             {isToday && <Badge variant="success">今天</Badge>}
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-3 text-[12px] text-text-3">
-            <span>{format(activity.createdAt, 'M月d日 HH:mm')}</span>
+          <div className="mt-1 flex flex-wrap items-center gap-3 pl-[22px] text-[12px] text-text-3">
+            <span className="inline-flex items-center gap-1">
+              <CalendarDays size={11} />
+              {timeLabel}
+            </span>
             <span className="inline-flex items-center gap-1">
               <CheckCircle2 size={11} className="text-done" />
               {scored.length} 人已计分
@@ -311,9 +387,18 @@ function ActivityCard({
             <span className="inline-flex items-center gap-1 text-amber-600">
               <Coins size={11} /> 共 +{totalAwarded} 分
             </span>
+            {!expanded && (
+              <span className="inline-flex items-center gap-1 text-text-3">
+                <ChevronDown size={11} className="-rotate-90" />
+                点击展开计分
+              </span>
+            )}
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div
+          className="flex shrink-0 items-center gap-1.5"
+          onClick={(e) => e.stopPropagation()}
+        >
           <Button variant="ghost" size="sm" onClick={() => onAddStudents(activity)}>
             <Users size={13} /> 补齐学生
           </Button>
@@ -323,8 +408,10 @@ function ActivityCard({
         </div>
       </div>
 
+      {!expanded ? null : (
+        <>
       {/* 计分规则（来自规则库引用）：v30.8 纯手动按钮 */}
-      <div className="px-4 pb-3">
+      <div className="px-4 pb-3 pt-3">
         <div className="rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/30 p-3">
           <div className="mb-2 flex items-center gap-1.5">
             <Sparkles size={12} className="text-amber-600" />
@@ -465,6 +552,8 @@ function ActivityCard({
           </div>
         )}
       </div>
+        </>
+      )}
     </Card>
   )
 }
