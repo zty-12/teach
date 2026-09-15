@@ -1,5 +1,5 @@
 import type { Table } from 'dexie'
-import { db, saveSettings, saveSettingsFull, DEFAULT_SETTINGS } from './db'
+import { db, saveSettings, saveSettingsFull, DEFAULT_SETTINGS, planPointRuleOrderFixes } from './db'
 import { getSupabase, isSupabaseConfigured } from './supabase'
 import { useSettings } from '@/store/useSettings'
 import type { AppSettings, SyncTableName } from './types'
@@ -144,6 +144,40 @@ function applyPushDefaults(
   return patched ? out : row
 }
 
+/**
+ * v30.6：推送前对「云端 int4 列」做兜底归一化，避免整批 upsert 被 PostgREST 拒绝。
+ *
+ * 背景：pointRules."order" / "points" 是 integer（int4，上限 2147483647）。
+ *   早期代码用 `order: Date.now()`（毫秒时间戳 ≈1.8e12）写入本地 IndexedDB，
+ *   一旦本地残留此类脏值，推送时 PostgREST 报
+ *   `value "1789311709042" is out of range for type integer` → **整张表推送失败**。
+ *   复用 db.ts 的 planPointRuleOrderFixes（与 v15 迁移同源），保证「本地迁移」
+ *   与「推送自愈」语义完全一致；同时把干净值写回本地，避免下次再推脏值。
+ */
+const INT4_MAX = 2147483647
+const INT4_MIN = -2147483648
+function sanitizeInt4ForPush(
+  table: SyncTableName,
+  rows: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  if (table !== 'pointRules') return rows
+  const fixes = planPointRuleOrderFixes(rows)
+  const orderById = new Map(fixes.map((f) => [String(f.id), f.order]))
+  return rows.map((r) => {
+    const out: Record<string, unknown> = { ...r }
+    const id = String(out.id)
+    if (orderById.has(id)) out.order = orderById.get(id)
+    // points 同样为 int4：非有限整数 / 越界 → 归 0（正常分值不会触发此分支）
+    const p = out.points
+    if (typeof p !== 'number' || !Number.isFinite(p) || p > INT4_MAX || p < INT4_MIN) {
+      out.points = 0
+    } else {
+      out.points = Math.trunc(p)
+    }
+    return out
+  })
+}
+
 /** 推送本地待同步记录到云端 */
 export async function pushAll(settings?: AppSettings): Promise<SyncResult> {
   const result: SyncResult = { pushed: 0, pulled: 0, errors: [] }
@@ -156,8 +190,9 @@ export async function pushAll(settings?: AppSettings): Promise<SyncResult> {
       const dirty = (await table.where('dirty').equals(1).toArray()) as Record<string, unknown>[]
       if (dirty.length === 0) continue
 
-      // dirty 是本地字段，不上传
-      const payload = dirty.map(({ dirty: _dirty, ...rest }) =>
+      // dirty 是本地字段，不上传；推送前先对 int4 列做兜底归一化（见 sanitizeInt4ForPush）
+      const sanitized = sanitizeInt4ForPush(name, dirty)
+      const payload = sanitized.map(({ dirty: _dirty, ...rest }) =>
         applyPushDefaults(name, rest),
       )
 
@@ -167,7 +202,7 @@ export async function pushAll(settings?: AppSettings): Promise<SyncResult> {
         continue
       }
 
-      const pushed = dirty.map((r) => ({ ...r, dirty: 0 }))
+      const pushed = sanitized.map((r) => ({ ...r, dirty: 0 }))
       await table.bulkPut(pushed as never[])
       result.pushed += dirty.length
 
