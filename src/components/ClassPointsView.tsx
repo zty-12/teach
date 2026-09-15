@@ -171,7 +171,7 @@ export default function ClassPointsView() {
     if (processingRef.current.has(activity.id)) return
     processingRef.current.add(activity.id)
     try {
-      // v30.2：规则按钮 —— 自动累加类标记状态（按条件累加）；覆盖类只取该规则分值；null = 撤销
+      // v30.8：纯手动按钮 —— ruleId 为规则 id 时在「已选」里增删（切换），null = 撤销清空
       await setActivityRuleOutcome(activity, record, ruleId, ruleMap.get(activity.id) ?? [])
     } finally {
       processingRef.current.delete(activity.id)
