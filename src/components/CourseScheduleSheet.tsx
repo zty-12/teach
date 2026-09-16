@@ -310,38 +310,59 @@ export function CourseScheduleSheet({
         aria-label={`${title} 排课明细`}
       >
         {/* 头部 */}
-        <header className="flex items-start justify-between gap-3 border-b border-line-1 px-4 py-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <button
-              type="button"
-              disabled={!scope?.isStudent ? false : true}
-              onClick={() => {
-                if (scope && !scope.isStudent && onOpenGroup) onOpenGroup(scope.pid!)
-              }}
-              className={cn(
-                'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-white',
-                scope && !scope.isStudent && onOpenGroup && 'cursor-pointer hover:opacity-90',
-              )}
-              style={{ background: subjectColorVar(course.colorSlot) }}
-              aria-label="班课详情"
-              title={scope && !scope.isStudent && onOpenGroup ? '点击打开班课详情' : ''}
-            >
-              <span className="text-[15px] font-bold">{sub.slice(0, 1)}</span>
-            </button>
-            <div className="min-w-0">
-              <h2 className="truncate text-[16px] font-semibold text-text-1">{title}</h2>
-              <p className="mt-0.5 truncate text-[12px] text-text-2">
-                {sub} · 共 {summary.total} 节 · 已完成 {summary.done} · 待上 {summary.pending}
-              </p>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <Badge variant="neutral">{summary.total} 节</Badge>
-                <Badge variant="success">完成 {summary.done}</Badge>
-                <Badge variant="warning">待上 {summary.pending}</Badge>
-                {summary.cancelled > 0 && <Badge variant="danger">取消 {summary.cancelled}</Badge>}
+        <header className="flex flex-col gap-3 border-b border-line-1 px-4 py-4 md:flex-row md:items-start md:justify-between">
+          <div className="flex min-w-0 items-start justify-between gap-3 md:flex-1 md:justify-start">
+            <div className="flex min-w-0 items-start gap-3">
+              <button
+                type="button"
+                disabled={!scope?.isStudent ? false : true}
+                onClick={() => {
+                  if (scope && !scope.isStudent && onOpenGroup) onOpenGroup(scope.pid!)
+                }}
+                className={cn(
+                  'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-white',
+                  scope && !scope.isStudent && onOpenGroup && 'cursor-pointer hover:opacity-90',
+                )}
+                style={{ background: subjectColorVar(course.colorSlot) }}
+                aria-label="班课详情"
+                title={scope && !scope.isStudent && onOpenGroup ? '点击打开班课详情' : ''}
+              >
+                <span className="text-[15px] font-bold">{sub.slice(0, 1)}</span>
+              </button>
+              <div className="min-w-0">
+                <h2 className="truncate text-[16px] font-semibold text-text-1">{title}</h2>
+                <p className="mt-0.5 truncate text-[12px] text-text-2">
+                  {sub} · 共 {summary.total} 节 · 已完成 {summary.done} · 待上 {summary.pending}
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <Badge variant="neutral">{summary.total} 节</Badge>
+                  <Badge variant="success">完成 {summary.done}</Badge>
+                  <Badge variant="warning">待上 {summary.pending}</Badge>
+                  {summary.cancelled > 0 && <Badge variant="danger">取消 {summary.cancelled}</Badge>}
+                </div>
               </div>
             </div>
+            {/* 移动端关闭按钮：与标题同行；桌面端在右上操作区（见下方） */}
+            <button
+              aria-label="关闭"
+              onClick={onClose}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-2 hover:bg-surface-2 hover:text-text-1 md:hidden"
+            >
+              <X size={18} />
+            </button>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5">
+
+          {/*
+            操作区：移动端独占一整行（三枚等宽按钮），避免把标题挤没；
+            桌面端回到标题右侧。
+            「编辑本节」直接编辑**点击的那节课**，不必再去下面的列表里找 —— 之前只能
+            先在列表里翻到同一节课再点它的「编辑」，多一步且容易点错。
+          */}
+          <div className="grid grid-cols-3 gap-1.5 md:flex md:shrink-0 md:items-center">
+            <Button size="sm" variant="secondary" onClick={() => onEdit(course)}>
+              <Pencil size={14} />
+              编辑本节
+            </Button>
             <Button size="sm" variant="secondary" onClick={() => onToggleDone(course)}>
               完成
             </Button>
@@ -358,7 +379,7 @@ export function CourseScheduleSheet({
             <button
               aria-label="关闭"
               onClick={onClose}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-2 hover:bg-surface-2 hover:text-text-1"
+              className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-2 hover:bg-surface-2 hover:text-text-1 md:inline-flex"
             >
               <X size={18} />
             </button>
@@ -640,7 +661,7 @@ export function CourseScheduleSheet({
           </div>
           <p className="mt-1 flex items-center gap-1 text-[11px] text-text-3">
             <CalendarPlus size={11} />
-            单击「编辑」进入单节修改；多选态支持「全选当前结果」「反选当前」。
+            顶部「编辑本节」改刚才点的那一节；列表里每行「编辑」可改任意一节。
           </p>
         </footer>
       </aside>

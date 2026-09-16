@@ -411,7 +411,7 @@ function ActivityCard({
       {!expanded ? null : (
         <>
       {/* 计分规则（来自规则库引用）：v30.8 纯手动按钮 */}
-      <div className="px-4 pb-3 pt-3">
+      <div className="px-3 pb-3 pt-3 md:px-4">
         <div className="rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/30 p-3">
           <div className="mb-2 flex items-center gap-1.5">
             <Sparkles size={12} className="text-amber-600" />
@@ -441,7 +441,8 @@ function ActivityCard({
               ))}
             </div>
           )}
-          <p className="mt-2 text-[11px] text-text-3">
+          {/* 交互说明：窄屏藏起来 —— 按钮就在下面，说明文字反而占掉半屏 */}
+          <p className="mt-2 hidden text-[11px] text-text-3 md:block">
             每条规则都是学生行上的按钮：点一下即给该生加对应分值，再点取消；可同时选中多条规则叠加
             （如「熟练 +1」+「主动 +1」= +2）。完全由你按课堂表现手动判定，没有任何自动条件。
           </p>
@@ -449,7 +450,7 @@ function ActivityCard({
       </div>
 
       {/* 学生列表 */}
-      <div className="border-t border-line-1 px-4 py-3">
+      <div className="border-t border-line-1 px-3 py-3 md:px-4">
         <div className="mb-2.5 flex items-center justify-between">
           <span className="text-[12px] font-medium text-text-2">
             参与学生（{records.length}）
@@ -477,34 +478,57 @@ function ActivityCard({
                 <div
                   key={rec.id}
                   className={cn(
-                    'flex items-center justify-between gap-2 rounded-lg border px-3 py-2',
-                    selectedIds.length > 0
+                    // 移动端上下两段（学生一行 / 规则按钮一行），桌面端恢复左右两栏。
+                    // 原先一直是左右两栏 + 按钮 shrink-0，窄屏下学生块被挤成 0 宽，
+                    // 姓名被压成竖排单字、按钮横向溢出被裁掉。
+                    'flex flex-col gap-2 rounded-lg border px-3 py-2.5',
+                    'md:flex-row md:items-center md:justify-between md:gap-2 md:py-2',
+                    marked
                       ? 'border-amber-300/60 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/20'
                       : 'border-line-1 bg-surface-0',
                   )}
                 >
-                  <div className="flex min-w-0 items-center gap-2.5">
+                  <div className="flex min-w-0 items-center gap-2.5 md:flex-1">
                     <Avatar name={student.name} colorSlot={student.colorSlot} size="sm" />
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
-                        <span className="truncate text-[13px] font-medium text-text-1">
-                          {student.name}
-                        </span>
+                      <div className="truncate text-[13px] font-medium text-text-1">
+                        {student.name}
                       </div>
                       {bal && (
-                        <div className="flex items-center gap-1.5 text-[11px] text-text-3">
+                        <div className="flex items-center gap-1 text-[11px] text-text-3">
                           <Coins size={10} />
                           当前 {bal.balance} 分
-                          {rec.pointsAwarded > 0 && (
-                            <span className="text-done">+{rec.pointsAwarded}</span>
-                          )}
                         </div>
                       )}
                     </div>
+                    {/* 得分 + 撤销：紧贴学生姓名右侧（桌面端在规则按钮左边，读起来更连贯） */}
+                    {marked && (
+                      <div className="flex shrink-0 items-center gap-1">
+                        <span
+                          className="rounded-full bg-amber-100 px-2 py-0.5 text-[12px] font-semibold tabular-nums text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                          title={
+                            selectedRules.length > 0
+                              ? `已选：${selectedRules.map((r) => r.name).join(' + ')}`
+                              : ''
+                          }
+                        >
+                          +{rec.pointsAwarded} 分
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="px-2"
+                          title="撤销（清空该生全部已选规则，分数冲销）"
+                          onClick={() => onRule(activity, rec, null)}
+                        >
+                          <RotateCcw size={13} />
+                        </Button>
+                      </div>
+                    )}
                   </div>
 
-                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                    {/* v30.8：活动引用的每一条规则都出按钮，点选即加该规则分值（再点取消），可多条叠加 */}
+                  {/* v30.8：活动引用的每一条规则都出按钮，点选即加该规则分值（再点取消），可多条叠加 */}
+                  <div className="flex flex-wrap items-center gap-1.5 md:shrink-0 md:justify-end">
                     {rules.length === 0 ? (
                       <span className="text-[11px] text-text-3">该活动未引用任何规则</span>
                     ) : (
@@ -518,6 +542,7 @@ function ActivityCard({
                             key={r.id}
                             variant={selected ? 'primary' : 'secondary'}
                             size="sm"
+                            className="h-9 shrink-0 whitespace-nowrap md:h-8"
                             disabled={!r.enabled}
                             title={title}
                             onClick={() => onRule(activity, rec, r.id)}
@@ -526,24 +551,6 @@ function ActivityCard({
                           </Button>
                         )
                       })
-                    )}
-                    {marked && (
-                      <span className="flex items-center gap-1 text-[12px] font-medium text-amber-600 dark:text-amber-400">
-                        {selectedRules.length > 0
-                          ? `${selectedRules.map((r) => r.name).join(' + ')}，`
-                          : ''}
-                        共 +{rec.pointsAwarded} 分
-                      </span>
-                    )}
-                    {marked && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        title="撤销（清空该生全部已选规则，分数冲销）"
-                        onClick={() => onRule(activity, rec, null)}
-                      >
-                        <RotateCcw size={13} />
-                      </Button>
                     )}
                   </div>
                 </div>

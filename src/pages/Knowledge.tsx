@@ -85,6 +85,14 @@ export default function KnowledgePage() {
     selectedUnitId && unitsOfActive.some((u) => u.id === selectedUnitId)
       ? selectedUnitId
       : unitsOfActive[0]?.id ?? null
+  const activeUnit = unitsOfActive.find((u) => u.id === activeUnitId) ?? null
+
+  /** 每个单元的知识点数（下拉选项里带上，才能一眼看出单元↔知识点的对应关系） */
+  const pointCountByUnit = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const p of livePoints) m.set(p.unitId, (m.get(p.unitId) ?? 0) + 1)
+    return m
+  }, [livePoints])
 
   const pointsOfActive = useMemo(() => {
     const list = livePoints.filter((p) => p.unitId === activeUnitId)
@@ -281,50 +289,95 @@ export default function KnowledgePage() {
               description="点击右上角「+」添加第一个单元"
             />
           ) : (
-            <ul className="divide-y divide-line-1">
-              {unitsOfActive.map((u, idx) => {
-                const active = u.id === activeUnitId
-                return (
-                  <li
-                    key={u.id}
-                    className={cn(
-                      'group flex items-center gap-2 px-3 py-2.5 transition-colors',
-                      active ? 'bg-accent-soft' : 'hover:bg-surface-1',
-                    )}
+            <>
+              {/* 窄屏（单栏堆叠）：单元动辄十几个，平铺列表会把「知识点」挤到很下面，
+                  看不出单元与知识点的对应关系 → 改用一行下拉选择。 */}
+              <div className="border-b border-line-1 px-3 py-2.5 lg:hidden">
+                <div className="flex items-center gap-2">
+                  <select
+                    value={activeUnitId ?? ''}
+                    onChange={(e) => setSelectedUnitId(e.target.value)}
+                    aria-label="选择单元"
+                    className="h-10 min-w-0 flex-1 rounded-lg border border-line-1 bg-surface-0 px-2.5 text-[14px] text-text-1 outline-none focus:border-accent"
                   >
-                    <button
-                      type="button"
-                      onClick={() => setSelectedUnitId(u.id)}
-                      className="min-w-0 flex-1 text-left"
-                    >
-                      <div className="flex items-center gap-2">
-                        <Badge variant="primary">{idx + 1}</Badge>
-                        <span className="truncate text-sm font-medium text-text-1">{u.name}</span>
-                      </div>
-                      {u.note && (
-                        <div className="mt-0.5 truncate text-[11px] text-text-3">{u.note}</div>
+                    {unitsOfActive.map((u, idx) => (
+                      <option key={u.id} value={u.id}>
+                        {`${idx + 1}. ${u.name}（${pointCountByUnit.get(u.id) ?? 0} 知识点）`}
+                      </option>
+                    ))}
+                  </select>
+                  {activeUnit && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => openEditUnit(activeUnit)}
+                        className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-text-3 hover:bg-surface-2 hover:text-text-1"
+                        title="编辑单元"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteUnit(activeUnit)}
+                        className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-text-3 hover:bg-money-out/10 hover:text-money-out"
+                        title="删除单元"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  )}
+                </div>
+                {activeUnit?.note && (
+                  <p className="mt-1.5 truncate text-[11px] text-text-3">{activeUnit.note}</p>
+                )}
+              </div>
+
+              {/* 宽屏（三栏并排）：保留列表，便于在两个单元间来回比较 */}
+              <ul className="hidden divide-y divide-line-1 lg:block">
+                {unitsOfActive.map((u, idx) => {
+                  const active = u.id === activeUnitId
+                  return (
+                    <li
+                      key={u.id}
+                      className={cn(
+                        'group flex items-center gap-2 px-3 py-2.5 transition-colors',
+                        active ? 'bg-accent-soft' : 'hover:bg-surface-1',
                       )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openEditUnit(u)}
-                      className="hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 hover:bg-surface-2 hover:text-text-1 group-hover:flex"
-                      title="编辑单元"
                     >
-                      <Pencil size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleDeleteUnit(u)}
-                      className="hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 hover:bg-money-out/10 hover:text-money-out group-hover:flex"
-                      title="删除单元"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedUnitId(u.id)}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Badge variant="primary">{idx + 1}</Badge>
+                          <span className="truncate text-sm font-medium text-text-1">{u.name}</span>
+                        </div>
+                        {u.note && (
+                          <div className="mt-0.5 truncate text-[11px] text-text-3">{u.note}</div>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openEditUnit(u)}
+                        className="hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 hover:bg-surface-2 hover:text-text-1 group-hover:flex"
+                        title="编辑单元"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteUnit(u)}
+                        className="hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-3 hover:bg-money-out/10 hover:text-money-out group-hover:flex"
+                        title="删除单元"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </>
           )}
         </Card>
 
@@ -333,8 +386,8 @@ export default function KnowledgePage() {
           <CardHeader
             title="知识点"
             subtitle={
-              activeUnitId
-                ? `${pointsOfActive.length} 个`
+              activeUnit
+                ? `${activeUnit.name} · ${pointsOfActive.length} 个`
                 : '未选单元'
             }
             action={

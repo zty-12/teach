@@ -496,10 +496,18 @@ export default function SchedulePage() {
         studentMap={studentMap}
         groupMap={groupMap}
         onClose={() => setCourseViewFor(null)}
-        onEdit={(c) => openEdit(c)}
+        onEdit={(c) => {
+          // 先关侧拉 Sheet，再开编辑弹窗。
+          // 两者都是 fixed overlay 且 z-index 相同，Sheet 在 DOM 里更靠后 → 会盖住弹窗，
+          // 表现为「点编辑后像是没反应，要手动关掉 Sheet 才看到编辑界面」。
+          setCourseViewFor(null)
+          requestAnimationFrame(() => openEdit(c))
+        }}
         onCreate={(studentId, groupId) => {
+          // 同 onEdit：新建弹窗也被 Sheet 盖着，先关 Sheet 再开弹窗
           const start = courseViewFor?.startAt
-          openCreate(start, { studentId, groupId })
+          setCourseViewFor(null)
+          requestAnimationFrame(() => openCreate(start, { studentId, groupId }))
         }}
         onToggleDone={(c) => toggleDone(c)}
         onBatchComplete={(courses) => {
