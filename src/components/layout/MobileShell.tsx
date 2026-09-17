@@ -65,25 +65,30 @@ export default function MobileShell({ children }: { children: ReactNode }) {
       {moreOpen && (
         <>
           <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setMoreOpen(false)} />
+          {/*
+            「更多」面板：一行放下全部入口的紧凑浮层。
+            ⚠ 不要改回「贴底通栏大面板」：4 列 5 项会多出一行只放 1 项，
+            面板高度翻倍且视觉上占了半屏（2026-09-17 用户反馈「占比超过一半」）。
+            现在 5 列单行 + 浮在 Tab 栏之上，高度约 70px。
+          */}
           <div
             role="dialog"
             aria-modal="true"
-            className="fixed inset-x-0 bottom-0 z-50 rounded-t-2xl border-t border-line-1 bg-surface-0 px-2 pb-safe shadow-2xl"
+            className="fixed inset-x-2 bottom-[calc(env(safe-area-inset-bottom)+4.5rem)] z-50 rounded-2xl border border-line-1 bg-surface-0 p-1.5 shadow-2xl"
           >
-            <div className="mx-auto mb-1 mt-2 h-1 w-10 rounded-full bg-line-1" />
-            <div className="grid grid-cols-4 gap-1 p-2">
+            <div className="grid grid-cols-5 gap-0.5">
               {MORE_ITEMS.map((item) => (
                 <NavLink
                   key={item.to}
                   to={item.to}
                   className={({ isActive }) =>
                     cn(
-                      'flex flex-col items-center gap-1.5 rounded-xl px-2 py-3 text-[12px] transition-colors',
+                      'flex flex-col items-center gap-1 rounded-xl px-1 py-2 text-[11px] transition-colors',
                       isActive ? 'bg-accent-soft text-accent-text' : 'text-text-2 active:bg-surface-1',
                     )
                   }
                 >
-                  <item.icon size={22} strokeWidth={1.8} />
+                  <item.icon size={20} strokeWidth={1.8} />
                   <span>{item.label}</span>
                 </NavLink>
               ))}

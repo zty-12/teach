@@ -66,7 +66,7 @@ import type {
 import { CHECKIN_STATUS_LABEL } from '@/lib/types'
 import { useSettings } from '@/store/useSettings'
 import { generateCheckInFeedback, isAiConfigured, LlmError } from '@/lib/llm'
-import { getOrRefreshProfileForFeedback } from '@/lib/studentProfile'
+import { getOrRefreshProfileForFeedback, getProfileSnapshot, type ProfileSnapshot } from '@/lib/studentProfile'
 import ClassPointsView from '@/components/ClassPointsView'
 import RuleLibraryView from '@/components/RuleLibraryView'
 import { RuleChips, RulePicker } from '@/components/RulePicker'
@@ -1048,10 +1048,18 @@ function DayNoteDrawer({
 }
 
 /**
+ * 生成反馈时最多愿意等待「后台画像刷新」的时间（ms）。
+ *
+ * 画像刷新在弹窗打开时就并发启动了，正常情况下老师写完备注时它早已返回；
+ * 这里给一个硬上限，避免首次建档（无画像）时被迫串行等第二次 LLM 往返。
+ */
+const PROFILE_WAIT_MS = 1500
+
+/**
  * 快速备注弹窗：完成打卡后自动弹出，针对单日记录。
  * 内容可同步作为学习报告的数据源（写入 CheckInRecord.note）。
  * 支持 AI 根据备注生成面向家长的反馈（写入 CheckInRecord.aiFeedback）。
- * 生成时自动读取该学生的历史画像（若画像 <24h 则复用，否则刷新），
+ * 生成时自动读取该学生的历史画像（弹窗打开即并行准备；超过 72h 才会真正刷新），
  * 让每次反馈都针对该学生个性化，而不是每次都一模一样。
  */
 function QuickNoteModal({
@@ -1080,11 +1088,27 @@ function QuickNoteModal({
   const [aiFeedback, setAiFeedback] = useState(existingAiFeedback)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState('')
+  const [aiElapsed, setAiElapsed] = useState(0)
   const [copied, setCopied] = useState(false)
   const [profileLoading, setProfileLoading] = useState(false)
-  const [profileSnapshot, setProfileSnapshot] = useState<
-    { summary: string; strengths: string; weaknesses: string; teachingStyle: string; profileUpdatedAt: number; sourceCount: number } | null
-  >(null)
+  const [profileSnapshot, setProfileSnapshot] = useState<ProfileSnapshot | null>(null)
+  // 后台画像刷新 promise 的引用：生成反馈时复用它，避免重复发起第二次画像请求
+  const profilePromiseRef = useRef<Promise<ProfileSnapshot | undefined> | null>(null)
+  // 与 profileSnapshot 同步的镜像，供异步函数读取最新值（state 闭包会读到旧值）
+  const profileSnapshotRef = useRef<ProfileSnapshot | null>(null)
+  const applyProfile = (p: ProfileSnapshot | null) => {
+    profileSnapshotRef.current = p
+    setProfileSnapshot(p)
+  }
+
+  // 生成耗时计时：让等待可感知（模型慢时至少知道还在跑，而不是「卡住了」）
+  useEffect(() => {
+    if (!aiLoading) return
+    const t0 = Date.now()
+    setAiElapsed(0)
+    const timer = setInterval(() => setAiElapsed(Math.round((Date.now() - t0) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [aiLoading])
 
   // 解析本次打卡对应的任务内容（优先固化快照，回退关联任务），供 AI 生成备注时判断完成度
   const taskContext = useMemo(() => {
@@ -1099,14 +1123,26 @@ function QuickNoteModal({
 
   const aiReady = isAiConfigured(settings) && text.trim().length >= 5
 
-  // 弹窗打开时静默加载该学生画像（不阻塞 UI，只是让 AI 生成时更有针对性）
+  // 弹窗打开即并行准备画像（v31.4）：
+  //   ① 先本地读一次（毫秒级，不联网），让「生成」立刻就有画像可用；
+  //   ② 再后台按需刷新（超 72h 才真调 AI）——与老师写备注的时间重叠，
+  //      不再等它返回才生成反馈（旧实现会在点击时串行等第二次 LLM 往返）。
   useEffect(() => {
     if (!studentId || !isAiConfigured(settings)) return
     let cancelled = false
     setProfileLoading(true)
-    void getOrRefreshProfileForFeedback(settings, studentId, studentName)
+    void getProfileSnapshot(studentId)
       .then((p) => {
-        if (!cancelled) setProfileSnapshot(p ?? null)
+        if (!cancelled && p) applyProfile(p)
+      })
+      .catch(() => {
+        /* 本地读取失败不影响主流程 */
+      })
+    const pr = getOrRefreshProfileForFeedback(settings, studentId, studentName)
+    profilePromiseRef.current = pr
+    void pr
+      .then((p) => {
+        if (!cancelled && p) applyProfile(p)
       })
       .catch(() => {
         /* 画像加载失败不影响主流程 */
@@ -1126,12 +1162,26 @@ function QuickNoteModal({
     setAiLoading(true)
     setAiError('')
     try {
-      // 若之前预加载失败，再补一次尝试（同步阻塞，确保本次反馈用到画像）
-      const snapshot =
-        profileSnapshot ??
-        (await getOrRefreshProfileForFeedback(settings, studentId, studentName).catch(() => undefined))
-      if (snapshot) setProfileSnapshot(snapshot)
-      const fb = await generateCheckInFeedback(settings, text, studentName, snapshot, taskContext)
+      let snapshot = profileSnapshotRef.current
+      if (!snapshot) {
+        const pending = profilePromiseRef.current
+        if (pending) {
+          // 后台刷新已在跑，最多再等 PROFILE_WAIT_MS：它本来就并发进行着，
+          // 等待不会额外多出一次请求；超时则直接生成，绝不为了画像串行等第二次 LLM。
+          snapshot =
+            (await Promise.race([
+              pending.catch(() => undefined),
+              new Promise<undefined>((resolve) => {
+                setTimeout(() => resolve(undefined), PROFILE_WAIT_MS)
+              }),
+            ])) ?? null
+        } else {
+          // 预加载没跑（AI 刚配置好等场景）：只读本地，不联网
+          snapshot = await getProfileSnapshot(studentId).catch(() => null)
+        }
+      }
+      if (snapshot) applyProfile(snapshot)
+      const fb = await generateCheckInFeedback(settings, text, studentName, snapshot ?? undefined, taskContext)
       setAiFeedback(fb)
     } catch (e) {
       setAiError(e instanceof LlmError ? e.message : `AI 生成失败：${String(e)}`)
@@ -1227,7 +1277,7 @@ function QuickNoteModal({
               ) : (
                 <Sparkles size={13} />
               )}
-              {aiLoading ? '生成中…' : 'AI 生成家长反馈'}
+              {aiLoading ? `生成中… ${aiElapsed}s` : 'AI 生成家长反馈'}
             </Button>
           )}
         </div>

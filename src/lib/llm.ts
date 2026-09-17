@@ -1813,6 +1813,14 @@ export interface StudentProfileSnapshot {
   sourceCount: number
 }
 
+/** 画像各字段塞进 prompt 前的截断长度（v31.4：控制输入 token，缩短预填耗时） */
+const PROMPT_CLIP = { summary: 120, strengths: 70, weaknesses: 70, style: 50, taskTitle: 40, taskNote: 120 }
+
+function clipText(s: string | undefined, n: number): string {
+  const t = (s ?? '').trim()
+  return t.length > n ? `${t.slice(0, n)}…` : t
+}
+
 /** 根据打卡备注生成给家长看的反馈（用于 CheckIn QuickNoteModal） */
 export async function generateCheckInFeedback(
   settings: AppSettings,
@@ -1824,10 +1832,10 @@ export async function generateCheckInFeedback(
   const profileBlock = profile && (profile.summary || profile.strengths || profile.weaknesses || profile.teachingStyle)
     ? `
 【该学员历史画像（AI 从过往打卡反馈汇总）】
-- 综合特征：${profile.summary || '（暂无）'}
-- 优势亮点：${profile.strengths || '（暂无）'}
-- 待改进点：${profile.weaknesses || '（暂无）'}
-- 推荐教学方式：${profile.teachingStyle || '（暂无）'}
+- 综合特征：${clipText(profile.summary, PROMPT_CLIP.summary) || '（暂无）'}
+- 优势亮点：${clipText(profile.strengths, PROMPT_CLIP.strengths) || '（暂无）'}
+- 待改进点：${clipText(profile.weaknesses, PROMPT_CLIP.weaknesses) || '（暂无）'}
+- 推荐教学方式：${clipText(profile.teachingStyle, PROMPT_CLIP.style) || '（暂无）'}
 - 画像基于 ${profile.sourceCount} 条历史素材（更新于 ${new Date(profile.profileUpdatedAt).toLocaleDateString('zh-CN')}）
 
 请结合以上画像撰写个性化反馈：
@@ -1840,8 +1848,8 @@ export async function generateCheckInFeedback(
   const taskBlock = task && (task.title || task.note)
     ? `
 【本次打卡对应的任务】
-- 任务名称：${task.title || '（未命名）'}
-${task.note ? `- 任务要求：${task.note}` : ''}
+- 任务名称：${clipText(task.title, PROMPT_CLIP.taskTitle) || '（未命名）'}
+${task.note ? `- 任务要求：${clipText(task.note, PROMPT_CLIP.taskNote)}` : ''}
 ${task.cadenceLabel ? `- 打卡节奏：${task.cadenceLabel}` : ''}
 
 请结合任务要求判断学员完成情况：1) 是否达成了任务目标；2) 反馈里点明"完成了任务的哪一部分"或"还差哪里"；3) 家庭练习建议尽量贴合任务要求。`
@@ -1852,7 +1860,7 @@ ${task.cadenceLabel ? `- 打卡节奏：${task.cadenceLabel}` : ''}
       role: 'system' as const,
       content:
         '你是一位资深学科教师。根据老师对学员打卡视频的简短记录，生成一段面向家长的自然、温暖、具体的反馈。' +
-        '要求：1) 语气亲切但专业；2) 先肯定表现，再指出可改进点（如有）；3) 给出 1-2 条可操作的家庭练习建议；4) 200 字以内；5) 直接输出反馈正文，不要加标题或前缀。' +
+        '要求：1) 语气亲切但专业；2) 先肯定表现，再指出可改进点（如有）；3) 给出 1-2 条可操作的家庭练习建议；4) 160-180 字，不要超长；5) 直接输出反馈正文，不要加标题或前缀。' +
         (profileBlock
           ? '注意：本次反馈必须结合【学员历史画像】做个性化处理，避免"每次反馈都长得一样"。'
           : '') +
