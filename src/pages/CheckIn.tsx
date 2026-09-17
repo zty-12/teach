@@ -348,7 +348,10 @@ function TasksView({
                   onClick={() => void recomputeTaskPoints(activeTask.id)}
                   title="按当前规则重算一次积分"
                 >
-                  <Sparkles size={13} /> 重算积分
+                  <Sparkles size={13} />
+                  {/* 手机端收窄按钮文案，把宽度让给被截断的卡片标题 */}
+                  <span className="md:hidden">重算</span>
+                  <span className="hidden md:inline">重算积分</span>
                 </Button>
                 <Button size="sm" variant="ghost" onClick={() => setActiveTaskId(null)}>
                   关闭
@@ -725,24 +728,31 @@ function CheckInMatrix({
 
   return (
     <div className="max-h-[60vh] overflow-auto">
+      {/* ⚠ 移动端（<768px）宽度预算（卡片内容宽 ≈ 视口 - 34px，360px 机型只有 ~326px）：
+          学生列(≈100) + 天数×36 + 备注列(≈46) 必须塞得下。曾经「挤」的根因有两个：
+          1) 日期表头里那行重复的任务名 max-w-[64px] 把每列撑到 ~76px，3 天就吃掉 228px，
+             加上 sticky 右列叠加后必然溢出 → 右列「备注」压住了「完成率」文字；
+          2) 各列 px-2 / py-1.5 在手机上过肥。
+          现在：任务名只在 md+ 显示；完成率列手机端收起（数字挪到学生名字右侧）；
+          sticky 列加内分隔线，横向滚动时才有视觉边界。 */}
       <table className="w-full border-collapse text-[12px]">
         <thead>
           <tr>
-            <th className="sticky left-0 z-10 border-b border-line-1 bg-surface-1 px-2 py-2 text-left font-medium text-text-2">
+            <th className="sticky left-0 z-10 whitespace-nowrap border-b border-r border-line-1 bg-surface-1 px-1.5 py-2 text-left font-medium text-text-2 md:px-2">
               学生
             </th>
             {days.map((d) => (
               <th
                 key={d}
-                className="border-b border-line-1 px-1.5 py-2 text-center font-medium text-text-2"
+                className="whitespace-nowrap border-b border-line-1 px-1 py-2 text-center font-medium text-text-2 md:px-1.5"
               >
-                <div>{format(d, 'M/d')}</div>
+                <div className="tabular-nums">{format(d, 'M/d')}</div>
                 <div className="text-[10px] font-normal text-text-3">
                   {format(d, 'EEE')}
                 </div>
                 {(task.title || task.cadenceLabel) && (
                   <div
-                    className="mx-auto mt-1 max-w-[64px] truncate text-[9px] font-normal leading-tight text-text-3"
+                    className="mx-auto mt-1 hidden max-w-[64px] truncate text-[9px] font-normal leading-tight text-text-3 md:block"
                     title={task.title || task.cadenceLabel}
                   >
                     {task.title || task.cadenceLabel}
@@ -750,10 +760,10 @@ function CheckInMatrix({
                 )}
               </th>
             ))}
-            <th className="border-b border-line-1 px-2 py-2 text-center font-medium text-text-2">
+            <th className="hidden whitespace-nowrap border-b border-line-1 px-2 py-2 text-center font-medium text-text-2 md:table-cell">
               完成率
             </th>
-            <th className="sticky right-0 z-10 border-b border-line-1 bg-surface-1 px-2 py-2 text-center font-medium text-text-2">
+            <th className="sticky right-0 z-10 whitespace-nowrap border-b border-l border-line-1 bg-surface-1 px-1.5 py-2 text-center font-medium text-text-2 md:px-2">
               备注
             </th>
           </tr>
@@ -765,16 +775,22 @@ function CheckInMatrix({
             const notesCount = noteCountOf(sid)
             return (
               <tr key={sid} className="border-b border-line-1 last:border-0">
-                <td className="sticky left-0 z-10 bg-surface-0 px-2 py-1.5">
-                  <div className="flex items-center gap-2">
+                <td className="sticky left-0 z-10 border-r border-line-1 bg-surface-0 px-1.5 py-1 md:px-2 md:py-1.5">
+                  <div className="flex items-center gap-1.5 md:gap-2">
                     <Avatar
                       name={studentMap.get(sid)?.name ?? '?'}
                       colorSlot={studentMap.get(sid)?.colorSlot ?? 0}
                       size="sm"
                     />
-                    <span className="truncate font-medium text-text-1">
-                      {studentMap.get(sid)?.name ?? '已删学生'}
-                    </span>
+                    <div className="flex min-w-0 items-center gap-1">
+                      <span className="max-w-[64px] truncate text-[12px] font-medium text-text-1 md:max-w-none">
+                        {studentMap.get(sid)?.name ?? '已删学生'}
+                      </span>
+                      {/* 手机端没有「完成率」列，把 x/y 缩到名字右侧，省一整列宽度 */}
+                      <span className="shrink-0 text-[10px] tabular-nums text-text-3 md:hidden">
+                        {dones}/{days.length}
+                      </span>
+                    </div>
                   </div>
                 </td>
                 {days.map((d) => {
@@ -782,7 +798,7 @@ function CheckInMatrix({
                   const status: CheckInStatus = rec?.status ?? 'pending'
                   const noteText = rec?.note ?? ''
                   return (
-                    <td key={d} className="px-1.5 py-1.5 text-center">
+                    <td key={d} className="whitespace-nowrap px-1 py-1 text-center md:px-1.5 md:py-1.5">
                       {rec ? (
                         <div className="flex flex-col items-center gap-1">
                           <button
@@ -809,7 +825,7 @@ function CheckInMatrix({
                               }
                             }}
                             className={cn(
-                              'relative mx-auto flex h-6 w-6 items-center justify-center rounded-md border transition-colors',
+                              'relative mx-auto flex h-7 w-7 items-center justify-center rounded-md border transition-colors md:h-6 md:w-6',
                               status === 'done' &&
                                 'border-done bg-done-soft text-done',
                               status === 'missed' &&
@@ -858,10 +874,10 @@ function CheckInMatrix({
                     </td>
                   )
                 })}
-                <td className="px-2 py-1.5 text-center text-[11px] text-text-2">
+                <td className="hidden whitespace-nowrap px-2 py-1.5 text-center text-[11px] tabular-nums text-text-2 md:table-cell">
                   {dones}/{days.length}
                 </td>
-                <td className="sticky right-0 z-10 bg-surface-0 px-2 py-1.5 text-center">
+                <td className="sticky right-0 z-10 border-l border-line-1 bg-surface-0 px-1.5 py-1 text-center md:px-2 md:py-1.5">
                   <button
                     type="button"
                     onClick={() =>
@@ -876,14 +892,23 @@ function CheckInMatrix({
                         : '添加每日备注'
                     }
                     className={cn(
-                      'inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[11px] transition-colors',
+                      'inline-flex h-7 items-center justify-center gap-1 rounded-md border px-1.5 text-[11px] transition-colors md:h-6',
+                      notesCount === 0 && 'w-7 md:w-auto',
                       notesCount > 0
                         ? 'border-accent bg-accent-soft text-accent-text'
                         : 'border-line-1 text-text-3 hover:border-accent hover:text-accent',
                     )}
                   >
                     <Sparkles size={11} />
-                    {notesCount > 0 ? `${notesCount} 条` : '备注'}
+                    {/* 手机端只留条数（省宽），桌面端保留「3 条 / 备注」文案 */}
+                    {notesCount > 0 ? (
+                      <>
+                        <span className="tabular-nums">{notesCount}</span>
+                        <span className="hidden md:inline">条</span>
+                      </>
+                    ) : (
+                      <span className="hidden md:inline">备注</span>
+                    )}
                   </button>
                 </td>
               </tr>
@@ -891,9 +916,14 @@ function CheckInMatrix({
           })}
         </tbody>
       </table>
-      <p className="px-3 py-2 text-[11px] text-text-3">
-        点击格子切换状态：未打卡 → 已打卡 → 未通过。任意一天均可补卡并自动更新积分。
-        点「备注」可记录当天打卡视频暴露的问题（按天保存）。
+      <p className="px-3 py-2 text-[11px] leading-relaxed text-text-3">
+        <span className="md:hidden">
+          点格子切换状态（未打卡 → 已打卡 → 未通过），任意一天可补卡；点「备注」记录当天问题。
+        </span>
+        <span className="hidden md:inline">
+          点击格子切换状态：未打卡 → 已打卡 → 未通过。任意一天均可补卡并自动更新积分。
+          点「备注」可记录当天打卡视频暴露的问题（按天保存）。
+        </span>
       </p>
       {noteFor && (
         <DayNoteDrawer
