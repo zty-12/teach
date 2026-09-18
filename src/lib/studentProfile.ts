@@ -177,7 +177,8 @@ export async function refreshStudentProfile(
   if (!isAiConfigured(settings)) return null
 
   const messages = buildProfilePrompt(studentName, history)
-  const raw = await chat(cfgFromSettings(settings), messages, true)
+  // 画像输出含 summary + 两组要点 + 教学建议，800 token 足够；设上限避免模型写超长拖时间
+  const raw = await chat(cfgFromSettings(settings), messages, true, { maxTokens: 800 })
   const parsed = extractJson<ProfileJsonOutput>(raw)
 
   const existing = await getStudentProfile(studentId)

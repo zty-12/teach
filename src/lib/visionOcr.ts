@@ -143,15 +143,21 @@ export async function visionRecognizePage(
   cfg: LlmConfig,
   pageDataUrl: string,
 ): Promise<string> {
-  const text = await chat(cfg, [
-    {
-      role: 'user',
-      content: [
-        { type: 'text', text: VISION_PROMPT },
-        { type: 'image_url', image_url: { url: pageDataUrl, detail: 'high' } },
-      ],
-    },
-  ])
+  const text = await chat(
+    cfg,
+    [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: VISION_PROMPT },
+          { type: 'image_url', image_url: { url: pageDataUrl, detail: 'high' } },
+        ],
+      },
+    ],
+    false,
+    // OCR 要完整读出整页文字，上限给足（3000）；设上限只为挡住模型额外的解释性输出
+    { maxTokens: 3000 },
+  )
   return text.trim()
 }
 
