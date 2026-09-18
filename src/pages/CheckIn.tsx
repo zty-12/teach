@@ -33,6 +33,7 @@ import {
   Textarea,
 } from '@/components/ui'
 import { cn } from '@/lib/utils'
+import { buildBalanceSections, buildStudentGroupMap, NO_GROUP_SCOPE } from '@/lib/pointBalanceGroups'
 import { Avatar } from '@/components/Avatar'
 import {
   adjustPoints,
@@ -159,6 +160,8 @@ export default function CheckInPage() {
           redemptions={liveRedemptions}
           studentMap={sMap}
           ledgers={(ledgers ?? []).filter((l) => !l.deletedAt)}
+          groups={Array.from(gMap.values())}
+          groupMembers={(groupMembers ?? []).filter((m) => !m.deletedAt)}
         />
       )}
     </div>
@@ -1635,15 +1638,21 @@ function MarketView({
   redemptions,
   studentMap,
   ledgers,
+  groups,
+  groupMembers,
 }: {
   rewardItems: RewardItem[]
   redemptions: Redemption[]
   studentMap: Map<string, Student>
   ledgers: import('@/lib/types').PointLedger[]
+  groups: Group[]
+  groupMembers: GroupMember[]
 }) {
   const [newOpen, setNewOpen] = useState(false)
   const [editing, setEditing] = useState<RewardItem | null>(null)
   const [search, setSearch] = useState('')
+  /** 余额查看范围：'' = 全部班课（按班课分组展示）/ '__none__' = 未分班 / 其它 = 班课 id */
+  const [scope, setScope] = useState('')
   /** 正在兑换/核销中的记录或学生 id —— 防止连点重复扣分 / 重复退分 */
   const [busyId, setBusyId] = useState<string | null>(null)
   /** 打开「兑换」弹窗的目标学生（null = 关闭） */
@@ -1665,18 +1674,46 @@ function MarketView({
     return m
   }, [ledgers])
 
-  const sortedStudents = useMemo(() => {
-    const list = Array.from(studentMap.values())
+  // 班课按名称排序（与「班课」页的排序保持一致）
+  const sortedGroups = useMemo(
+    () => [...groups].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
+    [groups],
+  )
+
+  /**
+   * 学生 → 所属班课 id 列表（按班课显示顺序）。
+   * 用「成员关系」而非课程记录，保证与班课页的名单一致；
+   * 同一学生加入多个班课时会在每个班课里各出现一次（符合真实名单语义）。
+   */
+  const groupsOf = useMemo(
+    () => buildStudentGroupMap(groupMembers, sortedGroups),
+    [groupMembers, sortedGroups],
+  )
+
+  /** 全部学生 + 余额（余额降序）；搜索只过滤学生姓名 */
+  const allRows = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return Array.from(studentMap.values())
       .map((s) => ({
         student: s,
         balance: balances.get(s.id)?.balance ?? 0,
         earned: balances.get(s.id)?.earned ?? 0,
       }))
+      .filter((r) => !q || r.student.name.toLowerCase().includes(q))
       .sort((a, b) => b.balance - a.balance)
-    const q = search.trim().toLowerCase()
-    if (!q) return list
-    return list.filter((x) => x.student.name.toLowerCase().includes(q))
   }, [studentMap, balances, search])
+
+  /** 当前范围下的名单，并按班课分节（选中单个班课时只有一节） */
+  const sections = useMemo(
+    () => buildBalanceSections(allRows, groupsOf, sortedGroups, scope),
+    [allRows, groupsOf, sortedGroups, scope],
+  )
+
+  /** 下拉里「未分班」的人数（只算没进任何班课的在读学生） */
+  const noneCount = useMemo(
+    () => Array.from(studentMap.values()).filter((s) => (groupsOf.get(s.id) ?? []).length === 0).length,
+    [studentMap, groupsOf],
+  )
 
   async function handleDelete(r: RewardItem) {
     if (!confirm(`删除奖励项「${r.name}」？`)) return
@@ -1869,54 +1906,95 @@ function MarketView({
         />
       </Card>
 
-      {/* 积分余额排行 */}
+      {/* 积分余额（按班课划分，可单独查看某个班课） */}
       <Card>
-        <CardHeader title="积分余额" subtitle={`${sortedStudents.length} 名在读学生`} />
-        <div className="border-b border-line-1 px-3 py-2">
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-3" />
-            <Input
-              className="pl-9"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜索学生"
-            />
+        <CardHeader
+          title="积分余额"
+          subtitle={
+            scope
+              ? `${sections.total} 人 · ${sections.list[0]?.name ?? '班课'}`
+              : `${sections.total} 名学生 · ${sections.list.filter((s) => s.key !== NO_GROUP_SCOPE).length} 个班课`
+          }
+        />
+        <div className="space-y-2 border-b border-line-1 px-3 py-2">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_200px]">
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-3" />
+              <Input
+                className="pl-9"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="搜索学生"
+              />
+            </div>
+            <Select value={scope} onChange={(e) => setScope(e.target.value)} title="按班课查看">
+              <option value="">全部班课</option>
+              {sortedGroups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+              {noneCount > 0 && <option value={NO_GROUP_SCOPE}>未分班（{noneCount} 人）</option>}
+            </Select>
           </div>
+          {sortedGroups.length === 0 && noneCount > 0 && (
+            <p className="text-[11px] text-text-3">
+              还没有班课。去「班课」页建一个班课并加入学生后，这里就能按班课查看余额。
+            </p>
+          )}
         </div>
-        {sortedStudents.length === 0 ? (
+        {sections.total === 0 ? (
           <EmptyState
             icon={<Award size={22} />}
-            title="暂无学生积分"
-            description="设置基础分规则后开始打卡就会产生"
+            title={scope && scope !== NO_GROUP_SCOPE ? '该班课暂无学生' : '暂无学生积分'}
+            description={
+              scope && scope !== NO_GROUP_SCOPE
+                ? '可在「班课」页把学生加入这个班课'
+                : '设置基础分规则后开始打卡就会产生'
+            }
           />
         ) : (
-          <ul className="max-h-[600px] divide-y divide-line-1 overflow-y-auto">
-            {sortedStudents.map(({ student, balance, earned }, idx) => (
-              <li key={student.id} className="flex items-center gap-2 px-3 py-2">
-                <span className="w-6 text-center text-xs font-medium text-text-3">
-                  {idx + 1}
-                </span>
-                <Avatar
-                  name={student.name}
-                  colorSlot={student.colorSlot}
-                  size="sm"
-                />
-                <span className="min-w-0 flex-1 truncate text-sm text-text-1">
-                  {student.name}
-                </span>
-                <Badge variant="primary">余额 {balance}</Badge>
-                <span className="text-[11px] text-text-3">+{earned}</span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={!!busyId}
-                  onClick={() => setRedeemFor(student)}
-                >
-                  兑换
-                </Button>
-              </li>
+          <div className="max-h-[600px] overflow-y-auto">
+            {sections.list.map((sec) => (
+              <div key={sec.key}>
+                {!scope && (
+                  <div className="flex items-center justify-between gap-2 border-b border-line-1 bg-surface-1 px-3 py-1.5">
+                    <span className="truncate text-[11px] font-medium text-text-2">{sec.name}</span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-text-3">
+                      {sec.rows.length} 人
+                    </span>
+                  </div>
+                )}
+                <ul className="divide-y divide-line-1">
+                  {sec.rows.map(({ student, balance, earned }, idx) => (
+                    <li key={student.id} className="flex items-center gap-2 px-3 py-2">
+                      <span className="w-6 text-center text-xs font-medium text-text-3">
+                        {idx + 1}
+                      </span>
+                      <Avatar
+                        name={student.name}
+                        colorSlot={student.colorSlot}
+                        size="sm"
+                      />
+                      <span className="min-w-0 flex-1 truncate text-sm text-text-1">
+                        {student.name}
+                      </span>
+                      <Badge variant="primary">余额 {balance}</Badge>
+                      <span className="hidden text-[11px] text-text-3 md:inline">+{earned}</span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={!!busyId}
+                        onClick={() => setRedeemFor(student)}
+                      >
+                        兑换
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ))}
-          </ul>
+          </div>
         )}
       </Card>
     </div>

@@ -45,6 +45,7 @@ import {
   type ImportStrategy,
 } from '@/lib/fileImport'
 import { BatchRunner, BatchCancelledError } from '@/lib/batchRunner'
+import { runPool } from '@/lib/pagePool'
 import type {
   ImportedDocClassification,
   ImportedUnit,
@@ -1398,14 +1399,16 @@ async function persistClassification(
   return { units: unitCount, points: pointCount, summaryQueued: jobs.length }
 }
 
-// 后台逐条生成 AI 摘要并回写。单条失败只跳过（用户稍后可在知识点详情里手动「AI 摘要」）。
+// 后台生成 AI 摘要并回写。单条失败只跳过（用户稍后可在知识点详情里手动「AI 摘要」）。
 async function summarizeInBackground(
   settings: AppSettings,
   jobs: Array<{ id: string; title: string; content: string }>,
   onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
-  for (let i = 0; i < jobs.length; i++) {
-    const job = jobs[i]
+  // v31.5：改为 2 路并发 —— 原来完全串行，几十条知识点要等好几分钟。
+  // 任务内部已 try/catch，不会让 runPool 提前中断；单条失败也不影响其它条目。
+  let done = 0
+  await runPool(jobs, 2, async (job) => {
     try {
       const summary = await summarizeImportedPoint(settings, job.title, job.content)
       if (summary) {
@@ -1414,9 +1417,11 @@ async function summarizeInBackground(
       }
     } catch {
       /* 单条失败不阻塞后续条目 */
+    } finally {
+      done += 1
+      onProgress?.(done, jobs.length)
     }
-    onProgress?.(i + 1, jobs.length)
-  }
+  })
 }
 
 // ============================================================

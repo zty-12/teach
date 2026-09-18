@@ -407,6 +407,16 @@ function ReportPanel({
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState('')
   const [saved, setSaved] = useState(false)
+  /** AI 已等待秒数：让等待可感知（v31.5） */
+  const [aiElapsed, setAiElapsed] = useState(0)
+
+  useEffect(() => {
+    if (!aiLoading) return
+    const t0 = Date.now()
+    setAiElapsed(0)
+    const timer = setInterval(() => setAiElapsed(Math.round((Date.now() - t0) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [aiLoading])
 
   // 切换学生/周期/已有报告时载入内容
   useEffect(() => {
@@ -602,7 +612,7 @@ function ReportPanel({
                 ) : (
                   <Sparkles size={15} />
                 )}
-                {aiLoading ? '生成中' : 'AI 生成'}
+                {aiLoading ? `生成中 ${aiElapsed}s` : 'AI 生成'}
               </Button>
               <Button variant="primary" onClick={() => void handleSave()}>
                 {existingReport ? '更新' : '保存'}

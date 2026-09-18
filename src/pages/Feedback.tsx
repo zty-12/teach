@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { format } from 'date-fns'
 import {
@@ -329,6 +329,16 @@ function FeedbackModal({
   const [templateId, setTemplateId] = useState<string | null>(null)
   const [selectedKps, setSelectedKps] = useState<Set<string>>(new Set())
   const [recommending, setRecommending] = useState(false)
+  /** 生成 / 推荐已等待秒数：让「AI 在跑」可感知（v31.5） */
+  const [aiElapsed, setAiElapsed] = useState(0)
+  const [recommendElapsed, setRecommendElapsed] = useState(0)
+  /**
+   * 知识点推荐的缓存与在途请求（v31.5 提速）。
+   * 弹窗打开后会静默预热一次，老师点「AI 推荐」时命中缓存 → 0 等待；
+   * 同时复用「在途 promise」，连点也不会重复发起请求。
+   */
+  const recommendCacheRef = useRef<{ key: string; ids: string[] } | null>(null)
+  const recommendInFlightRef = useRef<{ key: string; promise: Promise<string[]> } | null>(null)
   /** 保存中锁：防止双击写入两条同课程的反馈（v26 审查：P2） */
   const [saving, setSaving] = useState(false)
 
@@ -362,6 +372,23 @@ function FeedbackModal({
       setSelectedKps(new Set(await getCourseKnowledgeIds(course.id)))
     })()
   }, [open, course?.id])
+
+  // AI 耗时计时：让「正在生成」可感知（模型慢时至少知道还在跑，而不是卡住了）
+  useEffect(() => {
+    if (!aiLoading) return
+    const t0 = Date.now()
+    setAiElapsed(0)
+    const timer = setInterval(() => setAiElapsed(Math.round((Date.now() - t0) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [aiLoading])
+
+  useEffect(() => {
+    if (!recommending) return
+    const t0 = Date.now()
+    setRecommendElapsed(0)
+    const timer = setInterval(() => setRecommendElapsed(Math.round((Date.now() - t0) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [recommending])
 
   const liveTextbooks = (textbooks ?? []).filter((t) => !t.deletedAt)
   const liveUnits = (units ?? []).filter((u) => !u.deletedAt)
@@ -481,50 +508,90 @@ function FeedbackModal({
     })
   }
 
+  /**
+   * 组装「推荐知识点」所需的上下文与候选项（v31.5 抽出）。
+   * 预热与手动点击共用同一份构造逻辑，保证命中缓存时结果一致。
+   */
+  function buildRecommendInput() {
+    if (!course) return null
+    const recent = liveFeedbacks
+      .filter((f) => {
+        if (f.id === feedback?.id) return false
+        const c = coursesInRecent?.find((x) => x.id === f.courseId)
+        if (!c) return false
+        return c.studentId === course.studentId && c.groupId === course.groupId
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 5)
+      .map((f) => f.summary)
+      .filter(Boolean)
+    // 备注一并入 note
+    const recentNotes = (coursesInRecent ?? [])
+      .filter((c) => c.studentId === course.studentId && c.groupId === course.groupId)
+      .map((c) => c.note)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join('\n')
+    const candidates = liveKps.slice(0, 50).map((k) => {
+      const u = liveUnits.find((x) => x.id === k.unitId)
+      const t = liveTextbooks.find((x) => x.id === k.textbookId)
+      const path = [t?.name, u?.name].filter(Boolean).join(' · ')
+      return { id: k.id, title: k.title, path, summary: k.summary }
+    })
+    if (candidates.length === 0) return null
+    return {
+      candidates,
+      ctx: {
+        who: courseTitle,
+        subject: course.subject,
+        timeText: format(course.startAt, 'M-d HH:mm'),
+        note: [course.note, recentNotes].filter(Boolean).join('\n'),
+        recentFeedbacks: recent,
+      },
+      // 课程 / 备注 / 候选规模变了就重新推荐，否则沿用缓存
+      key: `${course.id}|${course.updatedAt}|${course.note}|${candidates.length}|${recent.length}`,
+    }
+  }
+
+  /** 取推荐结果：命中缓存立即返回；有在途请求则复用；否则才发起一次 LLM */
+  function ensureRecommend(): Promise<string[]> {
+    const input = buildRecommendInput()
+    if (!input) return Promise.resolve([])
+    if (recommendCacheRef.current?.key === input.key) {
+      return Promise.resolve(recommendCacheRef.current.ids)
+    }
+    const inFlight = recommendInFlightRef.current
+    if (inFlight && inFlight.key === input.key) return inFlight.promise
+    const promise = recommendKnowledgePoints(aiSettings, input.ctx, input.candidates)
+      .then((ids) => {
+        recommendCacheRef.current = { key: input.key, ids }
+        return ids
+      })
+      .finally(() => {
+        if (recommendInFlightRef.current?.promise === promise) recommendInFlightRef.current = null
+      })
+    recommendInFlightRef.current = { key: input.key, promise }
+    return promise
+  }
+
   async function handleAiRecommend() {
     if (!course) return
     if (!isAiConfigured(aiSettings)) {
       setAiError('尚未配置 AI。请在「设置 → AI 辅助」填入 Base URL 与 API Key。')
       return
     }
+    // 预热已拿到结果 → 直接应用，不再等一次 LLM
+    const input = buildRecommendInput()
+    const cached = recommendCacheRef.current
+    if (input && cached && cached.key === input.key) {
+      setAiError('')
+      setSelectedKps(new Set(cached.ids))
+      return
+    }
     setRecommending(true)
     setAiError('')
     try {
-      const recent = liveFeedbacks
-        .filter((f) => {
-          if (f.id === feedback?.id) return false
-          const c = coursesInRecent?.find((x) => x.id === f.courseId)
-          if (!c) return false
-          return c.studentId === course.studentId && c.groupId === course.groupId
-        })
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, 5)
-        .map((f) => f.summary)
-        .filter(Boolean)
-      // 备注一并入 note
-      const recentNotes = (coursesInRecent ?? [])
-        .filter((c) => c.studentId === course.studentId && c.groupId === course.groupId)
-        .map((c) => c.note)
-        .filter(Boolean)
-        .slice(0, 5)
-        .join('\n')
-      const candidates = liveKps.slice(0, 50).map((k) => {
-        const u = liveUnits.find((x) => x.id === k.unitId)
-        const t = liveTextbooks.find((x) => x.id === k.textbookId)
-        const path = [t?.name, u?.name].filter(Boolean).join(' · ')
-        return { id: k.id, title: k.title, path, summary: k.summary }
-      })
-      const ids = await recommendKnowledgePoints(
-        aiSettings,
-        {
-          who: courseTitle,
-          subject: course.subject,
-          timeText: format(course.startAt, 'M-d HH:mm'),
-          note: [course.note, recentNotes].filter(Boolean).join('\n'),
-          recentFeedbacks: recent,
-        },
-        candidates,
-      )
+      const ids = await ensureRecommend()
       setSelectedKps(new Set(ids))
     } catch (e) {
       setAiError(e instanceof LlmError ? e.message : `AI 推荐失败：${String(e)}`)
@@ -532,6 +599,21 @@ function FeedbackModal({
       setRecommending(false)
     }
   }
+
+  /**
+   * 预热：弹窗打开后静默跑一次知识点推荐（不覆盖老师已勾选的内容）。
+   * 把「等 5-10 秒」挪到老师看模板、准备写反馈的空档里执行；
+   * 点「AI 推荐」时大概率直接命中缓存 —— 0 等待。失败静默忽略，不影响手工勾选。
+   */
+  useEffect(() => {
+    if (!open || !course || !isAiConfigured(aiSettings)) return
+    const timer = setTimeout(() => {
+      void ensureRecommend().catch(() => {})
+    }, 500)
+    return () => clearTimeout(timer)
+    // 依赖弹窗 / 课程 / 知识库规模（知识库加载完才有候选项）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, course?.id, liveKps.length])
 
   // 取课程（只在最近推荐时用）
   const coursesInRecent = useLiveQuery(() => db.courses.toArray(), [])
@@ -702,10 +784,10 @@ function FeedbackModal({
               variant="ghost"
               onClick={() => void handleAiRecommend()}
               disabled={recommending}
-              title="根据课程信息 + 备注 + 历史反馈，让 AI 推荐本次可能涉及的知识点"
+              title="根据课程信息 + 备注 + 历史反馈，让 AI 推荐本次可能涉及的知识点（打开弹窗时已后台预热，点开通常秒出）"
             >
               {recommending ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
-              {recommending ? '推荐中…' : 'AI 推荐'}
+              {recommending ? `推荐中… ${recommendElapsed}s` : 'AI 推荐'}
             </Button>
             {selectedKps.size > 0 && (
               <Button size="sm" variant="ghost" onClick={() => setSelectedKps(new Set())}>
@@ -786,7 +868,7 @@ function FeedbackModal({
               ) : (
                 <Sparkles size={15} />
               )}
-              {aiLoading ? '生成中…' : template ? '按模板生成' : 'AI 生成'}
+              {aiLoading ? `生成中… ${aiElapsed}s` : template ? '按模板生成' : 'AI 生成'}
             </Button>
           </div>
         </div>

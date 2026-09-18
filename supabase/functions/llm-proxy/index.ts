@@ -70,6 +70,7 @@ Deno.serve(async (req) => {
     messages?: Array<{ role: string; content: string }>
     jsonMode?: boolean
     temperature?: number
+    maxTokens?: number
   }
   try {
     payload = await req.json()
@@ -77,7 +78,7 @@ Deno.serve(async (req) => {
     return json({ error: `Invalid JSON body: ${String(e)}` }, 400)
   }
 
-  const { baseUrl, apiKey, model, messages, jsonMode, temperature } = payload
+  const { baseUrl, apiKey, model, messages, jsonMode, temperature, maxTokens } = payload
   if (!baseUrl || !apiKey || !model || !Array.isArray(messages) || messages.length === 0) {
     return json({ error: "Missing required field: baseUrl, apiKey, model or messages" }, 400)
   }
@@ -119,6 +120,10 @@ Deno.serve(async (req) => {
     messages: resolvedMessages,
     temperature: typeof temperature === "number" ? temperature : 0.7,
   }
+  // 输出长度上限（新版前端会传；省略时不加，交给上游默认值）
+  if (typeof maxTokens === "number" && maxTokens > 0) {
+    body.max_tokens = Math.floor(maxTokens)
+  }
   if (jsonMode) {
     body.response_format = { type: "json_object" }
   }
@@ -140,6 +145,34 @@ Deno.serve(async (req) => {
     )
   }
 
+  // jsonMode 被上游 400 拒绝（不支持 response_format）时，在本函数内直接去掉该参数重试一次。
+  // 注意：这段必须放在 !upstream.ok 分支之前 —— 否则 400 会先被上面拦下直接返回，
+  // 前端只能自己再补一次完整往返（多一个 RTT + 一次网关调用）。
+  if (upstream.status === 400 && jsonMode) {
+    console.info("[llm-proxy] upstream rejected response_format, retrying without it")
+    const retryBody: Record<string, unknown> = {
+      model,
+      messages: resolvedMessages,
+      temperature: typeof temperature === "number" ? temperature : 0.7,
+    }
+    if (typeof maxTokens === "number" && maxTokens > 0) {
+      retryBody.max_tokens = Math.floor(maxTokens)
+    }
+    const retry = await fetch(upstreamUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(retryBody),
+    }).catch((e) => ({ ok: false, status: 502, text: async () => String(e) }))
+    if (retry.ok) {
+      const data = await retry.json().catch(() => null)
+      const content: string | undefined = data?.choices?.[0]?.message?.content
+      return json({ content: content ?? "" })
+    }
+  }
+
   if (!upstream.ok) {
     const text = await upstream.text().catch(() => "")
     let detail = text.slice(0, 500)
@@ -150,27 +183,6 @@ Deno.serve(async (req) => {
       /* keep raw */
     }
     return json({ error: detail, status: upstream.status }, upstream.status)
-  }
-
-  // jsonMode 被上游 400 时，降级重试一次
-  if (upstream.status === 400 && jsonMode) {
-    const retry = await fetch(upstreamUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: resolvedMessages,
-        temperature: typeof temperature === "number" ? temperature : 0.7,
-      }),
-    }).catch((e) => ({ status: 502, text: async () => String(e) }))
-    if (retry.ok) {
-      const data = await retry.json().catch(() => null)
-      const content: string | undefined = data?.choices?.[0]?.message?.content
-      return json({ content: content ?? "" })
-    }
   }
 
   const data = await upstream.json().catch(() => null)

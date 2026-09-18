@@ -72,6 +72,7 @@ export async function analyzeTemplateToFields(
       { role: 'user', content: `请分析下面这份课后反馈模板：\n\n${text.slice(0, 6000)}` },
     ],
     true,
+    { maxTokens: 700 },
   )
   return normalizeFields(raw)
 }
@@ -104,6 +105,7 @@ export async function analyzeTemplateImageToFields(
       },
     ],
     true,
+    { maxTokens: 900 },
   )
   return normalizeFields(raw)
 }
@@ -175,7 +177,8 @@ export function collectFieldMaterial(
     case 'knowledge': {
       if (ctx.knowledges.length === 0) return '（本次课未勾选知识点，请结合科目与课程内容概括）'
       return ctx.knowledges
-        .map((k, i) => `${i + 1}. ${k.title}${k.summary ? ` — ${k.summary.slice(0, 120)}` : ''}`)
+        .slice(0, 10)
+        .map((k, i) => `${i + 1}. ${k.title}${k.summary ? ` — ${k.summary.slice(0, 80)}` : ''}`)
         .join('\n')
     }
     case 'attendance': {
@@ -278,6 +281,7 @@ ${fieldBlocks}
       { role: 'user', content: user },
     ],
     true,
+    { maxTokens: 1000 },
   )
   return normalizeSections(raw, ordered)
 }

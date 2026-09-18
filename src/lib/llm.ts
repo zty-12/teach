@@ -95,13 +95,52 @@ async function fetchWithTimeout(
 }
 
 /**
+ * 「该上游不支持 response_format: json_object」的本地记忆（key = baseUrl|model）。
+ *
+ * 背景：不少 OpenAI 兼容服务（部分中转、商汤等）不认 response_format，收到就返回 400。
+ * 旧逻辑会先失败一次再降级重发 —— 每次 AI 调用都白白多一次往返（含网络 + 上游解析，
+ * 实测多花 0.5~3s，且这种 400 在限流时还会叠加退避）。记住后就直接走普通模式，
+ * 靠 prompt + extractJson 的容错解析兜底。
+ */
+const NO_JSON_FLAG_KEY = 'ew-llm-nojson'
+
+function noJsonKey(cfg: LlmConfig): string {
+  return `${cfg.baseUrl.trim().replace(/\/+$/, '')}|${cfg.model}`
+}
+
+function isJsonUnsupported(cfg: LlmConfig): boolean {
+  try {
+    return (localStorage.getItem(NO_JSON_FLAG_KEY) ?? '').split('\n').includes(noJsonKey(cfg))
+  } catch {
+    return false
+  }
+}
+
+function markJsonUnsupported(cfg: LlmConfig): void {
+  try {
+    const cur = localStorage.getItem(NO_JSON_FLAG_KEY) ?? ''
+    const key = noJsonKey(cfg)
+    const lines = cur.split('\n').filter(Boolean)
+    if (lines.includes(key)) return
+    lines.push(key)
+    // 只保留最近 8 条，避免无限增长
+    localStorage.setItem(NO_JSON_FLAG_KEY, lines.slice(-8).join('\n'))
+  } catch {
+    /* 隐私模式 / 存储不可用：忽略即可，不影响主流程 */
+  }
+}
+
+/**
  * 调用 LLM 的 chat completion。
  * jsonMode=true 时请求结构化 JSON 输出（部分服务商不支持，会兜底回退到普通模式重试）。
+ * opts.maxTokens：输出长度硬上限 —— 生成 token 数直接决定等待时长，
+ * 反馈 / 报告这类长文本场景显式设上限，能明显缩短等待，也避免模型自由发挥写超长。
  */
 export async function chat(
   cfg: LlmConfig,
   messages: ChatMessage[],
   jsonMode = false,
+  opts?: { maxTokens?: number },
 ): Promise<string> {
   const doRequest = async (withJson: boolean, viaDevProxy = false): Promise<
     | { ok: true; content: string }
@@ -112,6 +151,8 @@ export async function chat(
       messages,
       temperature: 0.7,
     }
+    const maxTokens = Math.floor(opts?.maxTokens ?? 0)
+    if (maxTokens > 0) body.max_tokens = maxTokens
     if (jsonMode && withJson) {
       body.response_format = { type: 'json_object' }
     }
@@ -163,10 +204,11 @@ export async function chat(
   }
 
   // 请求循环：
-  // 1) jsonMode 被 400 拒（response_format 不支持）→ 降级普通模式，不消耗重试额度
+  // 1) jsonMode 被 400 拒（response_format 不支持）→ 降级普通模式，不消耗重试额度，
+  //    并记住该上游，后续调用直接跳过 json 模式
   // 2) 429 / 408 / 5xx / 网络中断 status=0（上游限流如 sensenova 免费 QPS、连接被掐断）
   //    → 自动退避重试，最多 4 次（2s / 5s / 12s / 25s，累计约 44s）
-  let useJson = true
+  let useJson = !isJsonUnsupported(cfg)
   let last: { ok: true; content: string } | { ok: false; status: number; detail: string } | null =
     null
   let retries = 0
@@ -178,6 +220,7 @@ export async function chat(
     }
     last = r
     if (useJson && jsonMode && r.status === 400) {
+      markJsonUnsupported(cfg)
       useJson = false
       continue
     }
@@ -235,6 +278,8 @@ async function requestViaProxy(
         messages: body.messages,
         temperature: body.temperature,
         jsonMode: withJson,
+        // 输出长度上限：新版 llm-proxy 会透传给上游；旧版函数忽略该字段（向后兼容）
+        maxTokens: body.max_tokens,
       }),
     })
   } catch (e) {
@@ -519,7 +564,7 @@ export async function generateFeedback(
   who: string,
 ): Promise<GeneratedFeedback> {
   const messages = buildFeedbackPrompt(course, who)
-  const raw = await chat(cfgFrom(settings), messages, true)
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 700 })
   const parsed = extractJson<Partial<GeneratedFeedback>>(raw)
   return {
     summary: (parsed.summary ?? '').trim(),
@@ -556,25 +601,44 @@ export interface GeneratedReport {
   content: string
 }
 
+/**
+ * 报告素材的截断上限（v31.5）。
+ * 学习报告的历史可能很长（几十条打卡 + 反馈），全量塞进 prompt 会让预填变慢、
+ * 首字延迟高，而模型只需要代表性样本。超出的部分按「最近优先」截掉。
+ */
+const REPORT_CLIP = {
+  feedbackCount: 12,
+  feedbackChars: 80,
+  checkInCount: 16,
+  noteChars: 100,
+  aiFeedbackChars: 100,
+  taskNoteChars: 60,
+}
+
 export function buildReportPrompt(input: ReportInput): Array<{ role: 'system' | 'user'; content: string }> {
   const fmt = (t: number) =>
     new Date(t).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
   const feedbackList =
     input.feedbackSummaries.length > 0
-      ? input.feedbackSummaries.map((s, i) => `${i + 1}. ${s}`).join('\n')
+      ? input.feedbackSummaries
+          .filter(Boolean)
+          .slice(-REPORT_CLIP.feedbackCount)
+          .map((s, i) => `${i + 1}. ${clipText(s, REPORT_CLIP.feedbackChars)}`)
+          .join('\n')
       : '（本周期内暂无课后反馈记录，请基于有限信息撰写，不要编造具体事件）'
   const checkInList =
     input.checkInNotes.length > 0
       ? input.checkInNotes
+          .slice(-REPORT_CLIP.checkInCount)
           .map((n) => {
             const date = new Date(n.dayAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
-            const parts = [`${date} 打卡备注：${n.note}`]
+            const parts = [`${date} 打卡备注：${clipText(n.note, REPORT_CLIP.noteChars)}`]
             if (n.taskTitle || n.taskNote) {
               const taskParts = [`打卡任务：${n.taskTitle ?? '（未命名任务）'}`]
-              if (n.taskNote) taskParts.push(`要求：${n.taskNote}`)
+              if (n.taskNote) taskParts.push(`要求：${clipText(n.taskNote, REPORT_CLIP.taskNoteChars)}`)
               parts.push(`  · ${taskParts.join('；')}`)
             }
-            if (n.aiFeedback) parts.push(`  · 教师观察：${n.aiFeedback}`)
+            if (n.aiFeedback) parts.push(`  · 教师观察：${clipText(n.aiFeedback, REPORT_CLIP.aiFeedbackChars)}`)
             return parts.join('\n')
           })
           .join('\n')
@@ -613,7 +677,7 @@ export async function generateReport(
   settings: AppSettings,
   input: ReportInput,
 ): Promise<GeneratedReport> {
-  const raw = await chat(cfgFrom(settings), buildReportPrompt(input), true)
+  const raw = await chat(cfgFrom(settings), buildReportPrompt(input), true, { maxTokens: 1400 })
   const parsed = extractJson<Partial<GeneratedReport>>(raw)
   return {
     title: (parsed.title ?? '').trim(),
@@ -788,7 +852,7 @@ ${input.content || '（老师未填写内容，请仅根据标题与科目做合
 3. 不要编造与标题完全无关的内容；原始内容为空时请在 gist 里说明"推断"。`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, true)
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 500 })
   const parsed = extractJson<Partial<GeneratedKnowledgeSummary>>(raw)
   return {
     gist: (parsed.gist ?? '').trim(),
@@ -839,6 +903,45 @@ export interface FeedbackContext {
   recentFeedbacks: string[]
 }
 
+/**
+ * 候选知识点过多时，先在本地按「关键词相关性」粗排，只保留最相关的 limit 个。
+ *
+ * 为什么要做：调用方会把知识库靠前的 50 个知识点（含摘要）原样塞进 prompt，
+ * 输入上千字 → 预填慢、首字延迟高，而模型真正能选中的只有几个。
+ * 用课程备注 / 学生 / 科目 / 最近反馈里的字词（中文取 2-gram）打分排序，
+ * 既缩短输入，也让剩下的候选更贴近本次课；全无命中时按原顺序截断，行为与原来一致。
+ */
+export function pickKnowledgeCandidates(
+  candidates: KnowledgeCandidate[],
+  ctx: FeedbackContext,
+  limit: number,
+): KnowledgeCandidate[] {
+  if (candidates.length <= limit) return candidates
+  const hay = [ctx.note, ctx.who, ctx.subject, ...ctx.recentFeedbacks].join(' ').toLowerCase()
+  const grams = new Set<string>()
+  for (const chunk of hay.split(/[^0-9a-z\u4e00-\u9fa5]+/)) {
+    if (!chunk) continue
+    if (/^[0-9a-z]+$/.test(chunk)) {
+      if (chunk.length >= 2) grams.add(chunk)
+      continue
+    }
+    for (let i = 0; i + 2 <= chunk.length; i++) grams.add(chunk.slice(i, i + 2))
+  }
+  const subject = ctx.subject.trim().toLowerCase()
+  const scored = candidates.map((c, i) => {
+    const text = `${c.title} ${c.path}`.toLowerCase()
+    let score = 0
+    for (const g of grams) if (text.includes(g)) score += 2
+    if (subject && text.includes(subject)) score += 1
+    return { c, i, score }
+  })
+  scored.sort((a, b) => b.score - a.score || a.i - b.i)
+  return scored.slice(0, limit).map((x) => x.c)
+}
+
+/** 送进 prompt 的候选知识点上限（v31.5：50 → 30，缩短预填、降低首字延迟） */
+const KNOWLEDGE_CANDIDATE_LIMIT = 30
+
 /** 让 AI 从候选知识点里挑出本次课最可能覆盖的（返回 id 列表） */
 export async function recommendKnowledgePoints(
   settings: AppSettings,
@@ -847,8 +950,10 @@ export async function recommendKnowledgePoints(
   limit = 6,
 ): Promise<string[]> {
   if (candidates.length === 0) return []
-  const list = candidates
-    .map((c, i) => `${i + 1}. [id=${c.id}] ${c.path} / ${c.title}${c.summary ? ` — ${c.summary.slice(0, 60)}` : ''}`)
+  const pool = pickKnowledgeCandidates(candidates, ctx, KNOWLEDGE_CANDIDATE_LIMIT)
+  const recent = ctx.recentFeedbacks.filter(Boolean).slice(0, 3).map((s) => s.slice(0, 40))
+  const list = pool
+    .map((c, i) => `${i + 1}. [id=${c.id}] ${c.path} / ${c.title}${c.summary ? ` — ${c.summary.slice(0, 30)}` : ''}`)
     .join('\n')
 
   const messages = [
@@ -867,21 +972,21 @@ export async function recommendKnowledgePoints(
 - 上课时间：${ctx.timeText}
 - 课程备注：${ctx.note || '（无）'}
 ${
-  ctx.recentFeedbacks.length > 0
-    ? `- 最近几次课的反馈摘要：\n${ctx.recentFeedbacks.map((s, i) => `  ${i + 1}. ${s}`).join('\n')}`
+  recent.length > 0
+    ? `- 最近几次课的反馈摘要：\n${recent.map((s, i) => `  ${i + 1}. ${s}`).join('\n')}`
     : '- 最近几次课的反馈摘要：（暂无）'
 }
 
-可候选的知识点（共 ${candidates.length} 个）：
+可候选的知识点（共 ${pool.length} 个）：
 ${list}
 
 请选出本次课最可能覆盖的，最多 ${limit} 个，按可能性从高到低排列。`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, true)
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 240 })
   const parsed = extractJson<{ ids?: unknown }>(raw)
   const ids = Array.isArray(parsed.ids) ? parsed.ids.map(String) : []
-  const valid = new Set(candidates.map((c) => c.id))
+  const valid = new Set(pool.map((c) => c.id))
   return ids.filter((id) => valid.has(id)).slice(0, limit)
 }
 
@@ -910,10 +1015,11 @@ export async function generateFeedbackWithTemplate(
   const knowledgeText =
     input.knowledges.length > 0
       ? input.knowledges
+          .slice(0, 12)
           .map(
             (k, i) =>
               `${i + 1}. ${k.title}${k.path ? `（${k.path}）` : ''}${
-                k.summary ? `\n   要点：${k.summary.replace(/\n/g, ' ').slice(0, 200)}` : ''
+                k.summary ? `\n   要点：${k.summary.replace(/\n/g, ' ').slice(0, 120)}` : ''
               }`,
           )
           .join('\n')
@@ -928,7 +1034,8 @@ export async function generateFeedbackWithTemplate(
         '1. 必须保留模板的所有小节标题（【】括起来的部分）与整体结构；\n' +
         '2. 只把模板中括号占位符（如「（...）」里的提示性文字）替换成真实、具体的内容；\n' +
         '3. 措辞具体、积极、有可执行建议，避免空话；\n' +
-        '4. 必须且仅输出一个 JSON 对象：{"summary":"一句话摘要（不超过40字）","content":"按模板结构写好的完整反馈正文"}。',
+        '4. 正文整体控制在 400 字以内，紧扣模板小节，不要额外扩写；\n' +
+        '5. 必须且仅输出一个 JSON 对象：{"summary":"一句话摘要（不超过40字）","content":"按模板结构写好的完整反馈正文"}。',
     },
     {
       role: 'user' as const,
@@ -946,14 +1053,18 @@ ${input.templateBody}
 ${knowledgeText}
 ${
   input.ctx.recentFeedbacks.length > 0
-    ? `\n【最近几次课的反馈摘要（用于保持连贯、避免重复表述）】\n${input.ctx.recentFeedbacks.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+    ? `\n【最近几次课的反馈摘要（用于保持连贯、避免重复表述）】\n${input.ctx.recentFeedbacks
+        .filter(Boolean)
+        .slice(0, 3)
+        .map((s, i) => `${i + 1}. ${s.slice(0, 60)}`)
+        .join('\n')}`
     : ''
 }
 
 请严格按【反馈模板】的结构输出 content，并把本次知识点自然地写进去。`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, true)
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 900 })
   const parsed = extractJson<Partial<GeneratedFeedback>>(raw)
   return {
     summary: (parsed.summary ?? '').trim(),
@@ -1155,7 +1266,8 @@ ${structuredSnippet(docText)}
 输出必须是完整可解析的 JSON。`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, true)
+  // 上限给足（4000）：这一块要输出多个单元的完整知识点，宁松勿断
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 4000 })
   let parsed: Partial<ImportedDocClassification>
   try {
     parsed = extractJson<Partial<ImportedDocClassification>>(raw)
@@ -1556,7 +1668,7 @@ ${structuredSnippet(text, 12000)}
 请列出这份文档包含的全部单元标题。`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, true)
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 900 })
   try {
     const parsed = extractJson<{ units?: unknown }>(raw)
     if (!Array.isArray(parsed.units)) return []
@@ -1732,6 +1844,7 @@ export async function classifyImportedDocument(
   const failedIdx: number[] = []
   for (let i = 0; i < chunks.length; i++) {
     onProgress?.({ done: i, total: chunks.length, failed: failedIdx.length })
+    const chunkStart = Date.now()
     try {
       const part = await classifyTextChunk(settings, chunks[i]!, fileName, existingList)
       if (!merged) {
@@ -1749,8 +1862,12 @@ export async function classifyImportedDocument(
       if (failures >= 3 && merged) break // 连续失败过多，保留已得结果提前收尾
     }
     if (i < chunks.length - 1) {
-      // 块间等待，降低免费额度 QPS 限流风险；刚失败过则多等一会
-      await new Promise((r) => setTimeout(r, failures > 0 ? 6000 : 3000))
+      // 块间等待是为了降低免费额度 QPS 限流风险；刚失败过则多等一会。
+      // v31.5 自适应：上一块本身就很慢时说明上游在排队，再等满 3s 纯属白等；
+      // 只有上一块很快（<3s）才需要拉长间隔防限流。
+      const cost = Date.now() - chunkStart
+      const wait = failures > 0 ? 6000 : cost < 3000 ? 3000 : cost < 8000 ? 1200 : 500
+      await new Promise((r) => setTimeout(r, wait))
     }
   }
 
@@ -1799,7 +1916,7 @@ export async function summarizeImportedPoint(
       content: `知识点标题：${title}\n原始要点：\n${snippet(content, 2000)}\n\n请整理成可复用摘要。`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, false)
+  const raw = await chat(cfgFrom(settings), messages, false, { maxTokens: 400 })
   return raw.trim()
 }
 
@@ -1873,6 +1990,6 @@ ${task.cadenceLabel ? `- 打卡节奏：${task.cadenceLabel}` : ''}
       content: `学员：${studentName ?? '学生'}\n老师观察记录：${note}\n${taskBlock}${profileBlock}`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, false)
+  const raw = await chat(cfgFrom(settings), messages, false, { maxTokens: 600 })
   return raw.trim()
 }
