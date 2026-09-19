@@ -14,7 +14,7 @@ import {
   Trash2,
   Wand2,
 } from 'lucide-react'
-import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { db, markDeleted, touch, withSyncFields, uniqueMemberStudentIds } from '@/lib/db'
 import { useBreakpoint } from '@/hooks/useBreakpoint'
 import { useSettings } from '@/store/useSettings'
 import {
@@ -435,9 +435,7 @@ function FeedbackModal({
     )
     const studentIds = c.studentId
       ? [c.studentId]
-      : (allMembersFb ?? [])
-          .filter((m) => !m.deletedAt && m.groupId === c.groupId)
-          .map((m) => m.studentId)
+      : uniqueMemberStudentIds(allMembersFb ?? [], c.groupId)
 
     const knowledges = Array.from(selectedKps)
       .map((id) => liveKps.find((p) => p.id === id))

@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import { addDays, format } from 'date-fns'
-import { db, touch, withSyncFields } from '@/lib/db'
+import { db, touch, withSyncFields, uniqueMemberStudentIds } from '@/lib/db'
 import { revertCompletion } from '@/lib/courseCompletion'
 import { hardDeleteCourses } from '@/lib/batchDelete'
 import { getHolidayInfo } from '@/lib/holidays'
@@ -475,7 +475,7 @@ export function CourseScheduleModal({
 
   async function ensureAttendance(saved: Course) {
     const members = (await db.groupMembers.toArray()).filter((m) => !m.deletedAt && m.groupId === saved.groupId)
-    const ids = saved.groupId ? members.map((m) => m.studentId) : saved.studentId ? [saved.studentId] : []
+    const ids = saved.groupId ? uniqueMemberStudentIds(members, saved.groupId) : saved.studentId ? [saved.studentId] : []
     for (const sid of ids) {
       if (!sid) continue
       const exists = (await db.courseAttendances.toArray()).some(

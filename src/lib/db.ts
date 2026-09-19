@@ -437,6 +437,22 @@ export class EduDB extends Dexie {
           }
         })
     })
+
+    // v19：班课成员「重复行」去重（数据修复；只改值不加列，无需改 schema.sql）。
+    //  线上症状（v31.6 反馈）：同一学生在 groupMembers 里有**两条存活记录**（重复点「添加」
+    //    或同步冲突产生）→
+    //      · 成员管理弹窗按「学生」渲染 → 显示 9 人；
+    //      · 班课卡片按「行数」统计   → 显示 10 人；
+    //      · 课酬按行遍历             → 结算成 10 人。
+    //    三处口径不一致，且直接算错钱。
+    //  做法：每个 (groupId, studentId) 只保留 `joinedAt` 最早的一条，其余软删；
+    //        软删行自动带 dirty=1，会把修正推回云端，避免脏行反复同步。
+    this.version(19).upgrade(async (tx) => {
+      const rows = (await tx.table('groupMembers').toArray()) as GroupMember[]
+      const drops = planGroupMemberDedupe(rows)
+      if (drops.length === 0) return
+      await tx.table('groupMembers').bulkPut(drops.map((m) => markDeleted(m)))
+    })
   }
 }
 
@@ -548,6 +564,65 @@ export function planPointRuleOrderFixes(
   return fixes
 }
 
+/**
+ * v31.6：找出班课成员表里「同一 (groupId, studentId) 的多条**存活**记录」，
+ * 返回其中应被软删的那些。
+ *
+ * **为什么会有重复行**：加入成员的写入用的是 `withSyncFields`（每次生成新 id），
+ * 所以重复点「添加」、或两台设备并发添加后同步合并，都会留下两条存活记录。
+ *
+ * **为什么危险**：班课人数与课酬都是「按行遍历」算的 ——
+ *   卡片显示 10 人、成员管理按学生去重显示 9 人、课酬按 10 人结算，三处对不上。
+ *
+ * **去重策略**：每个 key 只保留 `joinedAt` 最早的一条（相同则按 id 字典序），
+ * 保住「最早的加入关系」语义，其余判为冗余。纯函数，回归脚本直接断言。
+ */
+export function planGroupMemberDedupe(
+  rows: ReadonlyArray<GroupMember>,
+): GroupMember[] {
+  const buckets = new Map<string, GroupMember[]>()
+  for (const r of rows) {
+    if (r.deletedAt) continue
+    const key = `${r.groupId}::${r.studentId}`
+    const arr = buckets.get(key)
+    if (arr) arr.push(r)
+    else buckets.set(key, [r])
+  }
+  const drops: GroupMember[] = []
+  for (const arr of buckets.values()) {
+    if (arr.length <= 1) continue
+    const sorted = [...arr].sort(
+      (a, b) =>
+        (a.joinedAt ?? 0) - (b.joinedAt ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    )
+    drops.push(...sorted.slice(1))
+  }
+  return drops
+}
+
+/**
+ * 「参与人数 / 课酬」口径的班课成员 studentId 列表：**存活 + 同一学生只算一次**。
+ *
+ * ⚠ 所有涉及「算人数 / 算钱 / 建出席名单」的地方都必须走它 ——
+ *   只要数据里存在重复行，按行遍历就会把同一个学生数两遍。
+ * 传 `groupId` 可只取指定班课；不传（或传 null）则对传入集合整体去重。
+ */
+export function uniqueMemberStudentIds(
+  members: ReadonlyArray<GroupMember>,
+  groupId?: string | null,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const m of members) {
+    if (m.deletedAt) continue
+    if (groupId != null && m.groupId !== groupId) continue
+    if (seen.has(m.studentId)) continue
+    seen.add(m.studentId)
+    out.push(m.studentId)
+  }
+  return out
+}
+
 export const db = new EduDB()
 
 // ============================================================
@@ -592,6 +667,40 @@ export function markDeleted<T extends SyncFields>(record: T): T {
 /** 标记已同步（推送成功后调用） */
 export function markSynced<T extends SyncFields>(record: T): T {
   return { ...record, dirty: 0 }
+}
+
+/**
+ * 幂等地把学生加入班课（v31.6）：
+ *  - 已是存活成员 → **不写入**（并顺手清掉多余的重复行）；
+ *  - 曾加入后移除（有墓碑）→ 复活最早那条，避免墓碑无限堆积；
+ *  - 全新 → 新建一条。
+ *
+ * 动机：原实现每次 `withSyncFields` 都生成新 id，重复点「添加」就会把同一学生
+ * 记成两条存活成员 → 班课人数与课酬全部算错（v31.6 线上反馈）。
+ */
+export async function ensureGroupMember(
+  groupId: string,
+  studentId: string,
+): Promise<void> {
+  const rows = await db.groupMembers.toArray()
+  const same = rows.filter((m) => m.groupId === groupId && m.studentId === studentId)
+  const live = same.filter((m) => !m.deletedAt)
+  if (live.length > 0) {
+    for (const extra of live.slice(1)) await db.groupMembers.put(markDeleted(extra))
+    return
+  }
+  const byJoin = [...same].sort(
+    (a, b) =>
+      (a.joinedAt ?? 0) - (b.joinedAt ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )
+  const tomb = byJoin[0]
+  if (tomb) {
+    await db.groupMembers.put(touch({ ...tomb, deletedAt: null, joinedAt: Date.now() }))
+    return
+  }
+  await db.groupMembers.put(
+    withSyncFields<GroupMember>({ groupId, studentId, joinedAt: Date.now() }),
+  )
 }
 
 // ============================================================

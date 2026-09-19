@@ -2,7 +2,7 @@
  * Schedule 共享的小工具：被 Dashboard 和 Schedule 共用。
  * 这里只放确实跨页面复用的纯函数，避免循环依赖。
  */
-import { db, touch, withSyncFields } from '../lib/db'
+import { db, touch, uniqueMemberStudentIds, withSyncFields } from '../lib/db'
 import type { Course, CourseAttendance, Group, GroupMember, Student } from '../lib/types'
 import { courseDurationMin } from '../lib/utils'
 import { applyCompletion } from '../lib/courseCompletion'
@@ -123,9 +123,8 @@ export async function materializeGroupSlot(
   await db.courses.put(course)
 
   // 预创建所有成员的出席记录（默认 present=true）
-  const memberIds = liveMembers
-    .filter((m) => !m.deletedAt && m.groupId === group.id)
-    .map((m) => m.studentId)
+  // 去重：同一学生的重复成员行会给同一节课建出两条出席记录（名单 / 课酬多算）
+  const memberIds = uniqueMemberStudentIds(liveMembers, group.id)
   if (memberIds.length > 0) {
     await db.courseAttendances.bulkPut(
       memberIds.map((sid) =>
@@ -157,9 +156,7 @@ export async function ensureAttendanceDefaults(
   if (existing.length > 0) return
 
   if (course.groupId) {
-    const memberIds = liveMembers
-      .filter((m) => m.groupId === course.groupId)
-      .map((m) => m.studentId)
+    const memberIds = uniqueMemberStudentIds(liveMembers, course.groupId)
     for (const sid of memberIds) {
       await db.courseAttendances.put(
         withSyncFields<CourseAttendance>({
@@ -248,9 +245,10 @@ export async function completeCourseWithAttendance(
 
   // 完成后自动创建「课后打卡」周期任务（幂等：每门课只建一次；失败不阻塞完成流程）
   try {
-    const presentIds = allAtts.filter((a) => a.present).map((a) => a.studentId)
+    // 去重：出席记录 / 成员行都可能存在重复，去重后同一学生只建一份打卡
+    const presentIds = [...new Set(allAtts.filter((a) => a.present).map((a) => a.studentId))]
     const fallbackIds = course.groupId
-      ? groupMems.map((m) => m.studentId)
+      ? uniqueMemberStudentIds(groupMems)
       : course.studentId
         ? [course.studentId]
         : []
@@ -272,8 +270,8 @@ export async function completeCourseWithAttendance(
   // v21：完成后自动生成当天的「课堂积分活动」（仅班课；受班课 classActivityAuto 控制）
   try {
     if (course.groupId) {
-      const presentIds = allAtts.filter((a) => a.present).map((a) => a.studentId)
-      const memberIds = groupMems.map((m) => m.studentId)
+      const presentIds = [...new Set(allAtts.filter((a) => a.present).map((a) => a.studentId))]
+      const memberIds = uniqueMemberStudentIds(groupMems)
       const r = await ensureAutoClassActivityForCourse({
         courseId: course.id,
         groupId: course.groupId,
@@ -315,7 +313,7 @@ export async function completeCoursesWithAttendance(
   let done = 0
   for (const c of courses) {
     const rosterIds = c.groupId
-      ? liveMembers.filter((m) => m.groupId === c.groupId).map((m) => m.studentId)
+      ? uniqueMemberStudentIds(liveMembers, c.groupId)
       : c.studentId
         ? [c.studentId]
         : []

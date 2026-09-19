@@ -11,7 +11,7 @@ import {
   Trash2,
   Users,
 } from 'lucide-react'
-import { db, newId, touch, withSyncFields } from '@/lib/db'
+import { db, ensureGroupMember, newId, touch, withSyncFields } from '@/lib/db'
 import { hardDeleteStudents } from '@/lib/batchDelete'
 import { useBreakpoint } from '@/hooks/useBreakpoint'
 import {
@@ -969,15 +969,8 @@ function StudentModal({
       }
     }
     for (const gid of selectedGroupIds) {
-      if (!keepGroups.has(gid)) {
-        await db.groupMembers.put(
-          withSyncFields<GroupMember>({
-            groupId: gid,
-            studentId,
-            joinedAt: Date.now(),
-          }),
-        )
-      }
+      // 幂等加入：已在班课则不新增（避免重复行让班课人数 / 课酬多算）
+      if (!keepGroups.has(gid)) await ensureGroupMember(gid, studentId)
     }
 
     onClose()

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { newId } from '@/lib/db'
+import { newId, uniqueMemberStudentIds } from '@/lib/db'
 import { Button, Modal } from '@/components/ui'
 import {
   BILLING_RULE_LABEL,
@@ -90,9 +90,8 @@ export function AttendanceModal({
     // 首次打开且尚无出席记录 → 预填默认（全员出席）
     const expected: string[] = []
     if (course.groupId) {
-      for (const m of groupMembers) {
-        if (m.groupId === course.groupId) expected.push(m.studentId)
-      }
+      // 去重：重复成员行会让名单里同一学生出现两次 → 出席人数 / 课酬预览多算一个人
+      expected.push(...uniqueMemberStudentIds(groupMembers, course.groupId))
     } else if (course.studentId) {
       expected.push(course.studentId)
     }

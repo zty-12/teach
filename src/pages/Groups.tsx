@@ -8,7 +8,14 @@ import {
   Trash2,
   Users,
 } from 'lucide-react'
-import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import {
+  db,
+  ensureGroupMember,
+  markDeleted,
+  touch,
+  uniqueMemberStudentIds,
+  withSyncFields,
+} from '@/lib/db'
 import { useBreakpoint } from '@/hooks/useBreakpoint'
 import {
   Badge,
@@ -52,8 +59,12 @@ export default function GroupsPage() {
     [students],
   )
 
-  const memberCountOf = (groupId: string) =>
-    liveMembers.filter((m) => m.groupId === groupId).length
+  // 人数按「去重后的存活学生」计 —— 与成员管理弹窗同一口径。
+  // 直接用成员行数在存在重复行时会多算（v31.6 反馈：卡片 10 人 / 弹窗 9 人）。
+  const memberCountOf = (groupId: string) => {
+    const ids = new Set(uniqueMemberStudentIds(liveMembers, groupId))
+    return liveStudents.reduce((n, s) => n + (ids.has(s.id) ? 1 : 0), 0)
+  }
 
   const studentName = (id: string) =>
     liveStudents.find((s) => s.id === id)?.name ?? '未知'
@@ -669,13 +680,8 @@ function MemberModal({
       setError('请选择要添加的学生')
       return
     }
-    await db.groupMembers.put(
-      withSyncFields<GroupMember>({
-        groupId: group!.id,
-        studentId: addId,
-        joinedAt: Date.now(),
-      }),
-    )
+    // 幂等加入：已是成员则不新增（避免重复行让班课人数 / 课酬多算）
+    await ensureGroupMember(group!.id, addId)
     setAddId('')
     setError('')
   }

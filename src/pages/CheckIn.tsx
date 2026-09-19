@@ -17,7 +17,7 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react'
-import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { db, markDeleted, touch, withSyncFields, uniqueMemberStudentIds } from '@/lib/db'
 import {
   Badge,
   Button,
@@ -1397,9 +1397,7 @@ function NewCheckInTaskModal({
     } else if (scope === 'course' && courseId) {
       const c = courses.find((x) => x.id === courseId)
       if (c?.groupId) {
-        memberIds = groupMembers
-          .filter((m) => m.groupId === c.groupId && !m.deletedAt)
-          .map((m) => m.studentId)
+        memberIds = uniqueMemberStudentIds(groupMembers, c.groupId)
       } else if (c?.studentId) {
         memberIds = [c.studentId]
       }

@@ -22,7 +22,7 @@
  *    之后课堂积分只由老师点按钮产生，不再有任何自动求值。
  */
 import { startOfDay } from 'date-fns'
-import { db, isRuleOrderSafe, markDeleted, touch, withSyncFields, MAX_RULE_ORDER } from './db'
+import { db, isRuleOrderSafe, markDeleted, touch, withSyncFields, MAX_RULE_ORDER, uniqueMemberStudentIds } from './db'
 import { adjustPoints } from './points'
 import type {
   ClassActivity,
@@ -714,7 +714,7 @@ export async function ensureAutoClassActivityForCourse(input: {
     const mem = (await db.groupMembers.toArray()).filter(
       (m) => !m.deletedAt && m.groupId === input.groupId,
     )
-    ids = mem.map((m) => m.studentId)
+    ids = uniqueMemberStudentIds(mem)
   }
   if (ids.length === 0) return { created: false }
 

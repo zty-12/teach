@@ -8,7 +8,7 @@
  *    因此老师反复修改打卡状态不会重复加分。
  *  - **规则可配置**：base=每次打卡的基础分（默认 1）；bonus=满足条件额外奖励。
  */
-import { db, ensureDefaultPointRules, markDeleted, touch, withSyncFields } from './db'
+import { db, ensureDefaultPointRules, markDeleted, touch, withSyncFields, uniqueMemberStudentIds } from './db'
 import type {
   CheckInRecord,
   CheckInTask,
@@ -754,9 +754,7 @@ export async function ensureTodayAutoCheckInTasks(
     const presentIds = atts
       .filter((a) => !a.deletedAt && a.courseId === c.id && a.present)
       .map((a) => a.studentId)
-    const memberIds = members
-      .filter((m) => !m.deletedAt && m.groupId === g.id)
-      .map((m) => m.studentId)
+    const memberIds = uniqueMemberStudentIds(members, g.id)
     if (presentIds.length === 0 && memberIds.length === 0) continue
     try {
       const res = await ensureAutoCheckInTask({

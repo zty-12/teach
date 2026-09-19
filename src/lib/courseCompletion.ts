@@ -7,7 +7,7 @@
  *  - 预付学生：每次出席扣 1 课时，扣至 0 停止
  *  - 完成时自动写一条 Settlement
  */
-import { db, markDeleted, touch, withSyncFields } from './db'
+import { db, markDeleted, touch, uniqueMemberStudentIds, withSyncFields } from './db'
 import { deleteCheckInTask } from './points'
 import { deleteClassActivity } from './classPoints'
 import type {
@@ -88,8 +88,10 @@ export function calculateCompletion(input: CompletionInput): CompletionBreakdown
   const absent: CompletionBreakdown['absent'] = []
 
   if (course.groupId) {
-    // 班课：以 GroupMember 为全集
-    const memberIds = groupMembers.map((m) => m.studentId)
+    // 班课：以 GroupMember 为全集。
+    // ⚠ 必须去重：数据里可能存在同一学生的重复成员行（v31.6 反馈），
+    //   按行遍历会把该生计两次 → 课酬多算一个人。
+    const memberIds = uniqueMemberStudentIds(groupMembers)
     const attendByStudent = new Map(attendances.map((a) => [a.studentId, a]))
     for (const sid of memberIds) {
       const att = attendByStudent.get(sid)
@@ -184,7 +186,7 @@ export async function applyCompletion(
   if (input.course.groupId && input.groupMembers.length > 0) {
     // 与上面 1对1 同理：统一以库为准。上面的「快照还原」刚改过余额，
     // 若沿用调用方传入的内存快照会拿到还原前的旧值，导致重复结算仍多扣。
-    const ids = input.groupMembers.map((m) => m.studentId)
+    const ids = uniqueMemberStudentIds(input.groupMembers)
     const found = await db.students.bulkGet(ids)
     allStudents = found.filter((s): s is Student => !!s && !s.deletedAt)
   }
@@ -353,7 +355,7 @@ async function doRevert(courseId: string, empty: RevertResult): Promise<RevertRe
       : null
     const allStudents = student
       ? [student]
-      : (await db.students.bulkGet(groupMembers.map((m) => m.studentId))).filter(
+        : (await db.students.bulkGet(uniqueMemberStudentIds(groupMembers))).filter(
           (s): s is Student => !!s && !s.deletedAt,
         )
     const breakdown = calculateCompletion({
