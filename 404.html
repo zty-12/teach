@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/teach/icon.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=5.0"
+    />
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="description" content="面向个人老师的教务管理工具" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <title>教务工作台</title>
+    <script>
+      // 在首屏渲染前应用主题，避免闪白
+      (function () {
+        try {
+          var saved = localStorage.getItem('ew-theme')
+          var mode = saved ? JSON.parse(saved) : null
+          var theme =
+            mode === 'dark' || mode === 'light'
+              ? mode
+              : window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light'
+          document.documentElement.setAttribute('data-theme', theme)
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light')
+        }
+      })()
+    </script>
+    <script type="module" crossorigin src="/teach/assets/index-BmEYl3td.js"></script>
+    <link rel="stylesheet" crossorigin href="/teach/assets/index-CbWa-f_2.css">
+  <link rel="manifest" href="/teach/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/teach/registerSW.js"></script></head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

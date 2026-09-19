@@ -1,0 +1,1 @@
+{"name":"教务工作台","short_name":"教务台","description":"面向个人老师的教务管理工具：学生、排课、课表、财务、反馈","start_url":"/teach/","display":"standalone","background_color":"#ffffff","theme_color":"#4f46e5","lang":"zh-CN","scope":"/teach/","orientation":"any","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
