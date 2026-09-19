@@ -142,7 +142,11 @@ export async function chat(
   jsonMode = false,
   opts?: { maxTokens?: number },
 ): Promise<string> {
-  const doRequest = async (withJson: boolean, viaDevProxy = false): Promise<
+  const doRequest = async (
+    withJson: boolean,
+    maxTokensArg = 0,
+    viaDevProxy = false,
+  ): Promise<
     | { ok: true; content: string }
     | { ok: false; status: number; detail: string }
   > => {
@@ -151,7 +155,7 @@ export async function chat(
       messages,
       temperature: 0.7,
     }
-    const maxTokens = Math.floor(opts?.maxTokens ?? 0)
+    const maxTokens = Math.floor(maxTokensArg > 0 ? maxTokensArg : opts?.maxTokens ?? 0)
     if (maxTokens > 0) body.max_tokens = maxTokens
     if (jsonMode && withJson) {
       body.response_format = { type: 'json_object' }
@@ -183,7 +187,7 @@ export async function chat(
     } catch (e) {
       // 直连网络错误 → 自动尝试同源代理（仅浏览器环境）
       if (!viaDevProxy && typeof window !== 'undefined') {
-        return doRequest(withJson, true)
+        return doRequest(withJson, maxTokensArg, true)
       }
       throw new LlmError(`网络错误：${String(e)}`)
     }
@@ -208,14 +212,31 @@ export async function chat(
   //    并记住该上游，后续调用直接跳过 json 模式
   // 2) 429 / 408 / 5xx / 网络中断 status=0（上游限流如 sensenova 免费 QPS、连接被掐断）
   //    → 自动退避重试，最多 4 次（2s / 5s / 12s / 25s，累计约 44s）
+  // 3) 上游因 max_tokens 截断（finish_reason=length）返回空正文 → 加大 token 预算重试，
+  //    这是「推理/思考模型把预算全花在内部思考、没余量输出正文」的典型表现（v31.9 新增）。
   let useJson = !isJsonUnsupported(cfg)
   let last: { ok: false; status: number; detail: string } | null = null
   let retries = 0
   // 「HTTP 200 但正文为空」的补救次数：只给 1 次，避免无意义地拖长等待
   let emptyRetries = 0
+  // 「max_tokens 截断导致空正文」的升级重试：翻倍 token 预算直到上限，给推理模型吐正文的空间
+  let lengthRetries = 0
+  let curMaxTokens = Math.floor(opts?.maxTokens ?? 0)
+  const LENGTH_RETRY_CAP = 4000
   for (;;) {
-    const r = await doRequest(useJson)
+    const r = await doRequest(useJson, curMaxTokens)
     if (r.ok && r.content) return r.content
+
+    // 上游因 max_tokens 截断（finish_reason=length）而返回空正文：
+    // 典型是「推理/思考模型」把预算全花在内部推理（reasoning_content），没余量输出正文。
+    // 这不是 response_format 不支持——不要误判为「不支持 json」，而是加大 token 预算重试。
+    const isLengthTrunc = !r.ok && /finish_reason=length/.test(r.detail || '') && curMaxTokens > 0
+    if (isLengthTrunc && curMaxTokens < LENGTH_RETRY_CAP && lengthRetries < 3) {
+      lengthRetries += 1
+      curMaxTokens = Math.min(curMaxTokens * 2, LENGTH_RETRY_CAP)
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      continue
+    }
 
     // HTTP 200 但正文为空（v31.8 新增覆盖）：
     // 旧版 llm-proxy 会把上游「拒收 response_format」的 400 吞成 200 + 空正文
@@ -236,12 +257,13 @@ export async function chat(
       throw new LlmError(
         '模型未返回内容：中转/上游返回了空正文。常见原因：① 云端 llm-proxy 仍是旧版，' +
           '把上游拒收 response_format 的错误吞成了空响应，请重新部署最新版函数；' +
-          '② 当前模型对结构化输出不稳定，可在「AI 配置」里换一个模型再试。',
+          '② 当前模型为「推理/思考模型」，把 token 预算全花在内部思考上、没输出正文——' +
+          '请在「AI 配置」换一个非推理模型（如 gpt-4o-mini / deepseek-chat 普通版）。',
       )
     }
 
     last = r
-    if (useJson && jsonMode && r.status === 400) {
+    if (useJson && jsonMode && r.status === 400 && !isLengthTrunc) {
       markJsonUnsupported(cfg)
       useJson = false
       continue
@@ -609,7 +631,7 @@ export async function generateFeedback(
   who: string,
 ): Promise<GeneratedFeedback> {
   const messages = buildFeedbackPrompt(course, who)
-  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 700 })
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 1200 })
   const parsed = extractJson<Partial<GeneratedFeedback>>(raw)
   return {
     summary: (parsed.summary ?? '').trim(),
@@ -722,7 +744,7 @@ export async function generateReport(
   settings: AppSettings,
   input: ReportInput,
 ): Promise<GeneratedReport> {
-  const raw = await chat(cfgFrom(settings), buildReportPrompt(input), true, { maxTokens: 1400 })
+  const raw = await chat(cfgFrom(settings), buildReportPrompt(input), true, { maxTokens: 2000 })
   const parsed = extractJson<Partial<GeneratedReport>>(raw)
   return {
     title: (parsed.title ?? '').trim(),
@@ -1109,7 +1131,7 @@ ${
 请严格按【反馈模板】的结构输出 content，并把本次知识点自然地写进去。`,
     },
   ]
-  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 900 })
+  const raw = await chat(cfgFrom(settings), messages, true, { maxTokens: 1600 })
   const parsed = extractJson<Partial<GeneratedFeedback>>(raw)
   return {
     summary: (parsed.summary ?? '').trim(),
