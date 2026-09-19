@@ -168,8 +168,11 @@ Deno.serve(async (req) => {
     }).catch((e) => ({ ok: false, status: 502, text: async () => String(e) }))
     if (retry.ok) {
       const data = await retry.json().catch(() => null)
-      const content: string | undefined = data?.choices?.[0]?.message?.content
-      return json({ content: content ?? "" })
+      const content = extractContent(data)
+      if (content) return json({ content })
+      // 降级重试拿到 200 但正文为空：绝不能静默返回 ""（前端只能报「模型未返回内容」，
+      // 真实原因永远看不到）。按 400 返回可定位信息，前端立即给出可操作提示。
+      return json({ error: emptyContentDetail(data), status: 400 }, 400)
     }
   }
 
@@ -186,9 +189,43 @@ Deno.serve(async (req) => {
   }
 
   const data = await upstream.json().catch(() => null)
-  const content: string | undefined = data?.choices?.[0]?.message?.content
-  return json({ content: content ?? "" })
+  const content = extractContent(data)
+  if (content) return json({ content })
+  return json({ error: emptyContentDetail(data), status: 400 }, 400)
 })
+
+/** 取上游正文；兼容少数网关把 content 返回成数组（多模态分片）的情形 */
+function extractContent(data: any): string {
+  const raw = data?.choices?.[0]?.message?.content
+  if (typeof raw === "string" && raw.trim()) return raw
+  if (Array.isArray(raw)) {
+    const joined = raw
+      .map((p: any) => (typeof p === "string" ? p : typeof p?.text === "string" ? p.text : ""))
+      .join("")
+    if (joined.trim()) return joined
+  }
+  return ""
+}
+
+/**
+ * 上游返回 200 但正文为空时的可定位说明。
+ * 最常见：推理模型把 max_tokens 全花在 reasoning_content 上；或上游静默截断（finish_reason=length）。
+ */
+function emptyContentDetail(data: any): string {
+  const choice = data?.choices?.[0]
+  const finish = choice?.finish_reason
+  const reasoning = choice?.message?.reasoning_content
+  const parts = ["上游返回了空正文"]
+  if (finish) parts.push(`finish_reason=${finish}`)
+  if (typeof reasoning === "string" && reasoning.trim()) {
+    parts.push(
+      "模型只产出了思考内容（reasoning_content），推理把 max_tokens 用光了：请提高 maxTokens 或换用非推理模型",
+    )
+  }
+  const ct = data?.usage?.completion_tokens
+  if (typeof ct === "number") parts.push(`completion_tokens=${ct}`)
+  return parts.join("；")
+}
 
 /** 将公网图片 URL 下载并转为 base64 data URL */
 async function fetchUrlToDataURL(url: string): Promise<string> {

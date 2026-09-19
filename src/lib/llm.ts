@@ -209,15 +209,37 @@ export async function chat(
   // 2) 429 / 408 / 5xx / 网络中断 status=0（上游限流如 sensenova 免费 QPS、连接被掐断）
   //    → 自动退避重试，最多 4 次（2s / 5s / 12s / 25s，累计约 44s）
   let useJson = !isJsonUnsupported(cfg)
-  let last: { ok: true; content: string } | { ok: false; status: number; detail: string } | null =
-    null
+  let last: { ok: false; status: number; detail: string } | null = null
   let retries = 0
+  // 「HTTP 200 但正文为空」的补救次数：只给 1 次，避免无意义地拖长等待
+  let emptyRetries = 0
   for (;;) {
     const r = await doRequest(useJson)
+    if (r.ok && r.content) return r.content
+
+    // HTTP 200 但正文为空（v31.8 新增覆盖）：
+    // 旧版 llm-proxy 会把上游「拒收 response_format」的 400 吞成 200 + 空正文
+    // （旧代码里是 `content ?? ""` 兜底）→ 表现为「模型未返回内容」或一直转圈。
+    // 而配置页的连接测试不带 jsonMode，所以照样显示「连接成功」。
     if (r.ok) {
-      if (!r.content) throw new LlmError('模型未返回内容')
-      return r.content
+      if (useJson && jsonMode) {
+        // 先按「该上游不支持 response_format」降级重试一次（不消耗退避额度）
+        markJsonUnsupported(cfg)
+        useJson = false
+        continue
+      }
+      if (emptyRetries < 1) {
+        emptyRetries += 1
+        await new Promise((resolve) => setTimeout(resolve, 1200))
+        continue
+      }
+      throw new LlmError(
+        '模型未返回内容：中转/上游返回了空正文。常见原因：① 云端 llm-proxy 仍是旧版，' +
+          '把上游拒收 response_format 的错误吞成了空响应，请重新部署最新版函数；' +
+          '② 当前模型对结构化输出不稳定，可在「AI 配置」里换一个模型再试。',
+      )
     }
+
     last = r
     if (useJson && jsonMode && r.status === 400) {
       markJsonUnsupported(cfg)
@@ -229,7 +251,7 @@ export async function chat(
     await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS[retries]))
     retries += 1
   }
-  if (!last || last.ok) throw new LlmError('未知错误')
+  if (!last) throw new LlmError('未知错误')
   const hint =
     last.status === 429
       ? `（已自动重试 ${retries} 次仍被限流，请等 1-2 分钟再试；免费额度 QPS 很低，长文档建议分段导入）`
@@ -286,29 +308,40 @@ async function requestViaProxy(
     // 网络层中断（如 ERR_CONNECTION_CLOSED）：返回 status=0，交给上层统一退避重试
     return { ok: false as const, status: 0, detail: `网络中断：${String(e)}` }
   }
-  const data = await res.json().catch(() => null)
+  // 先取原始文本再解析：旧版函数可能返回非 JSON 体（网关 HTML / 空体），
+  // 直接 res.json() 失败会退化成 data=null，丢掉定位线索。
+  const rawText = await res.text().catch(() => '')
+  let data: Record<string, unknown> | null = null
+  try {
+    const parsed: unknown = JSON.parse(rawText)
+    if (parsed && typeof parsed === 'object') data = parsed as Record<string, unknown>
+  } catch {
+    data = null
+  }
   if (!res.ok) {
-    const raw = (data?.error ?? data?.message ?? data?.msg) as string | undefined
+    const raw = data?.error ?? data?.message ?? data?.msg
+    const fromBody =
+      typeof raw === 'string' && raw.trim() ? raw.trim() : rawText.trim().slice(0, 300)
     const detail =
-      raw ??
-      (res.status === 401
-        ? 'Edge Function 网关鉴权失败：请部署新版函数（读取 x-proxy-token 头），或在 Supabase 函数设置中关闭「Enforce JWT verification」'
-        : `Proxy ${res.status}`)
+      res.status === 401
+        ? `Edge Function 网关鉴权失败：请部署新版函数（读取 x-proxy-token 头），或在 Supabase 函数设置中关闭「Enforce JWT verification」${fromBody ? `（原始响应：${fromBody}）` : ''}`
+        : fromBody || `Proxy ${res.status}`
     return { ok: false as const, status: res.status, detail }
   }
-  // 兼容「旧版 llm-proxy」：部分旧部署在 200 响应体里塞 { error: "..." }（假成功），
-  // 前端误以为成功却拿到空内容 —— 表现为「模型无响应」/ 一直转圈。
-  // 把这种假成功纠正为 400 失败返回，让上层 chat() 走 jsonMode 降级重试
-  // （去掉 response_format 再请求一次），旧函数即可正常返回。
-  // 新版函数永远用非 200 返回错误，不会进入此分支，故对新函数无副作用。
-  if (data && (data as Record<string, unknown>).error && !(data as Record<string, unknown>).content) {
+  // 兼容「旧版 llm-proxy」的两种「假成功」（新版函数永远用非 200 返回错误，不会进这两个分支）：
+  //   ① 200 + { error: "..." }   —— 把上游错误当作成功返回
+  //   ② 200 + 空正文 / 非 JSON 体 —— 把上游「拒收 response_format」的 400 吞成了空响应
+  // 统一按 400 返回，让上层 chat() 走「去掉 response_format 再请求一次」的降级重试。
+  const content = typeof data?.content === 'string' ? data.content : ''
+  if (!content) {
+    const snippet = (typeof data?.error === 'string' ? data.error : rawText).trim().slice(0, 200)
     return {
       ok: false as const,
       status: 400,
-      detail: String((data as Record<string, unknown>).error),
+      detail: snippet ? `中转返回空内容（原始响应：${snippet}）` : '中转返回空内容（响应体为空）',
     }
   }
-  return { ok: true as const, content: (data?.content as string) ?? '' }
+  return { ok: true as const, content }
 }
 
 /** 跳过空白，返回下一个非空白字符（到末尾返回空串） */

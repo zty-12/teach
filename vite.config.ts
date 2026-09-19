@@ -99,7 +99,7 @@ function spa404Plugin(): Plugin {
  *   此前一直停留在 v30.3，导致线上显示与真实版本不符，
  *   排查「v30.8 没生效」时反而被误导（实际是页面跑着旧缓存 / 版本号没更新）。
  */
-const APP_VERSION = 'v31.7'
+const APP_VERSION = 'v31.8'
 const BUILD_ID = (() => {
   const d = new Date()
   const p = (n: number) => String(n).padStart(2, '0')
