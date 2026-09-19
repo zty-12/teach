@@ -296,6 +296,18 @@ async function requestViaProxy(
         : `Proxy ${res.status}`)
     return { ok: false as const, status: res.status, detail }
   }
+  // 兼容「旧版 llm-proxy」：部分旧部署在 200 响应体里塞 { error: "..." }（假成功），
+  // 前端误以为成功却拿到空内容 —— 表现为「模型无响应」/ 一直转圈。
+  // 把这种假成功纠正为 400 失败返回，让上层 chat() 走 jsonMode 降级重试
+  // （去掉 response_format 再请求一次），旧函数即可正常返回。
+  // 新版函数永远用非 200 返回错误，不会进入此分支，故对新函数无副作用。
+  if (data && (data as Record<string, unknown>).error && !(data as Record<string, unknown>).content) {
+    return {
+      ok: false as const,
+      status: 400,
+      detail: String((data as Record<string, unknown>).error),
+    }
+  }
   return { ok: true as const, content: (data?.content as string) ?? '' }
 }
 
