@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import { copyFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 /**
@@ -99,7 +100,7 @@ function spa404Plugin(): Plugin {
  *   此前一直停留在 v30.3，导致线上显示与真实版本不符，
  *   排查「v30.8 没生效」时反而被误导（实际是页面跑着旧缓存 / 版本号没更新）。
  */
-const APP_VERSION = 'v31.9'
+const APP_VERSION = 'v31.10'
 const BUILD_ID = (() => {
   const d = new Date()
   const p = (n: number) => String(n).padStart(2, '0')
@@ -120,9 +121,26 @@ const BUILD_ID = (() => {
 const BASE =
   process.env.CF_PAGES || process.env.WORKERS_CI ? '/' : '/teach/'
 
+/**
+ * 应用内口令门（v31.10）：进站先输口令的软性访问控制。
+ *
+ * - 口令来自构建环境变量 ACCESS_PASSPHRASE，**明文不进代码**，代码里只留
+ *   sha256(salt + 口令)。改口令 = 改环境变量后重新构建（本地构建传环境变量，
+ *   Cloudflare 控制台在 项目 Settings → Build → Build variables 加 ACCESS_PASSPHRASE）。
+ * - 设为空串可整体停用（构建产物里 hash 为空，前端直接放行）。
+ * - ⚠ 只是软门槛：哈希随前端包分发，口令太弱可被穷举，请设长一些（建议 ≥10 位）。
+ *   它只挡 UI，不挡 Supabase API。
+ */
+const ACCESS_PASSPHRASE = process.env.ACCESS_PASSPHRASE ?? 'teach2026'
+const GATE_SALT = 'edu-workbench/access-gate/v1'
+const GATE_HASH = ACCESS_PASSPHRASE
+  ? createHash('sha256').update(GATE_SALT + ACCESS_PASSPHRASE).digest('hex')
+  : ''
+
 export default defineConfig({
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    __ACCESS_GATE__: JSON.stringify({ hash: GATE_HASH, salt: GATE_SALT }),
   },
   plugins: [
     react(),

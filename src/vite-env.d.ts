@@ -14,3 +14,6 @@ interface ImportMeta {
 
 /** 构建标识（由 vite.config.ts 的 define 注入，见 __BUILD_ID__） */
 declare const __BUILD_ID__: string
+
+/** 口令门参数（vite.config.ts 注入）：hash = sha256(salt + ACCESS_PASSPHRASE)，hash 为空串表示未启用 */
+declare const __ACCESS_GATE__: { hash: string; salt: string }
