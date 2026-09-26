@@ -37,3 +37,6 @@ tmp/
 
 # 工作区本地数据（编辑器/助手缓存，不参与版本管理）
 .workbuddy/
+
+# Cloudflare Workers 本地构建缓存（wrangler 生成，不入库）
+.wrangler/

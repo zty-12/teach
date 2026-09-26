@@ -109,12 +109,16 @@ const BUILD_ID = (() => {
 /**
  * 站点根路径：
  * - 默认（GitHub Pages 项目站，仓库名 teach）→ /teach/
- * - Cloudflare Pages 构建环境会注入 CF_PAGES=true，此时站点在域名根路径 '/'
+ * - Cloudflare 托管 → 域名根路径 '/'
+ *     · Pages 构建注入 CF_PAGES=1
+ *     · Workers Builds 注入 WORKERS_CI=1（新版控制台默认走 Workers，不是 Pages）
+ *   两个都认，避免换构建产品后白屏（站点被当成挂在 /teach/ 下、根路径资源 404）。
  *
  * 用环境变量切换，避免每次换托管都手动改三处。
  * ⚠ 改 base 时务必同步下面 VitePWA 的 start_url / scope / navigateFallback。
  */
-const BASE = process.env.CF_PAGES ? '/' : '/teach/'
+const BASE =
+  process.env.CF_PAGES || process.env.WORKERS_CI ? '/' : '/teach/'
 
 export default defineConfig({
   define: {

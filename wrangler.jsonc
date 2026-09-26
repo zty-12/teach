@@ -1,0 +1,18 @@
+{
+  // Cloudflare Workers 部署配置（纯静态资源，无 Worker 脚本）。
+  //
+  // 新版 Cloudflare 控制台把新项目默认引导到 Workers（Pages 入口被隐藏），
+  // 构建产物仍由 Vite 产出到 ./dist，这里把 dist 作为静态资源目录上传即可。
+  // 部署命令使用控制台默认的 `npx wrangler deploy`，无需额外参数。
+  //
+  // ⚠ name 必须与 Cloudflare 控制台里的项目名一致，否则会新建一个 Worker。
+  // ⚠ not_found_handling = "single-page-application"：SPA 深链 / 刷新
+  //   （如 /schedule、/checkin）回退到 index.html，等价于 GitHub Pages 时代的 404.html 方案。
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "teach",
+  "compatibility_date": "2026-09-26",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}
