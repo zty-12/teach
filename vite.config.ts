@@ -73,7 +73,7 @@ function llmProxyPlugin(): Plugin {
  * GitHub Pages 是静态托管、不会把未知路径重写到 index.html。
  * SPA 刷新 / 深链（如 /teach/schedule）会 404。复制一份 index.html 为 404.html，
  * 让 GitHub Pages 在 404 时回退到同一份 SPA 外壳，由前端路由接管。
- * 配合 BrowserRouter 的 basename="/teach" 使用。
+ * 配合 BrowserRouter 的 basename 使用。
  */
 function spa404Plugin(): Plugin {
   return {
@@ -106,6 +106,16 @@ const BUILD_ID = (() => {
   return `${APP_VERSION} · ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 })()
 
+/**
+ * 站点根路径：
+ * - 默认（GitHub Pages 项目站，仓库名 teach）→ /teach/
+ * - Cloudflare Pages 构建环境会注入 CF_PAGES=true，此时站点在域名根路径 '/'
+ *
+ * 用环境变量切换，避免每次换托管都手动改三处。
+ * ⚠ 改 base 时务必同步下面 VitePWA 的 start_url / scope / navigateFallback。
+ */
+const BASE = process.env.CF_PAGES ? '/' : '/teach/'
+
 export default defineConfig({
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
@@ -127,8 +137,8 @@ export default defineConfig({
         background_color: '#ffffff',
         display: 'standalone',
         orientation: 'any',
-        start_url: '/teach/',
-        scope: '/teach/',
+        start_url: BASE,
+        scope: BASE,
         icons: [
           { src: 'icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
         ],
@@ -136,7 +146,7 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,woff2}'],
         cleanupOutdatedCaches: true,
-        navigateFallback: '/teach/index.html',
+        navigateFallback: `${BASE}index.html`,
       },
       devOptions: {
         enabled: false,
@@ -148,11 +158,7 @@ export default defineConfig({
       '@': path.resolve(import.meta.dirname, './src'),
     },
   },
-  // GitHub Pages 项目站部署：仓库名 teach，站点根路径为 /teach/。
-  // 注意：改这里的同时要同步调整下面 VitePWA 的 start_url / scope /
-  // navigateFallback，否则子路径部署下 PWA 会失效或白屏。
-  // 若要部署到域名根路径，把这三处统一改回 '/' 即可。
-  base: '/teach/',
+  base: BASE,
   server: {
     host: true,
     port: 5173,
