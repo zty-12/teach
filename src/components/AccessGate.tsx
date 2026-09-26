@@ -1,20 +1,26 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Lock } from 'lucide-react'
 import { Button, Input } from '@/components/ui'
+import {
+  evaluateGateAccess,
+  registerGateDevice,
+  rememberLocal,
+} from '@/lib/accessGate'
 
 /**
- * 应用内口令门（软性访问控制，v31.10 新增）。
+ * 应用内口令门（软性访问控制，v31.10 新增；v31.11 接入云端已验证设备管理）。
  *
  * 设计要点：
  * - 口令本身不进代码：构建时只注入 sha256(salt + 口令) 的哈希（__ACCESS_GATE__，
  *   由 vite.config.ts 计算，口令来自 ACCESS_PASSPHRASE 环境变量）。改口令 = 改环境变量重新构建。
- * - 「记住此设备」只写 localStorage（存的是口令哈希），换设备/清缓存需重输；
- *   哈希变化（改了口令）后旧标记自动失效。
+ * - 「记住此设备」= 本地存口令哈希 + 输对后自动登记进云端设备清单（app_settings 表
+ *   id='gate' 行，见 lib/accessGate.ts）。机主可在 设置 → 云端同步 → 已验证设备 里
+ *   随时移除；被移除的设备下次进站会被云端权威判定重新锁上。
+ * - 云端不可达时退回本地判断（离线可用）。
  * - 定位是挡住陌生人的软门槛，不是加密：口令太弱理论上可被穷举，请设长一些。
  *   它只挡 UI，不挡 API —— 云端数据本身仍由 Supabase anon key 保护。
  */
 
-const STORE_KEY = 'edu-workbench.access-gate.ok'
 const MAX_ATTEMPTS = 5
 const COOLDOWN_MS = 30_000
 
@@ -43,11 +49,12 @@ export default function AccessGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!hash) return
-    try {
-      if (localStorage.getItem(STORE_KEY) === hash) setPhase('open')
-      else setPhase('locked')
-    } catch {
-      setPhase('locked')
+    let alive = true
+    void evaluateGateAccess(hash).then((r) => {
+      if (alive) setPhase(r)
+    })
+    return () => {
+      alive = false
     }
   }, [hash])
 
@@ -77,11 +84,10 @@ export default function AccessGate({ children }: { children: ReactNode }) {
       const digest = await sha256Hex(salt + value)
       if (digest && digest === hash) {
         if (remember) {
-          try {
-            localStorage.setItem(STORE_KEY, hash)
-          } catch {
-            /* 隐私模式等场景忽略 */
-          }
+          rememberLocal(hash)
+          // 登记进云端已验证设备清单（后台进行，不阻塞进站；失败只影响「云端在册」，
+          // 下次进站若云端可达且不在册会要求重输 —— 到时再输一次即重新登记）
+          void registerGateDevice().catch(() => {})
         }
         setPhase('open')
         return
@@ -134,7 +140,7 @@ export default function AccessGate({ children }: { children: ReactNode }) {
             onChange={(e) => setRemember(e.target.checked)}
             className="h-4 w-4 accent-[var(--color-accent)]"
           />
-          记住此设备（本机不再重复输入）
+          记住此设备（登记后长期免输，可被机主远程移除）
         </label>
 
         <Button

@@ -32,6 +32,7 @@ import {
 import { pendingCount, syncNow } from '@/lib/sync'
 import { createSnapshot } from '@/lib/snapshots'
 import { VersionHistoryCard } from '@/components/VersionHistoryCard'
+import { GateDevicesCard } from '@/components/GateDevicesCard'
 import { isAiConfigured, testLlm, testVisionLlm, LLM_PRESETS } from '@/lib/llm'
 import { exportBackupJson, importBackupJson } from '@/lib/exporters'
 import {
@@ -999,6 +1000,9 @@ export default function SettingsPage() {
         </div>
       </Card>
       )}
+
+      {/* 口令门 · 已验证设备管理（v31.11，参考工作台 v21.41 的云端设备清单方案） */}
+      {activeTab === 'sync' && <GateDevicesCard />}
 
       {/* 数据版本（同步后自动留档，可回滚到历史版本） */}
       {activeTab === 'versions' && (
