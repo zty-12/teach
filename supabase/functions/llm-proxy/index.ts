@@ -71,6 +71,8 @@ Deno.serve(async (req) => {
     jsonMode?: boolean
     temperature?: number
     maxTokens?: number
+    /** 推理力度：'none' = 关闭模型内部思考（商汤 6.8 等支持；不支持的上游会 400） */
+    reasoningEffort?: string
   }
   try {
     payload = await req.json()
@@ -78,7 +80,7 @@ Deno.serve(async (req) => {
     return json({ error: `Invalid JSON body: ${String(e)}` }, 400)
   }
 
-  const { baseUrl, apiKey, model, messages, jsonMode, temperature, maxTokens } = payload
+  const { baseUrl, apiKey, model, messages, jsonMode, temperature, maxTokens, reasoningEffort } = payload
   if (!baseUrl || !apiKey || !model || !Array.isArray(messages) || messages.length === 0) {
     return json({ error: "Missing required field: baseUrl, apiKey, model or messages" }, 400)
   }
@@ -126,6 +128,14 @@ Deno.serve(async (req) => {
   }
   if (jsonMode) {
     body.response_format = { type: "json_object" }
+  }
+  // 推理力度：**纯透传前端决定**，服务端不做「智能判断」。
+  // 原因：服务端无状态、记不住「该上游不认这个参数」；若它自作主张默认加上，
+  // 而某上游恰好拒绝该参数，就会变成「前端去掉 → 服务端又加」的死循环。
+  // 决策权交给前端（有 localStorage 记忆），本函数只负责把字段带上去。
+  const effort = (reasoningEffort ?? "").trim()
+  if (effort) {
+    body.reasoning_effort = effort
   }
 
   let upstream: Response
@@ -214,12 +224,19 @@ function extractContent(data: any): string {
 function emptyContentDetail(data: any): string {
   const choice = data?.choices?.[0]
   const finish = choice?.finish_reason
-  const reasoning = choice?.message?.reasoning_content
+  // 思考内容的字段名各家不一：OpenAI 系是 reasoning_content，
+  // 商汤 SenseNova 6.8 用 reasoning（早期只认前者 → 报错里给不出「模型在思考」的提示）。
+  const reasoning = choice?.message?.reasoning_content ?? choice?.message?.reasoning
+  const reasoningTokens = data?.usage?.completion_tokens_details?.reasoning_tokens
   const parts = ["上游返回了空正文"]
   if (finish) parts.push(`finish_reason=${finish}`)
-  if (typeof reasoning === "string" && reasoning.trim()) {
+  if (
+    (typeof reasoning === "string" && reasoning.trim()) ||
+    (typeof reasoningTokens === "number" && reasoningTokens > 0)
+  ) {
     parts.push(
-      "模型只产出了思考内容（reasoning_content），推理把 max_tokens 用光了：请提高 maxTokens 或换用非推理模型",
+      "模型只产出了思考内容（reasoning），思考把 max_tokens 用光了：" +
+        "可提高 maxTokens，或对支持的上游传 reasoning_effort:'none' 关闭思考，或换用非思考模型",
     )
   }
   const ct = data?.usage?.completion_tokens

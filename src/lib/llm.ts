@@ -131,6 +131,81 @@ function markJsonUnsupported(cfg: LlmConfig): void {
 }
 
 /**
+ * 「该上游的模型是推理 / 思考模型」的本地记忆（key 同 noJsonKey）。
+ *
+ * 背景（2026-09-27）：推理模型（DeepSeek-R1、Qwen-Thinking、GLM 思考版等）
+ * 会先产出大段内部思考（reasoning_content）再输出正文，而**思考量不可控**。
+ * 设了 max_tokens 后，预算常被思考吃光 → 上游 200 但 content 为空
+ * （finish_reason=length，completion_tokens 正好等于所设上限）。
+ *
+ * 旧策略（v31.9）是「翻倍 token 预算重试」，实测两个问题：
+ *  ① 一次点击要连发 700→1400→2800→4000 四次慢请求，等待时间成倍增长（用户体感「很慢」）；
+ *  ② 加到头（4000）往往仍然不够，白等一轮还是失败。
+ * 现改为：**一次就到推理模型专用预算**（不走逐级翻倍），并记住该模型，
+ * 后续调用直接给足预算，不再浪费前几次尝试。
+ */
+const REASONING_FLAG_KEY = 'ew-llm-reasoning'
+
+/**
+ * 推理模型专用的输出预算。
+ * 取 8000 而非「完全不设上限」：既给思考（常 2000-5000）+ 正文留足空间，
+ * 又保留一个边界，避免上游无节制输出把 Edge Function / 前端拖到超时。
+ */
+const REASONING_MAX_TOKENS = 8000
+
+function isReasoningModel(cfg: LlmConfig): boolean {
+  try {
+    return (localStorage.getItem(REASONING_FLAG_KEY) ?? '')
+      .split('\n')
+      .includes(noJsonKey(cfg))
+  } catch {
+    return false
+  }
+}
+
+function markReasoningModel(cfg: LlmConfig): void {
+  try {
+    const key = noJsonKey(cfg)
+    const lines = (localStorage.getItem(REASONING_FLAG_KEY) ?? '').split('\n').filter(Boolean)
+    if (lines.includes(key)) return
+    lines.push(key)
+    localStorage.setItem(REASONING_FLAG_KEY, lines.slice(-8).join('\n'))
+  } catch {
+    /* 隐私模式 / 存储不可用：忽略即可，不影响主流程 */
+  }
+}
+
+/**
+ * 「该上游不接受 reasoning_effort 参数」的本地记忆。
+ *
+ * 我们会对已知的思考模型显式传 `reasoning_effort: 'none'` 关掉内部思考
+ * （商汤 6.8 / Qwen3 / GLM 思考版等支持），但对不支持该参数的上游会收到 400。
+ * 命中 400 时去掉该参数重试一次，并记住，之后不再发这个参数（只丢一次机会，
+ * 不会把功能卡死）。
+ */
+const EFFORT_FLAG_KEY = 'ew-llm-noeffort'
+
+function isEffortUnsupported(cfg: LlmConfig): boolean {
+  try {
+    return (localStorage.getItem(EFFORT_FLAG_KEY) ?? '').split('\n').includes(noJsonKey(cfg))
+  } catch {
+    return false
+  }
+}
+
+function markEffortUnsupported(cfg: LlmConfig): void {
+  try {
+    const key = noJsonKey(cfg)
+    const lines = (localStorage.getItem(EFFORT_FLAG_KEY) ?? '').split('\n').filter(Boolean)
+    if (lines.includes(key)) return
+    lines.push(key)
+    localStorage.setItem(EFFORT_FLAG_KEY, lines.slice(-8).join('\n'))
+  } catch {
+    /* 隐私模式 / 存储不可用：忽略即可，不影响主流程 */
+  }
+}
+
+/**
  * 调用 LLM 的 chat completion。
  * jsonMode=true 时请求结构化 JSON 输出（部分服务商不支持，会兜底回退到普通模式重试）。
  * opts.maxTokens：输出长度硬上限 —— 生成 token 数直接决定等待时长，
@@ -142,9 +217,22 @@ export async function chat(
   jsonMode = false,
   opts?: { maxTokens?: number },
 ): Promise<string> {
+  // 推理力度控制：**默认就尝试关掉模型内部思考**。
+  // 本应用全部是内容生成 / 结构化抽取类任务（家长反馈、学习报告、知识点归类），
+  // 内部思考没有价值，代价却很大：① 吃掉整个 max_tokens 预算 → 上游 200 但正文为空
+  // （finish_reason=length）；② 让等待时间成倍拉长（商汤 6.8 实测单次思考 855~4000+ tokens）。
+  // 不支持该参数的上游会返回 400/422，由下面的错误分支去掉、记住并重试——
+  // 这类拒绝是「立刻返回」的（不像生成那样要等几十秒），代价很小，换来的是首次即提速。
+  let useEffort = !isEffortUnsupported(cfg)
   const doRequest = async (
     withJson: boolean,
-    maxTokensArg = 0,
+    /**
+     * 输出长度上限：
+     *  -1（默认）→ 用调用方给的建议值 opts.maxTokens
+     *  >0         → 用该值
+     *  （推理模型走 REASONING_MAX_TOKENS，也是 >0，语义统一）
+     */
+    maxTokensArg = -1,
     viaDevProxy = false,
   ): Promise<
     | { ok: true; content: string }
@@ -155,11 +243,13 @@ export async function chat(
       messages,
       temperature: 0.7,
     }
-    const maxTokens = Math.floor(maxTokensArg > 0 ? maxTokensArg : opts?.maxTokens ?? 0)
+    const maxTokens = Math.floor(maxTokensArg < 0 ? opts?.maxTokens ?? 0 : maxTokensArg)
     if (maxTokens > 0) body.max_tokens = maxTokens
     if (jsonMode && withJson) {
       body.response_format = { type: 'json_object' }
     }
+    // 关闭模型内部思考：直连模式下直接生效；经 llm-proxy 中转时需新版函数透传该字段
+    if (useEffort) body.reasoning_effort = 'none'
 
     // 优先：Supabase Edge Function 中转（生产环境跨域场景）
     if (cfg.proxyUrl && cfg.proxyToken) {
@@ -212,29 +302,34 @@ export async function chat(
   //    并记住该上游，后续调用直接跳过 json 模式
   // 2) 429 / 408 / 5xx / 网络中断 status=0（上游限流如 sensenova 免费 QPS、连接被掐断）
   //    → 自动退避重试，最多 4 次（2s / 5s / 12s / 25s，累计约 44s）
-  // 3) 上游因 max_tokens 截断（finish_reason=length）返回空正文 → 加大 token 预算重试，
-  //    这是「推理/思考模型把预算全花在内部思考、没余量输出正文」的典型表现（v31.9 新增）。
+  // 3) 上游因 max_tokens 截断（finish_reason=length）返回空正文 → 一次给到推理模型预算并
+  //    记住该模型，这是「推理/思考模型把预算全花在内部思考、没余量输出正文」的表现（v31.9 起，
+  //    v31.13 由「逐级翻倍」改为「一次足额」——翻倍会连发多次慢请求，是「AI 很慢」的主因）。
   let useJson = !isJsonUnsupported(cfg)
   let last: { ok: false; status: number; detail: string } | null = null
   let retries = 0
   // 「HTTP 200 但正文为空」的补救次数：只给 1 次，避免无意义地拖长等待
   let emptyRetries = 0
-  // 「max_tokens 截断导致空正文」的升级重试：翻倍 token 预算直到上限，给推理模型吐正文的空间
-  let lengthRetries = 0
-  let curMaxTokens = Math.floor(opts?.maxTokens ?? 0)
-  const LENGTH_RETRY_CAP = 4000
+  // 已知是推理模型 → 一开始就给足预算（设了也会被内部思考吃光）
+  let curMaxTokens = isReasoningModel(cfg) ? REASONING_MAX_TOKENS : -1
+  // 「因 max_tokens 截断」的补救只做一次：一次给到推理模型预算，不逐级翻倍
+  let lengthRetryDone = false
   for (;;) {
     const r = await doRequest(useJson, curMaxTokens)
     if (r.ok && r.content) return r.content
 
     // 上游因 max_tokens 截断（finish_reason=length）而返回空正文：
     // 典型是「推理/思考模型」把预算全花在内部推理（reasoning_content），没余量输出正文。
-    // 这不是 response_format 不支持——不要误判为「不支持 json」，而是加大 token 预算重试。
-    const isLengthTrunc = !r.ok && /finish_reason=length/.test(r.detail || '') && curMaxTokens > 0
-    if (isLengthTrunc && curMaxTokens < LENGTH_RETRY_CAP && lengthRetries < 3) {
-      lengthRetries += 1
-      curMaxTokens = Math.min(curMaxTokens * 2, LENGTH_RETRY_CAP)
-      await new Promise((resolve) => setTimeout(resolve, 600))
+    // 两个不要：① 不要误判为「response_format 不支持」；② 不要逐级翻倍重试
+    // —— 翻倍要连发 700→1400→2800→4000 四次慢请求，等待时间成倍增长，加到头往往仍不够
+    // （2026-09-27 实测：用户体感的「AI 很慢」正来自这里）。
+    // 改为一次给到推理模型预算，并记住该模型，后续调用直接足额。
+    const isLengthTrunc = !r.ok && /finish_reason=length/.test(r.detail || '')
+    if (isLengthTrunc && !lengthRetryDone) {
+      lengthRetryDone = true
+      markReasoningModel(cfg)
+      curMaxTokens = REASONING_MAX_TOKENS
+      await new Promise((resolve) => setTimeout(resolve, 500))
       continue
     }
 
@@ -263,10 +358,23 @@ export async function chat(
     }
 
     last = r
-    if (useJson && jsonMode && r.status === 400 && !isLengthTrunc) {
-      markJsonUnsupported(cfg)
-      useJson = false
-      continue
+    // 400 / 422 且当前带着「可选的兼容性参数」→ 统一去掉后重试一次：
+    //  · reasoning_effort：部分上游不认这个参数名（只接受自家写法）
+    //  · response_format：部分上游不支持 json_object
+    // 两类一起判断、只跑一轮重试，避免为每个参数各白等一次失败往返。
+    if ((r.status === 400 || r.status === 422) && !isLengthTrunc) {
+      let changed = false
+      if (useEffort) {
+        markEffortUnsupported(cfg)
+        useEffort = false
+        changed = true
+      }
+      if (useJson && jsonMode) {
+        markJsonUnsupported(cfg)
+        useJson = false
+        changed = true
+      }
+      if (changed) continue
     }
     const retriable = r.status === 0 || r.status === 408 || r.status === 429 || r.status >= 500
     if (!retriable || retries >= RETRY_DELAYS.length) break
@@ -279,7 +387,11 @@ export async function chat(
       ? `（已自动重试 ${retries} 次仍被限流，请等 1-2 分钟再试；免费额度 QPS 很低，长文档建议分段导入）`
       : last.status === 0
         ? `（已自动重试 ${retries} 次，连接被中断，请检查网络或稍后重试）`
-        : ''
+        : /finish_reason=length/.test(last.detail || '')
+          ? `（已把输出预算提到 ${REASONING_MAX_TOKENS} 仍被截断——当前模型很可能是「推理/思考模型」，` +
+            'token 预算被模型内部思考吃光了。请到「设置 → AI 配置」把模型换成**非推理模型**，例如 ' +
+            'deepseek-chat / gpt-4o-mini / qwen-plus；推理模型生成慢且容易返回空正文，不适合本应用。）'
+          : ''
   throw new LlmError(
     last.status === 0 ? `网络错误：${last.detail}${hint}` : `API ${last.status}: ${last.detail}${hint}`,
   )
@@ -324,6 +436,9 @@ async function requestViaProxy(
         jsonMode: withJson,
         // 输出长度上限：新版 llm-proxy 会透传给上游；旧版函数忽略该字段（向后兼容）
         maxTokens: body.max_tokens,
+        // 推理力度：'none' = 关闭模型内部思考（商汤 6.8 等支持）。
+        // 同样需新版 llm-proxy 透传；旧版函数忽略该字段（此时只是没提速，不影响功能）。
+        reasoningEffort: body.reasoning_effort,
       }),
     })
   } catch (e) {
