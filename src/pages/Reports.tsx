@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import {
   Bot,
   BookOpenText,
+  ChevronDown,
   FileText,
   Loader2,
   Plus,
@@ -13,7 +14,7 @@ import {
   Users,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { db, markDeleted, touch, withSyncFields } from '@/lib/db'
+import { db, markDeleted, touch, uniqueMemberStudentIds, withSyncFields } from '@/lib/db'
 import { useBreakpoint } from '@/hooks/useBreakpoint'
 import {
   Badge,
@@ -34,12 +35,13 @@ import { generateReport, isAiConfigured, type ReportInput } from '@/lib/llm'
 import { resolveCheckInTaskContent } from '@/lib/points'
 import {
   TAG_TYPES,
+  type GroupMember,
   type LearningReport,
   type LearningTag,
   type Student,
   type StudentTag,
 } from '@/lib/types'
-import { cn, initialOf, subjectColorVar } from '@/lib/utils'
+import { cn, initialOf, normalizeAiFeedback, subjectColorVar } from '@/lib/utils'
 import { exportReports } from '@/lib/exporters'
 
 type TabKey = 'reports' | 'tags'
@@ -99,6 +101,8 @@ export default function ReportsPage() {
   const feedbacks = useLiveQuery(() => db.courseFeedbacks.toArray(), [])
   const checkInRecords = useLiveQuery(() => db.checkInRecords.toArray(), [])
   const checkInTasks = useLiveQuery(() => db.checkInTasks.toArray(), [])
+  const groupMembers = useLiveQuery(() => db.groupMembers.toArray(), [])
+  const attendances = useLiveQuery(() => db.courseAttendances.toArray(), [])
 
   const liveStudents = useMemo(
     () => (students ?? []).filter((s) => !s.deletedAt && s.status !== 'archived'),
@@ -119,21 +123,67 @@ export default function ReportsPage() {
     studentId || liveStudents.find((s) => s.status === 'active')?.id || liveStudents[0]?.id || ''
   const student = liveStudents.find((s) => s.id === effectiveStudentId)
 
+  /**
+   * 该学生所在的班课 ID 集合。
+   *
+   * ⚠️ 关键：班课课程的 `studentId` 恒为 null（见 Course 类型注释），只有 `groupId` 有值。
+   * 旧实现只按 `c.studentId === student.id` 匹配，导致**所有班课学生**在学习报告页
+   * 统计恒为 0（已上线症状：已完成 0 节 / 已排课 0 节 / 课后反馈 0 条 / 科目 —），
+   * 而打卡备注却正常（打卡记录本身带 studentId）。必须用班课成员关系补齐。
+   *
+   * ⚠️ 成员去重一律走 uniqueMemberStudentIds：同一 (groupId, studentId) 可能存在多条存活行，
+   * 按行遍历会把同一学生重复计入（本项目反复踩过的坑）。
+   */
+  const myGroupIds = useMemo(() => {
+    const byGroup = new Map<string, GroupMember[]>()
+    for (const m of groupMembers ?? []) {
+      if (m.deletedAt) continue
+      const list = byGroup.get(m.groupId)
+      if (list) list.push(m)
+      else byGroup.set(m.groupId, [m])
+    }
+    const ids = new Set<string>()
+    for (const [gid, rows] of byGroup) {
+      if (uniqueMemberStudentIds(rows, gid).includes(effectiveStudentId)) ids.add(gid)
+    }
+    return ids
+  }, [groupMembers, effectiveStudentId])
+
   const range = useMemo(() => periodRange(periodKey, custom), [periodKey, custom])
 
-  /** 该学生在周期内的课程 */
+  /**
+   * 该学生在周期内的课程：一对一按 `studentId`，班课按「是否该班课成员」。
+   * 已取消 / 请假的课不计入「已排课、已完成」统计（它们并未实际发生）。
+   */
   const periodCourses = useMemo(() => {
     if (!student) return []
     return (courses ?? [])
-      .filter(
-        (c) =>
-          !c.deletedAt &&
-          c.studentId === student.id &&
-          c.startAt >= range.start &&
-          c.startAt <= range.end,
-      )
+      .filter((c) => {
+        if (c.deletedAt) return false
+        if (c.startAt < range.start || c.startAt > range.end) return false
+        if (c.status === 'cancelled' || c.status === 'leave') return false
+        if (c.studentId === student.id) return true
+        return Boolean(c.groupId) && myGroupIds.has(c.groupId as string)
+      })
       .sort((a, b) => a.startAt - b.startAt)
-  }, [courses, student, range])
+  }, [courses, student, range, myGroupIds])
+
+  /**
+   * 该学生在周期内被明确标记「未出席」的课程 ID。
+   * 只有存在 `present === false` 的出勤记录才算缺勤——没有记录一律视为正常出席，
+   * 避免因缺记录而误把已完成课程减掉。
+   */
+  const absentCourseIds = useMemo(() => {
+    const out = new Set<string>()
+    if (!student) return out
+    const inPeriod = new Set(periodCourses.map((c) => c.id))
+    for (const a of attendances ?? []) {
+      if (a.deletedAt || a.present) continue
+      if (a.studentId !== student.id || !inPeriod.has(a.courseId)) continue
+      out.add(a.courseId)
+    }
+    return out
+  }, [attendances, periodCourses, student])
 
   /** 周期内课程的反馈摘要 */
   const feedbackSummaries = useMemo(() => {
@@ -232,6 +282,7 @@ export default function ReportsPage() {
               custom={custom}
               setCustom={setCustom}
               periodCourses={periodCourses}
+              absentCourseIds={absentCourseIds}
               feedbackSummaries={feedbackSummaries}
               checkInNotes={checkInNotes}
               tags={studentTagNames.map((t) => t.name)}
@@ -275,6 +326,7 @@ export default function ReportsPage() {
               custom={custom}
               setCustom={setCustom}
               periodCourses={periodCourses}
+              absentCourseIds={absentCourseIds}
               feedbackSummaries={feedbackSummaries}
               checkInNotes={checkInNotes}
               tags={studentTagNames.map((t) => t.name)}
@@ -380,6 +432,7 @@ function ReportPanel({
   custom,
   setCustom,
   periodCourses,
+  absentCourseIds,
   feedbackSummaries,
   checkInNotes,
   tags,
@@ -394,6 +447,8 @@ function ReportPanel({
   custom: { start: string; end: string }
   setCustom: (v: { start: string; end: string }) => void
   periodCourses: Array<{ id: string; subject: string; status: string; startAt: number }>
+  /** 该学生在本周期被标记「未出席」的课程 ID（有明确 present=false 记录才算） */
+  absentCourseIds?: Set<string>
   feedbackSummaries: string[]
   checkInNotes: Array<{ dayAt: number; note: string; aiFeedback: string; taskTitle?: string; taskNote?: string }>
   tags: string[]
@@ -409,6 +464,8 @@ function ReportPanel({
   const [saved, setSaved] = useState(false)
   /** AI 已等待秒数：让等待可感知（v31.5） */
   const [aiElapsed, setAiElapsed] = useState(0)
+  /** 打卡备注默认折叠：条数多时（实测 12 条）会把整页撑得很长，需要时手动展开 */
+  const [notesOpen, setNotesOpen] = useState(false)
 
   useEffect(() => {
     if (!aiLoading) return
@@ -426,7 +483,12 @@ function ReportPanel({
     setSaved(Boolean(existingReport))
   }, [existingReport?.id, student?.id, range.start, range.end])
 
-  const doneCount = periodCourses.filter((c) => c.status === 'done').length
+  /** 已完成：状态 done 且该学生本周期内没有被标记缺勤 */
+  const doneCount = periodCourses.filter(
+    (c) => c.status === 'done' && !absentCourseIds?.has(c.id),
+  ).length
+  /** 本周期内被明确标记「未出席」的节数（无记录不算缺勤） */
+  const absentCount = absentCourseIds?.size ?? 0
   const subjects = Array.from(new Set(periodCourses.map((c) => c.subject).filter(Boolean)))
   const aiReady = isAiConfigured(settings)
 
@@ -544,6 +606,7 @@ function ReportPanel({
           <div className="flex flex-wrap gap-4 border-t border-line-1 pt-3 text-sm">
             <Stat label="已完成" value={`${doneCount} 节`} />
             <Stat label="已排课" value={`${periodCourses.length} 节`} />
+            {absentCount > 0 && <Stat label="缺勤" value={`${absentCount} 节`} />}
             <Stat label="课后反馈" value={`${feedbackSummaries.length} 条`} />
             <Stat label="打卡备注" value={`${checkInNotes.length} 条`} />
             <Stat label="科目" value={subjects.join('、') || '—'} />
@@ -565,33 +628,54 @@ function ReportPanel({
         <Card>
           <CardHeader
             title="打卡备注"
-            subtitle={`${checkInNotes.length} 条 · AI 生成报告时会作为素材`}
+            subtitle={
+              notesOpen
+                ? `${checkInNotes.length} 条 · AI 生成报告时会作为素材`
+                : `${checkInNotes.length} 条 · 已折叠，展开可查看（AI 生成报告时照常作为素材）`
+            }
+            action={
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-expanded={notesOpen}
+                onClick={() => setNotesOpen((v) => !v)}
+              >
+                {notesOpen ? '收起' : '展开'}
+                <ChevronDown
+                  size={15}
+                  className={cn('transition-transform', notesOpen && 'rotate-180')}
+                />
+              </Button>
+            }
           />
-          <ul className="divide-y divide-line-1">
-            {checkInNotes.map((n) => (
-              <li key={n.dayAt} className="px-4 py-2.5">
-                <div className="flex items-start gap-2">
-                  <span className="mt-0.5 shrink-0 text-xs text-text-3">
-                    {new Date(n.dayAt).toLocaleDateString('zh-CN', {
-                      month: 'numeric',
-                      day: 'numeric',
-                    })}
-                  </span>
-                  <div className="min-w-0 flex-1 space-y-1">
-                    {n.note && (
-                      <p className="text-[13px] text-text-1">{n.note}</p>
-                    )}
-                    {n.aiFeedback && (
-                      <p className="rounded bg-accent-soft/60 px-2 py-1 text-[12px] text-accent-text">
-                        <Bot size={11} className="mr-1 inline" />
-                        {n.aiFeedback}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
+          {notesOpen && (
+            <ul className="divide-y divide-line-1">
+              {checkInNotes.map((n) => {
+                const aiText = normalizeAiFeedback(n.aiFeedback)
+                return (
+                  <li key={n.dayAt} className="px-4 py-2.5">
+                    <div className="flex items-start gap-2">
+                      <span className="mt-0.5 shrink-0 text-xs text-text-3">
+                        {new Date(n.dayAt).toLocaleDateString('zh-CN', {
+                          month: 'numeric',
+                          day: 'numeric',
+                        })}
+                      </span>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        {n.note && <p className="text-[13px] text-text-1">{n.note}</p>}
+                        {aiText && (
+                          <p className="rounded bg-accent-soft/60 px-2 py-1 text-[12px] text-accent-text">
+                            <Bot size={11} className="mr-1 inline" />
+                            {aiText}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
         </Card>
       )}
 

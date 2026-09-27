@@ -194,3 +194,28 @@ export function initialOf(name: string): string {
   if (/[\u4e00-\u9fa5]/.test(n)) return n.slice(-1)
   return n[0]!.toUpperCase()
 }
+
+/**
+ * 归一化「AI 打卡反馈」文本。
+ *
+ * 历史数据里有部分 `CheckInRecord.aiFeedback` 被整段存成了原始 JSON
+ * （形如 `{"feedback":"文心这次打卡…"}`），直接展示会在界面上出现一串花括号，
+ * 喂给报告/画像 AI 时也是噪音。这里只做一件事：整串恰好是含字符串
+ * `feedback`/`text`/`content`/`reply` 字段的 JSON 对象时，取出该字段；
+ * 其余情况（普通文本、合法但无关的 JSON、非法 JSON）一律原样返回，绝不吃掉正文。
+ */
+export function normalizeAiFeedback(raw: string | null | undefined): string {
+  const t = (raw ?? '').trim()
+  if (t.length < 2 || t[0] !== '{' || t[t.length - 1] !== '}') return t
+  try {
+    const obj = JSON.parse(t) as Record<string, unknown>
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return t
+    for (const key of ['feedback', 'text', 'content', 'reply']) {
+      const v = obj[key]
+      if (typeof v === 'string' && v.trim()) return v.trim()
+    }
+  } catch {
+    // 不是合法 JSON：保留原文
+  }
+  return t
+}

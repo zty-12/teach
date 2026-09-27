@@ -1,4 +1,5 @@
 import type { AppSettings, Course } from './types'
+import { normalizeAiFeedback } from './utils'
 
 /**
  * LLM 适配层（前端直连 / 经 Supabase Edge Function 中转）
@@ -820,7 +821,11 @@ export function buildReportPrompt(input: ReportInput): Array<{ role: 'system' | 
               if (n.taskNote) taskParts.push(`要求：${clipText(n.taskNote, REPORT_CLIP.taskNoteChars)}`)
               parts.push(`  · ${taskParts.join('；')}`)
             }
-            if (n.aiFeedback) parts.push(`  · 教师观察：${clipText(n.aiFeedback, REPORT_CLIP.aiFeedbackChars)}`)
+            if (n.aiFeedback) {
+              // 归一化：历史数据里有整段存成 {"feedback":"…"} 的记录，直接当素材喂进去会污染报告
+              const obs = normalizeAiFeedback(n.aiFeedback)
+              if (obs) parts.push(`  · 教师观察：${clipText(obs, REPORT_CLIP.aiFeedbackChars)}`)
+            }
             return parts.join('\n')
           })
           .join('\n')
