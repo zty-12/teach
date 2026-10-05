@@ -192,8 +192,8 @@ export function FinanceTab({
         </div>
       )}
 
-      {/* 余量预警 */}
-      {isPrepaid && student.remainingHours <= student.remindHours && (
+      {/* 余量预警：仅对在读学生提示续费；已归档/暂停/结课的余量冻结，不催续费 */}
+      {isPrepaid && student.status === 'active' && student.remainingHours <= student.remindHours && (
         <div
           className={cn(
             'mt-3 rounded-lg px-3 py-2 text-[13px]',
@@ -205,6 +205,12 @@ export function FinanceTab({
           {student.remainingHours === 0
             ? `⚠ 课时已用完，建议提醒家长续费`
             : `⚠ 剩余 ${student.remainingHours} 课时，低于提醒阈值 ${student.remindHours} 课时`}
+        </div>
+      )}
+      {/* 已归档学生的冻结余量提示（替代续费提醒） */}
+      {isPrepaid && student.status === 'archived' && (
+        <div className="mt-3 rounded-lg bg-surface-3 px-3 py-2 text-[13px] text-text-2">
+          ❄ 已归档：剩余 {student.remainingHours} 课时已冻结保留，解档后可继续扣减，不计入续费提醒
         </div>
       )}
     </div>

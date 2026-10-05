@@ -136,7 +136,9 @@ export function calculateCompletion(input: CompletionInput): CompletionBreakdown
   const deductions: CompletionBreakdown['deductions'] = []
   const lowBalance: CompletionBreakdown['lowBalance'] = []
   for (const { student: s } of present) {
-    if (s.billingRule === 'prepaid') {
+    // 仅「在读」预付学生扣减；已归档/暂停/结课视为余量冻结，不扣课时
+    // （满足「试听几节就不续费 / 不上了」场景：归档后即便仍在班课出席也不减余量）
+    if (s.billingRule === 'prepaid' && s.status === 'active') {
       const before = s.remainingHours
       const after = Math.max(0, before - 1)
       deductions.push({ studentId: s.id, before, after })
@@ -440,6 +442,13 @@ export async function materializeWeekFromGroups(
   let created = 0
   let skipped = 0
 
+  // 已归档学生：不再生成未来课程（「不上了」语义），其已有课程与课时余量保留
+  const archivedStudentIds = new Set(
+    (await db.students.toArray())
+      .filter((s) => !s.deletedAt && s.status === 'archived')
+      .map((s) => s.id),
+  )
+
   const existing = await db.courses.toArray()
   const existingKeys = new Set(
     existing
@@ -497,9 +506,9 @@ export async function materializeWeekFromGroups(
     await db.courses.put(course)
     existingKeys.add(key)
 
-    // 预创建所有成员的出席记录（默认 present=true）
+    // 预创建所有成员的出席记录（默认 present=true）；跳过已归档成员
     const memberIds = allMembers
-      .filter((m) => !m.deletedAt && m.groupId === g.id)
+      .filter((m) => !m.deletedAt && m.groupId === g.id && !archivedStudentIds.has(m.studentId))
       .map((m) => m.studentId)
     for (const sid of memberIds) {
       const att = withSyncFields<CourseAttendance>({

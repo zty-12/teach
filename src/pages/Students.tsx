@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import {
   Archive,
+  ArchiveRestore,
   CalendarPlus,
   Check,
   Download,
@@ -180,10 +181,21 @@ export default function StudentsPage() {
   }
 
   async function handleArchive(s: Student) {
-    if (!confirm(`确定归档「${s.name}」吗？归档后不再占用在读名额，可在「归档」筛选中找回。`)) {
+    const hrNote =
+      s.billingRule === 'prepaid' && s.remainingHours > 0
+        ? `，剩余 ${s.remainingHours} 课时将冻结保留（解档后可继续用）`
+        : ''
+    if (!confirm(`确定归档「${s.name}」吗？归档后不再占用在读名额${hrNote}，可在「归档」筛选中找回/解档。`)) {
       return
     }
     await db.students.put(touch({ ...s, status: 'archived' }))
+  }
+
+  async function handleUnarchive(s: Student) {
+    if (!confirm(`确定将「${s.name}」恢复为在读吗？其剩余 ${s.billingRule === 'prepaid' ? s.remainingHours + ' 课时' : '计费信息'}将重新生效。`)) {
+      return
+    }
+    await db.students.put(touch({ ...s, status: 'active' }))
   }
 
   function openScheduleFor(s: Student) {
@@ -378,6 +390,7 @@ export default function StudentsPage() {
           allVisibleSelected={allVisibleSelected}
           onView={openDetail}
           onArchive={handleArchive}
+          onUnarchive={handleUnarchive}
         />
       ) : isDesktop ? (
         <CardGrid
@@ -595,6 +608,7 @@ function DesktopTable({
   allVisibleSelected,
   onView,
   onArchive,
+  onUnarchive,
 }: {
   list: Student[]
   tagMap: Map<string, LearningTag[]>
@@ -604,6 +618,7 @@ function DesktopTable({
   allVisibleSelected: boolean
   onView: (id: string) => void
   onArchive: (s: Student) => void
+  onUnarchive: (s: Student) => void
 }) {
   return (
     <Card className="overflow-hidden">
@@ -689,7 +704,12 @@ function DesktopTable({
                       <Eye size={14} />
                       详情
                     </Button>
-                    {s.status !== 'archived' && (
+                    {s.status === 'archived' ? (
+                      <Button size="sm" variant="ghost" onClick={() => onUnarchive(s)}>
+                        <ArchiveRestore size={14} />
+                        解档
+                      </Button>
+                    ) : (
                       <Button size="sm" variant="ghost" onClick={() => onArchive(s)}>
                         <Archive size={14} />
                         归档
