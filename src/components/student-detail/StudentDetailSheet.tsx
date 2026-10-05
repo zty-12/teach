@@ -31,6 +31,7 @@ import {
 } from '@/lib/types'
 import { maskPhone } from '@/lib/utils'
 import { cn } from '@/lib/utils'
+import { coursesForStudent } from '@/lib/studentCourseStats'
 import { BasicsTab } from './tabs/BasicsTab'
 import { CoursesTab } from './tabs/CoursesTab'
 import { PaymentsTab } from './tabs/PaymentsTab'
@@ -112,13 +113,21 @@ export function StudentDetailSheet({
   // 该学生的有效数据
   const data = useMemo(() => {
     if (!student || !courses || !attendances || !groups || !groupMembers) return null
-    const studentCourses: Course[] = courses
-      .filter((c) => !c.deletedAt && c.studentId === student.id)
-      .sort((a, b) => b.startAt - a.startAt)
-    const studentAttendances: CourseAttendance[] = attendances.filter((a) => {
-      if (a.deletedAt) return false
-      return studentCourses.some((c) => c.id === a.courseId)
-    })
+    // v31.16：课程口径统一走 coursesForStudent
+    //（1对1 按 studentId + 班课按成员关系）。
+    // 旧实现只按 `c.studentId === student.id` 过滤，而班课课程的 studentId 恒为 null，
+    // 导致班课学生的「排课记录 / 财务概览」恒为空（课酬、课次全是 0）。
+    const studentCourses: Course[] = coursesForStudent(
+      student.id,
+      courses,
+      groupMembers,
+    ).sort((a, b) => (b.startAt ?? 0) - (a.startAt ?? 0)) as Course[]
+
+    // 出席记录：取该生在这些课上的存活行（班课出席记录带 studentId，可直接按 studentId 过滤）
+    const myCourseIds = new Set(studentCourses.map((c) => c.id))
+    const studentAttendances: CourseAttendance[] = attendances.filter(
+      (a) => !a.deletedAt && (a.studentId === student.id || myCourseIds.has(a.courseId)),
+    )
     const liveGroups = groups.filter((g) => !g.deletedAt)
     const liveGroupMembers: GroupMember[] = groupMembers.filter(
       (m) => !m.deletedAt && m.studentId === student.id,

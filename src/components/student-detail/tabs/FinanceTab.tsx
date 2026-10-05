@@ -17,10 +17,14 @@ interface StudentFinance {
   outstanding: number
   /** 退款总额 */
   refunded: number
-  /** 已上课时数 */
+  /** 已上课时数（该生实际出席的节数） */
   doneCount: number
-  /** 本月已上课时数 */
+  /** 本月已上课时数（该生实际出席的节数） */
   monthDoneCount: number
+  /** 完成课次（含该生请假缺席的课；与「实到」不同，用于说明请假了几节） */
+  completedCount: number
+  /** 该生缺席节数（完成但未出席） */
+  absentCount: number
 }
 
 /**
@@ -45,6 +49,8 @@ function computeStudentFinance(args: {
   let outstanding = 0
   let doneCount = 0
   let monthDoneCount = 0
+  let completedCount = 0
+  let absentCount = 0
 
   const monthStart = new Date()
   monthStart.setDate(1)
@@ -53,14 +59,23 @@ function computeStudentFinance(args: {
 
   for (const c of courses) {
     if (c.status !== 'done') continue
+    // v31.16：区分「完成」与「该生出勤」——
+    // 一节课上完 ≠ 该生到了。以前所有在读学生都会显示同样的课次数，
+    // 老师看列表以为「只到 6 人却 9 人都被记了课/扣了学时」。
+    const att = attMap.get(c.id)
+    // 无出席记录的历史数据视为出席（只有明确 present=false 才算缺席），避免旧数据凭空少算
+    const attended = att?.present !== false
+    completedCount++
+    if (!attended) absentCount++
     doneCount++
-    if (c.startAt >= monthStartTs) monthDoneCount++
+    if (attended) {
+      if (c.startAt >= monthStartTs) monthDoneCount++
+    }
 
     let share = 0
     if (c.groupId) {
       // 班课：该学生出席则按人均单价计算
-      const att = attMap.get(c.id)
-      if (att?.present) share = c.feeCents
+      if (attended) share = c.feeCents
     } else if (c.studentId === student.id) {
       // 一对一：含补课
       share = c.feeCents > 0
@@ -93,6 +108,8 @@ function computeStudentFinance(args: {
     refunded,
     doneCount,
     monthDoneCount,
+    completedCount,
+    absentCount,
   }
 }
 
@@ -123,7 +140,11 @@ export function FinanceTab({
         <Stat
           label="累计课酬"
           value={formatMoney(fin.earnedTotal)}
-          hint={`${fin.doneCount} 节课（本月 ${fin.monthDoneCount}）`}
+          hint={
+            fin.absentCount > 0
+              ? `实到 ${fin.doneCount} 节（本月 ${fin.monthDoneCount}）· 请假 ${fin.absentCount} 节`
+              : `实到 ${fin.doneCount} 节（本月 ${fin.monthDoneCount}）`
+          }
         />
         <Stat
           label="累计支付"

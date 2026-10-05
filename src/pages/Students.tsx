@@ -45,6 +45,7 @@ import {
   type StudentTag,
 } from '@/lib/types'
 import { cn, maskPhone, subjectColorVar } from '@/lib/utils'
+import { studentCourseStats } from '@/lib/studentCourseStats'
 import { exportStudents } from '@/lib/exporters'
 
 type StatusFilter = StudentStatus | 'all'
@@ -63,9 +64,9 @@ type ViewMode = 'card' | 'list'
 interface StudentCardInfo {
   /** 最近一次（含未来最近）排课，用于"下次课"展示 */
   nextCourse?: Course
-  /** 已完成课次 */
+  /** 实际出席课次（完成 且 该生出勤；v31.16 起不再等同"完成课次"） */
   doneCount: number
-  /** 该生已上的累计课时（完成课次数） */
+  /** 完成课次（该生参与的课里已完成的节数，含其请假缺席的课） */
   coursesTotal: number
 }
 
@@ -91,6 +92,7 @@ export default function StudentsPage() {
   const groups = useLiveQuery(() => db.groups.toArray(), [])
   const groupMembers = useLiveQuery(() => db.groupMembers.toArray(), [])
   const courses = useLiveQuery(() => db.courses.toArray(), [])
+  const attendances = useLiveQuery(() => db.courseAttendances.toArray(), [])
 
   // 有效标签 + 学生→标签名映射（含按标签名搜索）
   const tagMap = useMemo(() => {
@@ -134,32 +136,27 @@ export default function StudentsPage() {
   // 派生每张卡片信息：下次课 + 已完成课次
   const cardInfo = useMemo(() => {
     const now = Date.now()
-    const groupMembersByStudent = new Map<string, GroupMember[]>()
-    for (const m of groupMembers ?? []) {
-      if (m.deletedAt) continue
-      const arr = groupMembersByStudent.get(m.studentId) ?? []
-      arr.push(m)
-      groupMembersByStudent.set(m.studentId, arr)
-    }
     const map = new Map<string, StudentCardInfo>()
     for (const s of students ?? []) {
       if (s.deletedAt) continue
-      // 该生可参与的课程：1对1(studentId=该生) 或 班课(groupId ∈ 该生所属班课)
-      const myGroupIds = new Set(
-        (groupMembersByStudent.get(s.id) ?? []).map((m) => m.groupId),
-      )
-      const myCourses = liveCourses.filter(
-        (c) => c.studentId === s.id || (c.groupId && myGroupIds.has(c.groupId)),
-      )
-      const doneCount = myCourses.filter((c) => c.status === 'done').length
-      // 下次课：未来最近的一条（含待上课/请假）
-      const nextCourse = myCourses
-        .filter((c) => c.startAt >= now && c.status !== 'cancelled')
-        .sort((a, b) => a.startAt - b.startAt)[0]
-      map.set(s.id, { nextCourse, doneCount, coursesTotal: myCourses.length })
+      // v31.16：课程口径统一走 studentCourseStats
+      //（1对1 按 studentId + 班课按成员关系），且「实到」按出席记录 present=true 统计，
+      // 避免「这节课只到 6 人」却对全部在读学生显示同样课次（看着像所有人都被扣了课时）。
+      const st = studentCourseStats({
+        studentId: s.id,
+        courses,
+        attendances,
+        members: groupMembers,
+        now,
+      })
+      map.set(s.id, {
+        nextCourse: st.nextCourse as Course | undefined,
+        doneCount: st.attendedCount,
+        coursesTotal: st.doneCount,
+      })
     }
     return map
-  }, [students, groupMembers, liveCourses])
+  }, [students, groupMembers, courses, attendances])
 
   function openCreate() {
     setEditing(null)
@@ -513,7 +510,15 @@ function CardGrid({
 
             {/* 课次概览 */}
             <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg bg-surface-2 p-2.5 text-center">
-              <Cell value={`${info?.doneCount ?? 0}`} label="已上课" />
+              <Cell
+                value={`${info?.doneCount ?? 0}`}
+                label="实到课次"
+                hint={
+                  info && info.coursesTotal > info.doneCount
+                    ? `完成 ${info.coursesTotal} 节 · 请假 ${info.coursesTotal - info.doneCount} 节`
+                    : undefined
+                }
+              />
               <Cell
                 value={
                   s.billingRule === 'prepaid'
@@ -580,10 +585,13 @@ function Cell({
   value,
   label,
   tone = 'default',
+  hint,
 }: {
   value: string
   label: string
   tone?: 'default' | 'done' | 'pending'
+  /** 补充说明（如「完成 5 节 · 请假 1 节」），让统计口径对老师可见 */
+  hint?: string
 }) {
   const toneClass =
     tone === 'done' ? 'text-done' : tone === 'pending' ? 'text-pending' : 'text-text-1'
@@ -591,6 +599,9 @@ function Cell({
     <div>
       <div className={cn('text-[15px] font-semibold tabular-nums', toneClass)}>{value}</div>
       <div className="text-[11px] text-text-3">{label}</div>
+      {hint && (
+        <div className="mt-0.5 text-[10px] leading-tight text-text-3">{hint}</div>
+      )}
     </div>
   )
 }
