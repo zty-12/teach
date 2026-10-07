@@ -1743,11 +1743,11 @@ function MarketView({
     try {
       await db.redemptions.put(touch({ ...r, status: 'cancelled' }))
       await adjustPoints(r.studentId, r.pointsSpent, `撤销兑换：${r.rewardName}`)
-      // 退回库存：兑换时 stock 减过 1，撤销必须加回去，否则库存会「凭空蒸发」。
+      // 退回库存：兑换时 stock 减过 quantity，撤销必须按数量加回去，否则库存会「凭空蒸发」。
       // 重新读一次库内最新值再写，避免用列表里的旧快照覆盖别人刚做的改动。
       const item = await db.rewardItems.get(r.rewardItemId)
       if (item && !item.deletedAt && item.stock !== null) {
-        await db.rewardItems.put(touch({ ...item, stock: item.stock + 1 }))
+        await db.rewardItems.put(touch({ ...item, stock: item.stock + (r.quantity ?? 1) }))
       }
     } finally {
       setBusyId(null)
@@ -1855,7 +1855,10 @@ function MarketView({
                           <span className="truncate text-sm font-medium text-text-1">
                             {s?.name ?? '已删学生'}
                           </span>
-                          <span className="text-[12px] text-text-2">{r.rewardName}</span>
+                          <span className="text-[12px] text-text-2">
+                            {r.rewardName}
+                            {(r.quantity ?? 1) > 1 ? ` ×${r.quantity ?? 1}` : ''}
+                          </span>
                           <Badge variant="primary">-{r.pointsSpent} 分</Badge>
                           <Badge
                             variant={
@@ -2019,6 +2022,7 @@ function RedeemModal({
 }) {
   const open = !!student
   const [itemId, setItemId] = useState('')
+  const [qty, setQty] = useState(1)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -2031,20 +2035,31 @@ function RedeemModal({
   useEffect(() => {
     if (!open) return
     setItemId('')
+    setQty(1)
     setError('')
     setBusy(false)
   }, [open, student])
 
   const item = available.find((r) => r.id === itemId) ?? null
-  const affordable = item ? balance >= item.pointsCost : false
+  // 一次最多可兑换数量：受「余额可买个数 / 库存 / 999 上限」三者约束
+  const maxQty = item
+    ? Math.min(
+        item.pointsCost > 0 ? Math.floor(balance / item.pointsCost) : 999,
+        item.stock ?? 999,
+        999,
+      )
+    : 0
+  // 实际生效数量（夹在 [1, maxQty]；maxQty=0 表示不可兑换）
+  const safeQty = item && maxQty > 0 ? Math.max(1, Math.min(qty, maxQty)) : 0
+  const affordable = safeQty > 0
 
   async function handleConfirm() {
-    if (!student || !item || busy) return
+    if (!student || !item || busy || !affordable) return
     setBusy(true)
     setError('')
     try {
       // redeemReward 内部会再校验一次积分与库存，并写 spend 流水 + 兑换记录 + 扣库存
-      const res = await redeemReward(student.id, item.id)
+      const res = await redeemReward(student.id, item.id, safeQty)
       if (res.ok) onClose()
       else setError(res.message)
     } catch (e) {
@@ -2082,7 +2097,13 @@ function RedeemModal({
           当前积分余额 <span className="font-medium text-text-1">{balance}</span>
         </div>
         <Field label="选择奖励">
-          <Select value={itemId} onChange={(e) => setItemId(e.target.value)}>
+          <Select
+            value={itemId}
+            onChange={(e) => {
+              setItemId(e.target.value)
+              setQty(1)
+            }}
+          >
             <option value="">请选择…</option>
             {available.map((r) => (
               <option key={r.id} value={r.id} disabled={r.pointsCost > balance}>
@@ -2095,11 +2116,47 @@ function RedeemModal({
         {available.length === 0 && (
           <p className="text-[13px] text-text-3">暂无「已上架且有库存」的奖励项。</p>
         )}
-        {item && (
-          <p className="text-[13px] text-text-2">
-            将扣除 <span className="font-medium text-text-1">{item.pointsCost}</span> 分，兑换后余额{' '}
-            <span className="font-medium text-text-1">{balance - item.pointsCost}</span> 分。
-          </p>
+        {item && maxQty > 0 && (
+          <div className="rounded-lg bg-surface-2 px-3 py-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[13px] text-text-2">兑换数量</span>
+              <button
+                type="button"
+                className="text-[12px] text-text-1 hover:underline disabled:cursor-not-allowed disabled:text-text-3 disabled:no-underline"
+                disabled={maxQty <= 1}
+                onClick={() => setQty(Math.max(1, maxQty))}
+              >
+                一键最大（{maxQty}）
+              </button>
+            </div>
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                type="button"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-1 text-lg text-text-1 disabled:opacity-40"
+                disabled={safeQty <= 1}
+                onClick={() => setQty((q) => Math.max(1, q - 1))}
+              >
+                −
+              </button>
+              <span className="min-w-[2.5rem] text-center text-base font-semibold text-text-1">
+                {safeQty}
+              </span>
+              <button
+                type="button"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-line-1 text-lg text-text-1 disabled:opacity-40"
+                disabled={safeQty >= maxQty}
+                onClick={() => setQty((q) => Math.min(maxQty, q + 1))}
+              >
+                +
+              </button>
+              <span className="ml-auto text-[12px] text-text-3">{item.pointsCost} 分/个</span>
+            </div>
+            <p className="mt-2 text-[13px] text-text-2">
+              将扣除 <span className="font-medium text-text-1">{item.pointsCost * safeQty}</span> 分，
+              兑换后余额{' '}
+              <span className="font-medium text-text-1">{balance - item.pointsCost * safeQty}</span> 分。
+            </p>
+          </div>
         )}
       </div>
     </Modal>

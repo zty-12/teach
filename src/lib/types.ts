@@ -907,6 +907,8 @@ export interface Redemption extends SyncFields {
   /** 兑换时快照的奖励名（避免奖励项改名后查不到） */
   rewardName: string
   pointsSpent: number
+  /** 一次兑换的数量（默认 1；支持「一次兑换 N 个」）。撤销时按此数量退还库存 */
+  quantity: number
   status: RedemptionStatus
   redeemedAt: number
   fulfilledAt: number | null

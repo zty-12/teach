@@ -354,11 +354,22 @@ export interface RedeemResult {
 /**
  * 兑换奖励：校验积分充足与库存 → 扣积分（写 spend 流水）+ 建兑换记录。
  * 兑换记录初始状态为 pending（待发放），由老师在核销时改为 fulfilled。
+ *
+ * @param quantity 一次兑换的数量（默认 1）。支持「一次兑换 N 个」：
+ *   - 写 **1 条** spend 流水（delta = -单价×数量），理由带 ×N；
+ *   - 写 **1 条** redemption 记录（quantity=N、pointsSpent=单价×数量）；
+ *   - 库存减 N。核销/撤销均按单条记录处理，无需循环 N 次。
  */
 export async function redeemReward(
   studentId: string,
   rewardItemId: string,
+  quantity = 1,
 ): Promise<RedeemResult> {
+  // 入参防御：quantity 必须是 ≥1 的整数
+  const qty = Math.floor(quantity)
+  if (!Number.isFinite(qty) || qty < 1) {
+    return { ok: false as const, message: '兑换数量必须为 ≥1 的整数' }
+  }
   // ⚠ 「读库存 → 校验 → 写回」必须包在**同一事务**里，并在事务内重读库存。
   //   否则两个并发兑换都会读到旧 stock 并通过校验，各自写回 stock-1（覆盖写丢一次扣减），
   //   结果是「1 个库存卖出 2 份、扣两次积分」（v26 审查实证：P3）。
@@ -377,24 +388,27 @@ export async function redeemReward(
       if (!item || item.deletedAt) return { ok: false as const, message: '奖励项不存在' }
       if (!item.enabled) return { ok: false as const, message: '该奖励已下架' }
       if (!student) return { ok: false as const, message: '学生不存在' }
-      if (balance.balance < item.pointsCost) {
+      const totalCost = item.pointsCost * qty
+      if (balance.balance < totalCost) {
         return {
           ok: false as const,
-          message: `积分不足：需要 ${item.pointsCost} 分，当前 ${balance.balance} 分`,
+          message: `积分不足：需要 ${totalCost} 分（${item.pointsCost} 分 × ${qty}），当前 ${balance.balance} 分`,
         }
       }
-      if (item.stock !== null && item.stock <= 0) {
-        return { ok: false as const, message: '库存不足' }
+      if (item.stock !== null && item.stock < qty) {
+        return {
+          ok: false as const,
+          message: `库存不足：需要 ${qty} 个，当前库存 ${item.stock} 个`,
+        }
       }
 
       const now = Date.now()
-      const cost = item.pointsCost
       await db.pointLedgers.put(
         withSyncFields<PointLedger>({
           studentId,
-          delta: -cost,
+          delta: -totalCost,
           kind: 'spend',
-          reason: `兑换：${item.name}`,
+          reason: `兑换：${item.name}${qty > 1 ? ` ×${qty}` : ''}`,
           taskId: null,
           createdAt: now,
         }),
@@ -404,7 +418,8 @@ export async function redeemReward(
           studentId,
           rewardItemId: item.id,
           rewardName: item.name,
-          pointsSpent: cost,
+          pointsSpent: totalCost,
+          quantity: qty,
           status: 'pending',
           redeemedAt: now,
           fulfilledAt: null,
@@ -413,9 +428,12 @@ export async function redeemReward(
         }),
       )
       if (item.stock !== null) {
-        await db.rewardItems.put(touch({ ...item, stock: item.stock - 1 }))
+        await db.rewardItems.put(touch({ ...item, stock: item.stock - qty }))
       }
-      return { ok: true as const, message: `兑换成功，消耗 ${cost} 积分` }
+      return {
+        ok: true as const,
+        message: `兑换成功${qty > 1 ? ` ${qty} 个` : ''}，消耗 ${totalCost} 积分`,
+      }
     },
   )
 }

@@ -453,6 +453,21 @@ export class EduDB extends Dexie {
       if (drops.length === 0) return
       await tx.table('groupMembers').bulkPut(drops.map((m) => markDeleted(m)))
     })
+
+    // v20：兑换记录支持「一次兑换 N 个」—— redemptions 新增 quantity 列。
+    //  历史记录无该字段，统一补 quantity=1（旧版每笔都是 1 个）。
+    //  不新增索引（quantity 不参与查询），仅做数据回填。
+    this.version(20).stores({
+      redemptions:
+        'id, studentId, rewardItemId, status, redeemedAt, updatedAt, deletedAt, dirty',
+    }).upgrade(async (tx) => {
+      const rows = (await tx.table('redemptions').toArray()) as Array<Record<string, unknown>>
+      const fixes = rows
+        .filter((r) => typeof r.quantity !== 'number' || !(r.quantity >= 1))
+        .map((r) => ({ ...r, quantity: 1 }))
+      if (fixes.length === 0) return
+      await tx.table('redemptions').bulkPut(fixes)
+    })
   }
 }
 

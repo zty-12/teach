@@ -396,6 +396,7 @@ create table if not exists redemptions (
   "rewardItemId" text not null default '',
   "rewardName" text not null default '',
   "pointsSpent" integer not null default 0,
+  "quantity" integer not null default 1,
   status text not null default 'pending',
   "redeemedAt" bigint not null default 0,
   "fulfilledAt" bigint,
@@ -620,6 +621,11 @@ alter table "checkInTasks" alter column "ruleIds" drop not null;
 alter table "pointLedgers" alter column "delta" type double precision;
 alter table "classActivityRecords" alter column "pointsAwarded" type double precision;
 alter table "pointRules" alter column "points" type double precision;
+
+-- v31.17：redemptions 支持「一次兑换 N 个」—— 新增 quantity 列（默认 1）。
+--   覆盖线上已建过的旧表：create table if not exists 不会补列，必须显式 alter。
+--   前端 redeemReward 写入 quantity；历史记录由 Dexie v20 迁移补 quantity=1。
+alter table redemptions add column if not exists "quantity" integer not null default 1;
 
 
 -- ============================================================
