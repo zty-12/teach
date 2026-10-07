@@ -389,7 +389,9 @@ export async function redeemReward(
       if (!item.enabled) return { ok: false as const, message: '该奖励已下架' }
       if (!student) return { ok: false as const, message: '学生不存在' }
       const totalCost = item.pointsCost * qty
-      if (balance.balance < totalCost) {
+      // 浮点容差：单价/余额可能是 0.5 等小数，累积误差下用 1e-6 容差判定"不足"，
+      // 避免 balance=19.4999999999、单价 0.5 时把本可兑换的 39 个误判为积分不足。
+      if (balance.balance + 1e-6 < totalCost) {
         return {
           ok: false as const,
           message: `积分不足：需要 ${totalCost} 分（${item.pointsCost} 分 × ${qty}），当前 ${balance.balance} 分`,

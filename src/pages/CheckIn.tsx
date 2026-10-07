@@ -32,7 +32,7 @@ import {
   Select,
   Textarea,
 } from '@/components/ui'
-import { cn } from '@/lib/utils'
+import { cn, formatPoints } from '@/lib/utils'
 import { buildBalanceSections, buildStudentGroupMap, NO_GROUP_SCOPE } from '@/lib/pointBalanceGroups'
 import { Avatar } from '@/components/Avatar'
 import {
@@ -1795,7 +1795,7 @@ function MarketView({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium text-text-1">{r.name}</span>
-                    <Badge variant="primary">{r.pointsCost} 分</Badge>
+                    <Badge variant="primary">{formatPoints(r.pointsCost)} 分</Badge>
                     {r.stock !== null && (
                       <Badge>库存 {r.stock}</Badge>
                     )}
@@ -2044,7 +2044,8 @@ function RedeemModal({
   // 一次最多可兑换数量：受「余额可买个数 / 库存 / 999 上限」三者约束
   const maxQty = item
     ? Math.min(
-        item.pointsCost > 0 ? Math.floor(balance / item.pointsCost) : 999,
+        // 浮点容差：单价可能是 0.5，balance=19.4999999 时避免少算 1 个
+        item.pointsCost > 0 ? Math.floor((balance + 1e-6) / item.pointsCost) : 999,
         item.stock ?? 999,
         999,
       )
@@ -2094,7 +2095,7 @@ function RedeemModal({
           <div className="rounded-lg bg-leave-soft px-3 py-2 text-[13px] text-leave">{error}</div>
         )}
         <div className="rounded-lg bg-surface-2 px-3 py-2 text-[13px] text-text-2">
-          当前积分余额 <span className="font-medium text-text-1">{balance}</span>
+          当前积分余额 <span className="font-medium text-text-1">{formatPoints(balance)}</span>
         </div>
         <Field label="选择奖励">
           <Select
@@ -2107,7 +2108,7 @@ function RedeemModal({
             <option value="">请选择…</option>
             {available.map((r) => (
               <option key={r.id} value={r.id} disabled={r.pointsCost > balance}>
-                {r.name} · {r.pointsCost} 分{r.stock !== null ? ` · 库存 ${r.stock}` : ''}
+                {r.name} · {formatPoints(r.pointsCost)} 分{r.stock !== null ? ` · 库存 ${r.stock}` : ''}
                 {r.pointsCost > balance ? '（积分不足）' : ''}
               </option>
             ))}
@@ -2149,12 +2150,12 @@ function RedeemModal({
               >
                 +
               </button>
-              <span className="ml-auto text-[12px] text-text-3">{item.pointsCost} 分/个</span>
+              <span className="ml-auto text-[12px] text-text-3">{formatPoints(item.pointsCost)} 分/个</span>
             </div>
             <p className="mt-2 text-[13px] text-text-2">
-              将扣除 <span className="font-medium text-text-1">{item.pointsCost * safeQty}</span> 分，
+              将扣除 <span className="font-medium text-text-1">{formatPoints(item.pointsCost * safeQty)}</span> 分，
               兑换后余额{' '}
-              <span className="font-medium text-text-1">{balance - item.pointsCost * safeQty}</span> 分。
+              <span className="font-medium text-text-1">{formatPoints(balance - item.pointsCost * safeQty)}</span> 分。
             </p>
           </div>
         )}
@@ -2225,9 +2226,11 @@ function RewardItemModal({
             placeholder="如：免作业一次 / 错题本一本"
           />
         </Field>
-        <Field label="所需积分">
+        <Field label="所需积分" hint="支持小数，如 0.5">
           <Input
             type="number"
+            step="0.5"
+            min="0"
             value={cost}
             onChange={(e) => setCost(e.target.value)}
           />

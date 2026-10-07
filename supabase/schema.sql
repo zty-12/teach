@@ -379,7 +379,7 @@ create index if not exists "pointLedgers_student_idx" on "pointLedgers" ("studen
 create table if not exists "rewardItems" (
   id text primary key,
   name text not null default '',
-  "pointsCost" integer not null default 0,
+  "pointsCost" double precision not null default 0,
   stock integer,
   note text not null default '',
   enabled boolean not null default true,
@@ -621,6 +621,7 @@ alter table "checkInTasks" alter column "ruleIds" drop not null;
 alter table "pointLedgers" alter column "delta" type double precision;
 alter table "classActivityRecords" alter column "pointsAwarded" type double precision;
 alter table "pointRules" alter column "points" type double precision;
+alter table "rewardItems" alter column "pointsCost" type double precision;
 
 -- v31.17：redemptions 支持「一次兑换 N 个」—— 新增 quantity 列（默认 1）。
 --   覆盖线上已建过的旧表：create table if not exists 不会补列，必须显式 alter。
