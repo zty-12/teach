@@ -42,7 +42,10 @@ create table if not exists students (
   "remainingHours" integer not null default 0,
   "remindHours" integer not null default 2,
   "isTrial" boolean not null default false,
-  "trialAt" bigint
+  "trialAt" bigint,
+  -- v31.19：归档原因 + 解档复原原班课
+  "archiveReason" text,
+  "previousGroupIds" jsonb not null default '[]'::jsonb
 );
 create index if not exists students_updated_idx on students ("updatedAt");
 create index if not exists students_trial_idx on students ("isTrial");
@@ -576,6 +579,12 @@ alter table groups add column if not exists "autoClassRuleIds" jsonb not null de
 --       整张 learningReports 从未同步成功（2026-09-14 线上核查发现）。
 --       title 为前端必填字段（LearningReport.title），必须补。
 alter table "learningReports" add column if not exists title text not null default '';
+
+-- v31.19：学生归档原因 + 解档复原原班课
+--   · students."archiveReason"：归档原因（课时结束 / 班课完成），可空
+--   · students."previousGroupIds"：因「课时结束」归档而被移出的班课 id 列表（jsonb）
+alter table students add column if not exists "archiveReason" text;
+alter table students add column if not exists "previousGroupIds" jsonb not null default '[]'::jsonb;
 
 -- v30.4：放开「可空即安全」的列的非空约束，彻底避免 upsert 缺键卡死整张表。
 --   背景：PostgREST 批量 upsert 用「整批对象键的并集」拼 INSERT，数组里缺某个键的行

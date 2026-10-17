@@ -29,6 +29,16 @@ export const STUDENT_STATUS_LABEL: Record<StudentStatus, string> = {
   archived: '归档',
 }
 
+/** 归档原因（v31.19）：区分「课时结束归档」与「班课完成归档」 */
+export type ArchiveReason = 'hours' | 'class'
+
+export const ARCHIVE_REASON_LABEL: Record<ArchiveReason, string> = {
+  /** 课时结束：该生之前的班课若仍在进行，需从班课成员移除 */
+  hours: '课时结束',
+  /** 班课完成：保留其在班课内的成员身份与记录 */
+  class: '班课完成',
+}
+
 export type BillingRule = 'prepaid' | 'postpaid'
 
 export const BILLING_RULE_LABEL: Record<BillingRule, string> = {
@@ -61,6 +71,10 @@ export interface Student extends SyncFields {
   isTrial: boolean
   /** 试听备注/开始时间 */
   trialAt: number | null
+  /** 归档原因：'hours'=课时结束 / 'class'=班课完成；null=未归档或旧数据（向后兼容） */
+  archiveReason: ArchiveReason | null
+  /** 因「课时结束」归档时，被移出的班课 id 列表；解档时据此外挪回原班课（班课已删则跳过）。'class' 归档或旧数据为空数组 */
+  previousGroupIds: string[]
 }
 
 // ============================================================

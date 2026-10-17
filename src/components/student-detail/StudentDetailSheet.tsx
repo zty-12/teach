@@ -13,7 +13,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { X } from 'lucide-react'
+import { ArchiveRestore, X } from 'lucide-react'
 import { db } from '@/lib/db'
 import { Avatar } from '@/components/Avatar'
 import { StudentStatusBadge } from '@/components/StudentStatusBadge'
@@ -66,12 +66,15 @@ export interface StudentDetailSheetProps {
   onClose: () => void
   /** 跳到"编辑学生"弹窗的回调 */
   onEdit?: (student: Student) => void
+  /** 解档回调（学生处于"归档"状态时显示"解档"按钮） */
+  onUnarchive?: (student: Student) => void
 }
 
 export function StudentDetailSheet({
   studentId,
   onClose,
   onEdit,
+  onUnarchive,
 }: StudentDetailSheetProps) {
   const open = studentId !== null
 
@@ -216,9 +219,15 @@ export function StudentDetailSheet({
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                {onEdit && (
+                {onEdit && student.status !== 'archived' && (
                   <Button variant="ghost" size="sm" onClick={() => onEdit(student)}>
                     编辑
+                  </Button>
+                )}
+                {student.status === 'archived' && onUnarchive && (
+                  <Button variant="ghost" size="sm" onClick={() => onUnarchive(student)}>
+                    <ArchiveRestore size={14} />
+                    解档
                   </Button>
                 )}
                 <button

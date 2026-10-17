@@ -12,7 +12,15 @@ import {
   Trash2,
   Users,
 } from 'lucide-react'
-import { db, ensureGroupMember, newId, touch, withSyncFields } from '@/lib/db'
+import {
+  db,
+  detachStudentFromActiveGroups,
+  ensureGroupMember,
+  newId,
+  restoreStudentGroups,
+  touch,
+  withSyncFields,
+} from '@/lib/db'
 import { hardDeleteStudents } from '@/lib/batchDelete'
 import { useBreakpoint } from '@/hooks/useBreakpoint'
 import {
@@ -34,7 +42,9 @@ import { ModalFooter } from '@/components/ModalFooter'
 import { StudentDetailSheet } from '@/components/student-detail/StudentDetailSheet'
 import { CourseScheduleModal } from '@/components/CourseScheduleModal'
 import {
+  ARCHIVE_REASON_LABEL,
   STUDENT_STATUS_LABEL,
+  type ArchiveReason,
   type BillingRule,
   type Course,
   type Group,
@@ -85,6 +95,9 @@ export default function StudentsPage() {
   // 从卡片发起排课
   const [scheduleFor, setScheduleFor] = useState<Student | null>(null)
   const [scheduleOpen, setScheduleOpen] = useState(false)
+  // 归档原因弹窗：archiveTarget 为单生归档；batchArchiveIds 为批量归档；二者互斥
+  const [archiveTarget, setArchiveTarget] = useState<Student | null>(null)
+  const [batchArchiveIds, setBatchArchiveIds] = useState<string[] | null>(null)
 
   const students = useLiveQuery(() => db.students.toArray(), [])
   const tags = useLiveQuery(() => db.learningTags.toArray(), [])
@@ -177,22 +190,54 @@ export default function StudentsPage() {
     openEdit(s)
   }
 
-  async function handleArchive(s: Student) {
-    const hrNote =
-      s.billingRule === 'prepaid' && s.remainingHours > 0
-        ? `，剩余 ${s.remainingHours} 课时将冻结保留（解档后可继续用）`
-        : ''
-    if (!confirm(`确定归档「${s.name}」吗？归档后不再占用在读名额${hrNote}，可在「归档」筛选中找回/解档。`)) {
-      return
+  async function handleArchiveClick(s: Student) {
+    setArchiveTarget(s)
+  }
+
+  async function handleBatchArchiveClick() {
+    const ids = Array.from(selected)
+    if (ids.length === 0) return
+    setBatchArchiveIds(ids)
+  }
+
+  /** 真正执行归档：按原因处理班课成员关系并写入学生状态 */
+  async function doArchive(reason: ArchiveReason) {
+    const targets =
+      archiveTarget != null
+        ? [archiveTarget]
+        : (students ?? []).filter((s) => (batchArchiveIds ?? []).includes(s.id))
+    for (const s of targets) {
+      // 「课时结束」归档 → 从仍在进行中的班课移除，并记录原班课 id 以便解档复原
+      // 「班课完成」归档 → 保留班课成员（不移除）
+      const previousGroupIds = reason === 'hours' ? await detachStudentFromActiveGroups(s.id) : []
+      await db.students.put(
+        touch({ ...s, status: 'archived', archiveReason: reason, previousGroupIds }),
+      )
     }
-    await db.students.put(touch({ ...s, status: 'archived' }))
+    setSelected(new Set())
+    setArchiveTarget(null)
+    setBatchArchiveIds(null)
+  }
+
+  function closeArchiveDialog() {
+    setArchiveTarget(null)
+    setBatchArchiveIds(null)
   }
 
   async function handleUnarchive(s: Student) {
-    if (!confirm(`确定将「${s.name}」恢复为在读吗？其剩余 ${s.billingRule === 'prepaid' ? s.remainingHours + ' 课时' : '计费信息'}将重新生效。`)) {
+    if (
+      !confirm(
+        `确定将「${s.name}」恢复为在读吗？其剩余 ${
+          s.billingRule === 'prepaid' ? s.remainingHours + ' 课时' : '计费信息'
+        }将重新生效，并自动挪回原班课。`,
+      )
+    ) {
       return
     }
-    await db.students.put(touch({ ...s, status: 'active' }))
+    await restoreStudentGroups(s.id, s.previousGroupIds ?? [])
+    await db.students.put(
+      touch({ ...s, status: 'active', archiveReason: null, previousGroupIds: [] }),
+    )
   }
 
   function openScheduleFor(s: Student) {
@@ -240,16 +285,6 @@ export default function StudentsPage() {
       return
     }
     await hardDeleteStudents(ids)
-    setSelected(new Set())
-  }
-
-  async function handleBatchArchive() {
-    const ids = Array.from(selected)
-    if (ids.length === 0) return
-    const targets = (students ?? []).filter((s) => ids.includes(s.id))
-    for (const s of targets) {
-      await db.students.put(touch({ ...s, status: 'archived' }))
-    }
     setSelected(new Set())
   }
 
@@ -324,7 +359,7 @@ export default function StudentsPage() {
             已选 {selected.size} 人
           </span>
           <div className="ml-auto flex gap-2">
-            <Button size="sm" variant="secondary" onClick={handleBatchArchive}>
+            <Button size="sm" variant="secondary" onClick={handleBatchArchiveClick}>
               <Archive size={14} />
               批量归档
             </Button>
@@ -386,7 +421,7 @@ export default function StudentsPage() {
           onToggleSelectAll={toggleSelectAll}
           allVisibleSelected={allVisibleSelected}
           onView={openDetail}
-          onArchive={handleArchive}
+          onArchive={handleArchiveClick}
           onUnarchive={handleUnarchive}
         />
       ) : isDesktop ? (
@@ -406,6 +441,8 @@ export default function StudentsPage() {
           selected={selected}
           onToggleSelect={toggleSelect}
           onView={openDetail}
+          onArchive={handleArchiveClick}
+          onUnarchive={handleUnarchive}
         />
       )}
 
@@ -423,6 +460,15 @@ export default function StudentsPage() {
         studentId={detailId}
         onClose={() => setDetailId(null)}
         onEdit={handleEditFromDetail}
+        onUnarchive={handleUnarchive}
+      />
+
+      <ArchiveDialog
+        open={archiveTarget !== null || batchArchiveIds !== null}
+        student={archiveTarget}
+        count={batchArchiveIds?.length ?? 0}
+        onClose={closeArchiveDialog}
+        onConfirm={doArchive}
       />
 
       {/* 从卡片发起排课 */}
@@ -704,7 +750,14 @@ function DesktopTable({
                   {s.phone ? maskPhone(s.phone) : '—'}
                 </td>
                 <td className="px-4 py-2.5">
-                  <StudentStatusBadge status={s.status} />
+                  <div className="flex flex-col gap-0.5">
+                    <StudentStatusBadge status={s.status} />
+                    {s.status === 'archived' && s.archiveReason && (
+                      <span className="text-[11px] text-text-3">
+                        {ARCHIVE_REASON_LABEL[s.archiveReason]}
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-4 py-2.5">
                   <TagBadgeList tags={tagMap.get(s.id) ?? []} variant="filled" max={2} />
@@ -747,12 +800,16 @@ function MobileList({
   selected,
   onToggleSelect,
   onView,
+  onArchive,
+  onUnarchive,
 }: {
   list: Student[]
   tagMap: Map<string, LearningTag[]>
   selected: Set<string>
   onToggleSelect: (id: string) => void
   onView: (id: string) => void
+  onArchive: (s: Student) => void
+  onUnarchive: (s: Student) => void
 }) {
   return (
     <ul className="space-y-2">
@@ -788,6 +845,11 @@ function MobileList({
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium text-text-1">{s.name}</span>
                     <StudentStatusBadge status={s.status} />
+                    {s.status === 'archived' && s.archiveReason && (
+                      <span className="text-[11px] text-text-3">
+                        {ARCHIVE_REASON_LABEL[s.archiveReason]}
+                      </span>
+                    )}
                   </div>
                   <p className="mt-0.5 truncate text-[13px] text-text-2">
                     {[s.grade, s.academicLevel].filter(Boolean).join(' · ') || '未填年级'}
@@ -805,11 +867,88 @@ function MobileList({
                   />
                 </div>
               </button>
+              <div className="flex shrink-0 flex-col gap-1">
+                {s.status === 'archived' ? (
+                  <Button size="sm" variant="ghost" onClick={() => onUnarchive(s)}>
+                    <ArchiveRestore size={14} />
+                    解档
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="ghost" onClick={() => onArchive(s)}>
+                    <Archive size={14} />
+                    归档
+                  </Button>
+                )}
+              </div>
             </div>
           </li>
         )
       })}
     </ul>
+  )
+}
+
+// ============================================================
+// 归档原因弹窗（v31.19）
+// ============================================================
+
+function ArchiveDialog({
+  open,
+  student,
+  count,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean
+  /** 单生归档时的学生对象；批量归档时为 null */
+  student: Student | null
+  /** 批量归档时的人数 */
+  count: number
+  onClose: () => void
+  onConfirm: (reason: ArchiveReason) => void
+}) {
+  if (!open) return null
+  return (
+    <Modal open={open} onClose={onClose} title="选择归档原因">
+      <p className="text-sm text-text-2">
+        {student
+          ? '请选择该学生的归档原因（决定其所在班课如何处理）：'
+          : `请选择这 ${count} 名学生的归档原因（统一处理）：`}
+      </p>
+      <div className="mt-4 space-y-3">
+        <button
+          type="button"
+          onClick={() => onConfirm('hours')}
+          className="card w-full p-3 text-left transition-colors hover:bg-surface-1"
+        >
+          <div className="flex items-center gap-2">
+            <Archive size={16} className="text-text-2" />
+            <span className="font-medium text-text-1">课时结束</span>
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-text-3">
+            该生之前参与的班课若仍在进行，将自动从班课成员中移除（后续不再继续排课）；已上的课与历史记录均保留。
+          </p>
+        </button>
+        <button
+          type="button"
+          onClick={() => onConfirm('class')}
+          className="card w-full p-3 text-left transition-colors hover:bg-surface-1"
+        >
+          <div className="flex items-center gap-2">
+            <Archive size={16} className="text-text-2" />
+            <span className="font-medium text-text-1">班课完成</span>
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-text-3">
+            因所在班课整体结束而归档，保留其在班课内的成员身份与全部记录。
+          </p>
+        </button>
+      </div>
+      <div className="mt-4 flex justify-end">
+        <Button variant="ghost" onClick={onClose}>
+          取消
+        </Button>
+      </div>
+    </Modal>
   )
 }
 
@@ -956,6 +1095,8 @@ function StudentModal({
       await db.students.put({
         id: studentId,
         ...payload,
+        archiveReason: null,
+        previousGroupIds: [],
         createdAt: now,
         updatedAt: now,
         deletedAt: null,

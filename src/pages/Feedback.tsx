@@ -9,6 +9,7 @@ import {
   MessageSquareText,
   Pencil,
   Plus,
+  Search,
   Settings2,
   Sparkles,
   Trash2,
@@ -74,6 +75,7 @@ export default function FeedbackPage() {
   const [seedCourse, setSeedCourse] = useState<Course | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
+  const [fbQuery, setFbQuery] = useState('')
 
   const courses = useLiveQuery(() => db.courses.toArray(), [])
   const feedbacks = useLiveQuery(() => db.courseFeedbacks.toArray(), [])
@@ -104,6 +106,26 @@ export default function FeedbackPage() {
     const def = liveTemplates.find((t) => t.isDefault) ?? liveTemplates[0] ?? null
     return { done: doneList, written: writtenList, courseTitleOf: titleOf, defaultTemplate: def, groupMap: gMap }
   }, [courses, feedbacks, students, groups, templates])
+
+  // 已写反馈搜索（v31.19）：按 学生/班课名 · 科目、摘要、正文、日期 过滤（忽略大小写）
+  const filteredWritten = useMemo(() => {
+    const q = fbQuery.trim().toLowerCase()
+    if (!q) return written
+    const sMap = new Map((students ?? []).filter((s) => !s.deletedAt).map((s) => [s.id, s]))
+    const gMap = new Map((groups ?? []).filter((g) => !g.deletedAt).map((g) => [g.id, g]))
+    const titleOf = (c: Course): string => {
+      if (c.studentId && sMap.get(c.studentId)) return sMap.get(c.studentId)!.name
+      if (c.groupId && gMap.get(c.groupId)) return gMap.get(c.groupId)!.name
+      return c.groupId ? '班课' : '课程'
+    }
+    return written.filter((f) => {
+      const c = (courses ?? []).find((x) => x.id === f.courseId)
+      const title = c ? `${titleOf(c)} · ${c.subject}` : '已删课程'
+      const dateStr = format(f.updatedAt, 'yyyy-MM-dd HH:mm')
+      const haystack = [title, f.summary, f.content, dateStr].join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [written, fbQuery, courses, students, groups])
 
   function openNew(course: Course) {
     setEditing(null)
@@ -213,16 +235,47 @@ export default function FeedbackPage() {
 
       {/* 已写反馈 */}
       <Card className="mb-4">
-        <CardHeader title="已写反馈" subtitle={written.length ? `${written.length} 条` : undefined} />
+        <CardHeader
+          title="已写反馈"
+          subtitle={
+            written.length
+              ? fbQuery.trim()
+                ? `${filteredWritten.length} / ${written.length} 条`
+                : `${written.length} 条`
+              : undefined
+          }
+          action={
+            written.length > 0 ? (
+              <div className="relative w-44 sm:w-56">
+                <Search
+                  size={15}
+                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-3"
+                />
+                <Input
+                  value={fbQuery}
+                  onChange={(e) => setFbQuery(e.target.value)}
+                  placeholder="搜索学生/班课/科目/正文/日期"
+                  className="h-9 pl-9 text-[13px]"
+                />
+              </div>
+            ) : undefined
+          }
+        />
         {written.length === 0 ? (
           <EmptyState
             icon={<MessageSquareText size={24} />}
             title="还没有反馈记录"
             description="完成课程后，来写第一条课后反馈"
           />
+        ) : filteredWritten.length === 0 ? (
+          <EmptyState
+            icon={<Search size={24} />}
+            title="没有匹配的反馈"
+            description={`未找到包含「${fbQuery.trim()}」的反馈记录`}
+          />
         ) : (
           <ul className="divide-y divide-line-1">
-            {written.map((f) => {
+            {filteredWritten.map((f) => {
               const c = (courses ?? []).find((x) => x.id === f.courseId)
               return (
                 <li key={f.id} className="px-4 py-3">

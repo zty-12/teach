@@ -718,6 +718,50 @@ export async function ensureGroupMember(
   )
 }
 
+/**
+ * 把学生从「仍在进行（未软删）的班课」中移除，并记录被移除的班课 id（v31.19）。
+ *
+ * 用于「课时结束」归档：该生之前参与的班课若仍在进行，需要从班课成员里剔除，
+ * 以免后续周课表继续给他排课；「班课完成」归档则不调用本函数、保留成员身份。
+ *
+ * 返回被移除的 groupId 列表（用于写入 `student.previousGroupIds`，供解档时复原）。
+ * 班课自身已软删的，跳过（成员关系已无意义）。
+ */
+export async function detachStudentFromActiveGroups(
+  studentId: string,
+): Promise<string[]> {
+  const all = await db.groupMembers.toArray()
+  const groups = await db.groups.toArray()
+  const liveGroupIds = new Set(groups.filter((g) => !g.deletedAt).map((g) => g.id))
+  const mine = all.filter((m) => m.studentId === studentId && !m.deletedAt)
+  const removed: string[] = []
+  for (const m of mine) {
+    if (!liveGroupIds.has(m.groupId)) continue
+    await db.groupMembers.put(markDeleted(m))
+    removed.push(m.groupId)
+  }
+  return removed
+}
+
+/**
+ * 解档时把学生挪回「当年归档时所在的、且当前仍存在」的班课（v31.19）。
+ *
+ * 复用 `ensureGroupMember` 的幂等 + 复活墓碑逻辑：若仍存活则不动、若已软删则复活，
+ * 不会因重复加入产生重复成员行。班课已被删除的 id 跳过（无法加入不存在的班课）。
+ */
+export async function restoreStudentGroups(
+  studentId: string,
+  groupIds: string[],
+): Promise<void> {
+  if (!groupIds.length) return
+  const groups = await db.groups.toArray()
+  const liveGroupIds = new Set(groups.filter((g) => !g.deletedAt).map((g) => g.id))
+  for (const gid of groupIds) {
+    if (!liveGroupIds.has(gid)) continue
+    await ensureGroupMember(gid, studentId)
+  }
+}
+
 // ============================================================
 // 默认设置
 // ============================================================

@@ -124,6 +124,12 @@ const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
     // tags 云端 NOT NULL（下游 p.tags.map 无守卫，不能置空）
     tags: [],
   },
+  // v31.19：students."previousGroupIds" 云端 jsonb NOT NULL，旧记录可能整键缺失
+  //           → 缺键被补 null 会整表推送失败；兜底空数组语义正确。
+  //          （archiveReason 为可空列，缺键补 null 安全，无需兜底。）
+  students: {
+    previousGroupIds: [],
+  },
 }
 
 /** 对单条待推送记录补齐云端 NOT NULL 列的缺省值 */
