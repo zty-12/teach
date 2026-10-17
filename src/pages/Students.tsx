@@ -55,7 +55,7 @@ import {
   type StudentTag,
 } from '@/lib/types'
 import { cn, maskPhone, subjectColorVar } from '@/lib/utils'
-import { studentCourseStats } from '@/lib/studentCourseStats'
+import { historicalGroupIds, studentCourseStats } from '@/lib/studentCourseStats'
 import { exportStudents } from '@/lib/exporters'
 
 type StatusFilter = StudentStatus | 'all'
@@ -161,6 +161,9 @@ export default function StudentsPage() {
         attendances,
         members: groupMembers,
         now,
+        // v31.20：归档（课时结束）会把学生移出仍在进行的班课，
+        // 原班课 id 记在 previousGroupIds 里；不传就会让历史课次瞬间归零。
+        previousGroupIds: historicalGroupIds(s.id, groupMembers, s.previousGroupIds),
       })
       map.set(s.id, {
         nextCourse: st.nextCourse as Course | undefined,
@@ -207,9 +210,13 @@ export default function StudentsPage() {
         ? [archiveTarget]
         : (students ?? []).filter((s) => (batchArchiveIds ?? []).includes(s.id))
     for (const s of targets) {
-      // 「课时结束」归档 → 从仍在进行中的班课移除，并记录原班课 id 以便解档复原
+      // 「课时结束」归档 → 从仍在进行中的班课移除，并记录原班课 id 以便解档复原 / 保留历史课次
       // 「班课完成」归档 → 保留班课成员（不移除）
-      const previousGroupIds = reason === 'hours' ? await detachStudentFromActiveGroups(s.id) : []
+      const detached = reason === 'hours' ? await detachStudentFromActiveGroups(s.id) : []
+      // v31.20：原班课 id 累积合并，不覆盖 —— 历史课次统计依赖这份名单，反复归档也不能丢
+      const previousGroupIds = Array.from(
+        new Set([...(s.previousGroupIds ?? []), ...detached]),
+      )
       await db.students.put(
         touch({ ...s, status: 'archived', archiveReason: reason, previousGroupIds }),
       )
@@ -236,7 +243,9 @@ export default function StudentsPage() {
     }
     await restoreStudentGroups(s.id, s.previousGroupIds ?? [])
     await db.students.put(
-      touch({ ...s, status: 'active', archiveReason: null, previousGroupIds: [] }),
+      // v31.20：previousGroupIds 保留不清空 —— 它同时承担「历史课次依据」，
+      // 清掉会让解档后再次从班课移除时历史课次又归零（成员已恢复，这里多留一份不影响统计）。
+      touch({ ...s, status: 'active', archiveReason: null }),
     )
   }
 

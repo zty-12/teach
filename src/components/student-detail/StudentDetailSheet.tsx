@@ -31,7 +31,7 @@ import {
 } from '@/lib/types'
 import { maskPhone } from '@/lib/utils'
 import { cn } from '@/lib/utils'
-import { coursesForStudent } from '@/lib/studentCourseStats'
+import { coursesForStudent, historicalGroupIds } from '@/lib/studentCourseStats'
 import { BasicsTab } from './tabs/BasicsTab'
 import { CoursesTab } from './tabs/CoursesTab'
 import { PaymentsTab } from './tabs/PaymentsTab'
@@ -124,6 +124,10 @@ export function StudentDetailSheet({
       student.id,
       courses,
       groupMembers,
+      // v31.20：归档（课时结束）移出的原班课 —— 保留其已完成且有出席记录的课程，
+      // 否则「已上 4 课时」的学生归档后课次会显示 0。
+      historicalGroupIds(student.id, groupMembers, student.previousGroupIds),
+      attendances,
     ).sort((a, b) => (b.startAt ?? 0) - (a.startAt ?? 0)) as Course[]
 
     // 出席记录：取该生在这些课上的存活行（班课出席记录带 studentId，可直接按 studentId 过滤）

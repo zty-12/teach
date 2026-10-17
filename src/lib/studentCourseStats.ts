@@ -17,6 +17,9 @@
  *  - 完成课次：该生课程里 status='done' 的节数
  *  - 出席课次：该生课程里 status='done' **且** 该生出席记录 present=true 的节数
  *    （无出席记录的历史数据视为出席，避免旧数据凭空少算；仅明确 present=false 才算缺席）
+ *  - v31.20：归档（课时结束）会把学生移出仍在进行的班课，`student.previousGroupIds`
+ *    记录这些原班课。历史课次统计必须把它们算回来（仅纳入 status='done' 的课），
+ *    否则「已上 4 课时」的学生归档后实到课次会显示 0。
  *
  * 抽成纯函数（不依赖 React / Dexie），既让页面逻辑更薄，也让回归脚本能直接断言。
  */
@@ -66,20 +69,74 @@ export function studentGroupIds(
 }
 
 /**
+ * 「该生曾经加入过、现在已经离开」的班课 id（v31.20）。
+ *
+ * 两个来源合并：
+ *  1. `student.previousGroupIds` —— v31.19 起归档（课时结束）时显式记录的原班课；
+ *  2. groupMembers 里的**墓碑行**（deletedAt 有值）—— 覆盖「在 v31.19 之前就被移出班课」
+ *     或历史数据没写 previousGroupIds 的情况。
+ *
+ * 这些班课只用于**历史课次**统计（见 coursesForStudent），不参与排课/成员名单。
+ */
+export function historicalGroupIds(
+  studentId: string,
+  members: ReadonlyArray<MemberLike> | null | undefined,
+  recorded?: ReadonlyArray<string | null | undefined> | null,
+): string[] {
+  const out = new Set<string>()
+  for (const gid of recorded ?? []) {
+    if (gid) out.add(gid)
+  }
+  if (studentId && members) {
+    const live = studentGroupIds(studentId, members)
+    for (const m of members) {
+      if (m.studentId !== studentId) continue
+      if (!m.deletedAt) continue
+      if (live.has(m.groupId)) continue
+      out.add(m.groupId)
+    }
+  }
+  return Array.from(out)
+}
+
+/**
  * 取「该生可参与的课程」：1对1 按 studentId，班课按成员关系。
  * 已软删的课程自动排除。
+ *
+ * `previousGroupIds`（v31.20）：归档时为「课时结束」而移出的原班课 id。
+ * 移出班课会软删 groupMembers，若只按存活成员关系匹配，该生历史班课课次会瞬间归零
+ * （真实症状：已上 4 课时的学生归档后「实到课次」显示 0）。
+ * 因此把「已离开的班课」也算进历史课程集合，但严格限制条件：
+ *  - 只纳入已完成（status='done'）的课 —— 归档后不该再出现未来排课；
+ *  - 传了 `attendances` 时，还要求该生在这节课上**存在存活出席记录** ——
+ *    防止「当初误加进班课、随后移除」被凭空算成上过课。
  */
 export function coursesForStudent(
   studentId: string,
   courses: ReadonlyArray<CourseLike> | null | undefined,
   members: ReadonlyArray<MemberLike> | null | undefined,
+  previousGroupIds?: ReadonlyArray<string | null | undefined> | null,
+  attendances?: ReadonlyArray<AttendanceLike> | null,
 ): CourseLike[] {
   if (!studentId || !courses) return []
   const gids = studentGroupIds(studentId, members)
+  const prevGids = new Set<string>()
+  for (const gid of previousGroupIds ?? []) {
+    if (!gid) continue
+    // 已在存活成员关系里的不用重复走历史分支
+    if (gids.has(gid)) continue
+    prevGids.add(gid)
+  }
+  const attMap = attendances ? attendanceIndexForStudent(studentId, attendances) : null
   return courses.filter((c) => {
     if (c.deletedAt) return false
     if (c.studentId === studentId) return true
-    return !!(c.groupId && gids.has(c.groupId))
+    if (!c.groupId) return false
+    if (gids.has(c.groupId)) return true
+    if (!prevGids.has(c.groupId)) return false
+    if (c.status !== 'done') return false
+    if (attMap && !attMap.has(c.id)) return false
+    return true
   })
 }
 
@@ -137,6 +194,8 @@ export function studentCourseStats(args: {
   now?: number
   /** 月初时间戳；默认取传入 now 所在月的 1 日 0 点 */
   monthStart?: number
+  /** 归档（课时结束）时移出的原班课 id，仅用于保留历史课次（v31.20） */
+  previousGroupIds?: ReadonlyArray<string | null | undefined> | null
 }): StudentCourseStats {
   const {
     studentId,
@@ -145,9 +204,16 @@ export function studentCourseStats(args: {
     members,
     now = Date.now(),
     monthStart,
+    previousGroupIds,
   } = args
 
-  const mine = coursesForStudent(studentId, courses, members)
+  const mine = coursesForStudent(
+    studentId,
+    courses,
+    members,
+    previousGroupIds,
+    attendances,
+  )
   const attMap = attendanceIndexForStudent(studentId, attendances)
 
   const ms =
