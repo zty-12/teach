@@ -85,6 +85,7 @@ create table if not exists "groupMembers" (
   "studentId" text not null default '',
   "joinedAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
+  "createdAt" bigint not null default 0,
   "deletedAt" bigint
 );
 create index if not exists "groupMembers_updated_idx" on "groupMembers" ("updatedAt");
@@ -171,6 +172,7 @@ create table if not exists "learningTags" (
   type text not null default '',
   "colorSlot" integer not null default 1,
   "updatedAt" bigint not null default 0,
+  "createdAt" bigint not null default 0,
   "deletedAt" bigint
 );
 create index if not exists "learningTags_updated_idx" on "learningTags" ("updatedAt");
@@ -182,6 +184,7 @@ create table if not exists "studentTags" (
   "tagId" text not null default '',
   "assignedAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
+  "createdAt" bigint not null default 0,
   "deletedAt" bigint
 );
 create index if not exists "studentTags_updated_idx" on "studentTags" ("updatedAt");
@@ -585,6 +588,11 @@ alter table "learningReports" add column if not exists title text not null defau
 --   · students."previousGroupIds"：因「课时结束」归档而被移出的班课 id 列表（jsonb）
 alter table students add column if not exists "archiveReason" text;
 alter table students add column if not exists "previousGroupIds" jsonb not null default '[]'::jsonb;
+-- v31.21：补 createdAt 列。本地旧版 withSyncFields 曾给所有记录写入 createdAt，
+-- 但以下三张表建表时未声明该列，导致推送 upsert 整表失败、dirty 永久残留、跨端不同步。
+alter table "groupMembers" add column if not exists "createdAt" bigint not null default 0;
+alter table "learningTags" add column if not exists "createdAt" bigint not null default 0;
+alter table "studentTags" add column if not exists "createdAt" bigint not null default 0;
 
 -- v30.4：放开「可空即安全」的列的非空约束，彻底避免 upsert 缺键卡死整张表。
 --   背景：PostgREST 批量 upsert 用「整批对象键的并集」拼 INSERT，数组里缺某个键的行
