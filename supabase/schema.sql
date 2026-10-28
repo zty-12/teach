@@ -403,7 +403,7 @@ create table if not exists redemptions (
   "studentId" text not null default '',
   "rewardItemId" text not null default '',
   "rewardName" text not null default '',
-  "pointsSpent" integer not null default 0,
+  "pointsSpent" double precision not null default 0,
   "quantity" integer not null default 1,
   status text not null default 'pending',
   "redeemedAt" bigint not null default 0,
@@ -642,6 +642,10 @@ alter table "pointLedgers" alter column "delta" type double precision;
 alter table "classActivityRecords" alter column "pointsAwarded" type double precision;
 alter table "pointRules" alter column "points" type double precision;
 alter table "rewardItems" alter column "pointsCost" type double precision;
+-- v31.22：redemptions.pointsSpent 同族 —— 兑换消耗的积分 = pointsCost × quantity，
+--         而 pointsCost 已是 double（v30.9），故 pointsSpent 也必须支持小数（如 18.5）。
+--         云端该列仍是 integer → 推送 `18.5` 报 `invalid input syntax for type integer`。
+alter table redemptions alter column "pointsSpent" type double precision;
 
 -- v31.17：redemptions 支持「一次兑换 N 个」—— 新增 quantity 列（默认 1）。
 --   覆盖线上已建过的旧表：create table if not exists 不会补列，必须显式 alter。

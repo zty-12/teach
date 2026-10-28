@@ -179,6 +179,7 @@ const NUMERIC_GUARDS: Partial<Record<SyncTableName, string[]>> = {
   pointRules: ['points'],
   pointLedgers: ['delta'],
   classActivityRecords: ['pointsAwarded'],
+  redemptions: ['pointsSpent'],
 }
 /** 把任意值归一化为「0.5 的整数倍」的安全数字；非有限值 → 0 */
 function toHalfStep(v: unknown): number {
