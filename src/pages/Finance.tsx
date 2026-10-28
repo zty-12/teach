@@ -67,6 +67,7 @@ export default function FinancePage() {
   const [settleOpen, setSettleOpen] = useState(false)
   const [feeAdjustOpen, setFeeAdjustOpen] = useState(false)
   const [feeAdjustTarget, setFeeAdjustTarget] = useState<FeeRow | null>(null)
+  const [feeCollapsed, setFeeCollapsed] = useState(false)
 
   const payments = useLiveQuery(() => db.payments.toArray(), [])
   const students = useLiveQuery(() => db.students.toArray(), [])
@@ -378,16 +379,26 @@ export default function FinancePage() {
 
       {/* 课酬明细（可逐课调整每人单次课酬） */}
       <Card>
-        <div className="flex items-start justify-between gap-3 border-b border-line-1 px-4 py-3.5">
+        <button
+          type="button"
+          onClick={() => setFeeCollapsed((v) => !v)}
+          className="flex w-full items-start justify-between gap-3 border-b border-line-1 px-4 py-3.5 text-left transition-colors hover:bg-surface-1"
+        >
           <div>
-            <h2 className="text-[15px] font-semibold text-text-1">课酬明细（可调整）</h2>
+            <h2 className="flex items-center gap-1.5 text-[15px] font-semibold text-text-1">
+              <ChevronRight
+                size={18}
+                className={`shrink-0 text-text-3 transition-transform ${feeCollapsed ? '' : 'rotate-90'}`}
+              />
+              课酬明细（可调整）
+            </h2>
             <p className="mt-1 text-[12px] leading-5 text-text-2">
               {feeRows.length ? `已完成课程 ${feeRows.length} 节，可逐学员设置每人单次课酬（同一节课各学员单价可不同）` : '暂无已完成课程'}
             </p>
           </div>
-        </div>
+        </button>
 
-        {feeRows.length === 0 ? (
+        {!feeCollapsed && (feeRows.length === 0 ? (
           <div className="px-4 py-6 text-center text-[13px] text-text-3">
             标记课程完成后，这里会列出每节课的课酬，可点击「调整」单独修改
           </div>
@@ -463,7 +474,7 @@ export default function FinancePage() {
               </li>
             ))}
           </ul>
-        )}
+        ))}
       </Card>
 
       {/* 财务台账 */}
