@@ -182,6 +182,12 @@ export interface Course extends SyncFields {
    * 重算只随出席人数变化。旧数据无此字段时回退到「当前单价」。
    */
   feeUnitCents?: number | null
+  /**
+   * v31.21：逐学员单人课酬（分）。班课中每位出席学员的单价可不同（同一节课各学员课酬不同）；
+   * 1对1 / 补课仅一条。非空时财务分摊与台账按各自单价计算，不再均摊。
+   * 为空/缺省时回退到 feeUnitCents 均摊（旧数据兼容）。
+   */
+  feePerStudent?: Array<{ studentId: string; unitCents: number }> | null
 }
 
 // ============================================================

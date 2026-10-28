@@ -114,7 +114,9 @@ create table if not exists courses (
   -- v21：完成上课时的扣减课时快照（取消完成时据此精确返还）
   "deductedHours" jsonb,
   -- v26：单位课酬基准快照（分）——首次完成时固定，历史课酬不随单价变更被追溯改写
-  "feeUnitCents" integer
+  "feeUnitCents" integer,
+  -- v31.21：逐学员单人课酬（分），班课各学员单价可不同；1对1/补课仅一条
+  "feePerStudent" jsonb not null default '[]'::jsonb
 );
 create index if not exists courses_updated_idx on courses ("updatedAt");
 create index if not exists courses_start_idx on courses ("startAt");
@@ -569,6 +571,7 @@ alter table "classActivities" add column if not exists "deletedReason" text;
 -- v26：课程「单位课酬基准」快照（分）。首次完成结算时写入当时单价，
 --      之后班课 / 学生单价变更不再改写这节课的历史课酬（重算只随出席人数变化）。
 alter table courses add column if not exists "feeUnitCents" integer;
+alter table courses add column if not exists "feePerStudent" jsonb not null default '[]'::jsonb;
 
 -- v30.3：规则按钮改「全体叠加」+ 班课可指定自动活动的计分规则
 --       · classActivityRecords.manualRuleIds：该生手动叠加的规则 id 列表（jsonb）

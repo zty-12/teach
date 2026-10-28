@@ -112,7 +112,22 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
           .filter((id) => memberIds.includes(id))
       : memberIds
     if (presentIds.length === 0 || course.feeCents === 0) return []
-    // 均摊必须保证「各份额之和 === 课酬」：直接 Math.round 会有舍入残留
+    // 新（v31.21）：若课程存了逐学员单价，按各自单价分摊，支持「同一节课各学员单价不同」。
+    // feePerStudent 之和应等于 course.feeCents（保存时由财务界面保证）。
+    const perMap =
+      course.feePerStudent && course.feePerStudent.length
+        ? new Map(course.feePerStudent.map((p) => [p.studentId, p.unitCents]))
+        : null
+    if (perMap) {
+      return presentIds
+        .map((sid) => ({
+          sid,
+          share: Math.max(0, perMap.get(sid) ?? 0),
+          prepaid: studentMap.get(sid)?.billingRule === 'prepaid',
+        }))
+        .filter((a) => a.share > 0)
+    }
+    // 旧：均摊必须保证「各份额之和 === 课酬」：直接 Math.round 会有舍入残留
     // （如 2000/3 → 667×3 = 2001 ≠ 2000，分账合计与原课酬差 1 分）。
     // 改为向下取整 + 余数补给前 remainder 位（v24 审查：P3）。
     const base = Math.floor(course.feeCents / presentIds.length)
