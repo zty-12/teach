@@ -28,6 +28,7 @@ import type { CourseAttendance, Payment, Settlement, Student } from '@/lib/types
 import { cn, formatMoney, formatMoneyShort } from '@/lib/utils'
 import { exportFinance, type FinanceExportRow } from '@/lib/exporters'
 import { computeFinanceMetrics, type LedgerEntry } from '@/lib/finance'
+import { everMemberIdsByGroup } from '@/lib/studentCourseStats'
 
 const PAY_METHODS = ['微信', '支付宝', '银行卡', '现金', '其他']
 
@@ -110,6 +111,9 @@ export default function FinancePage() {
       arr.push(m.studentId)
       memberIdsByGroup.set(m.groupId, arr)
     }
+    // v31.22：历史成员（当前 + 墓碑 + previousGroupIds），用于历史课实到补回，
+    // 避免已归档/移出班课的学生在其曾经出席的课上被漏算（如 9 月课应 9 人却显示 8 人）。
+    const everMemberIdsByGroupMap = everMemberIdsByGroup(members ?? [], students ?? [])
     // 课程已存的「逐学员单价」映射（优先采用，未设置则回退）
     const perStudentOf = (c: (typeof liveCourses)[number]) =>
       c.feePerStudent && c.feePerStudent.length
@@ -122,12 +126,13 @@ export default function FinancePage() {
       let presentIds: string[] = []
       if (c.groupId) {
         const mids = memberIdsByGroup.get(c.groupId) ?? []
+        const everMids = everMemberIdsByGroupMap.get(c.groupId) ?? new Set<string>()
         const atts = attByCourse.get(c.id) ?? []
         presentIds = atts.length
           ? atts
               .filter((a) => a.present)
               .map((a) => a.studentId)
-              .filter((id) => mids.includes(id))
+              .filter((id) => everMids.has(id))
           : mids
       } else if (c.studentId) {
         const atts = attByCourse.get(c.id) ?? []

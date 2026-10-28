@@ -17,6 +17,7 @@
  */
 import { endOfMonth, startOfMonth, subMonths } from 'date-fns'
 import type { Course, CourseAttendance, Group, GroupMember, Payment, Student } from './types'
+import { everMemberIdsByGroup } from './studentCourseStats'
 
 export type LedgerType = '课酬' | '应收' | '收款' | '结清'
 
@@ -83,6 +84,9 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     arr.push(m.studentId)
     membersByGroup.set(m.groupId, arr)
   }
+  // v31.22：历史成员（当前 + 墓碑 + previousGroupIds），用于历史课实到补回，
+  // 避免已归档/移出班课的学生在其曾经出席的课上被漏算。
+  const everMembersByGroup = everMemberIdsByGroup(input.members, students)
   const attendanceByCourse = new Map<string, CourseAttendance[]>()
   for (const a of attendances) {
     const arr = attendanceByCourse.get(a.courseId) ?? []
@@ -104,12 +108,13 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
       return [{ sid: s.id, share: course.feeCents, prepaid: s.billingRule === 'prepaid' }]
     }
     const memberIds = membersByGroup.get(course.groupId ?? '') ?? []
+    const everMids = everMembersByGroup.get(course.groupId ?? '') ?? new Set<string>()
     const atts = attendanceByCourse.get(course.id) ?? []
     const presentIds = atts.length
       ? atts
           .filter((a) => a.present)
           .map((a) => a.studentId)
-          .filter((id) => memberIds.includes(id))
+          .filter((id) => everMids.has(id))
       : memberIds
     if (presentIds.length === 0 || course.feeCents === 0) return []
     // 新（v31.21）：若课程存了逐学员单价，按各自单价分摊，支持「同一节课各学员单价不同」。

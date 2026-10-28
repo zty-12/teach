@@ -268,3 +268,39 @@ export function memberIdsOf(
 ): string[] {
   return uniqueMemberStudentIds(members ?? [], groupId ?? null)
 }
+
+/**
+ * 某班课「曾经有过」的成员 id 集合（v31.22 修复历史出席漏算）。
+ *
+ * 背景：归档（课时结束）会把学生从班课 **软移除**（groupMembers 置 deletedAt 墓碑），
+ * 并/或在 student.previousGroupIds 记录原班课。于是「仅按存活成员」过滤出席记录时，
+ * 已归档学生在其曾经出席的历史课上被漏算（典型症状：9 月班课应 9 人却显示 8 人）。
+ *
+ * 本函数把「当前成员 + 墓碑成员 + previousGroupIds」合并为 班课 → 成员集合，
+ * 供「按出席记录取实到」时使用：有 present 出席记录且曾属该班课的学生都算数，
+ * 既补回历史实到，又仍排除与本班课毫无关系的 stray 出席记录。
+ */
+export function everMemberIdsByGroup(
+  members: ReadonlyArray<MemberLike> | null | undefined,
+  students?: ReadonlyArray<{
+    id: string
+    previousGroupIds?: ReadonlyArray<string | null | undefined> | null
+  }> | null,
+): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>()
+  const add = (gid: string, sid: string) => {
+    if (!gid || !sid) return
+    let s = map.get(gid)
+    if (!s) {
+      s = new Set<string>()
+      map.set(gid, s)
+    }
+    s.add(sid)
+  }
+  // 含墓碑（deletedAt），不过滤 —— 这是补回历史出席的关键
+  for (const m of members ?? []) add(m.groupId, m.studentId)
+  for (const st of students ?? []) {
+    for (const gid of st.previousGroupIds ?? []) if (gid) add(gid, st.id)
+  }
+  return map
+}
