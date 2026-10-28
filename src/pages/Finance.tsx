@@ -140,13 +140,12 @@ export default function FinancePage() {
       }
       const presentStudents = presentIds
         .map((sid) => {
-          // 回退单价：已存逐学员 > 课程单价快照 > 均摊总课酬
-          const fallback =
-            (typeof c.feeUnitCents === 'number' && c.feeUnitCents >= 0
-              ? c.feeUnitCents
-              : presentIds.length > 0
-                ? c.feeCents
-                : 0) / (presentIds.length || 1)
+          // 回退单价：已存逐学员 > 课程单价快照(已是每人单价，不除人数) > 均摊总课酬
+          const unitSnapshot =
+            typeof c.feeUnitCents === 'number' && c.feeUnitCents >= 0 ? c.feeUnitCents : null
+          const fallback = unitSnapshot != null
+            ? unitSnapshot
+            : (presentIds.length > 0 ? c.feeCents : 0) / (presentIds.length || 1)
           return {
             studentId: sid,
             name: studentMap.get(sid)?.name ?? '学生(已删)',
