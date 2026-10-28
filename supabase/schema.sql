@@ -203,7 +203,8 @@ create table if not exists payments (
   note text not null default '',
   "createdAt" bigint not null default 0,
   "updatedAt" bigint not null default 0,
-  "deletedAt" bigint
+  "deletedAt" bigint,
+  "settlements" jsonb not null default '[]'::jsonb
 );
 create index if not exists payments_updated_idx on payments ("updatedAt");
 
@@ -523,6 +524,9 @@ alter table courses add column if not exists "makeupSourceCourseId" text;
 
 -- 财务：付款方（student=家长 / institution=机构结算）
 alter table payments add column if not exists payer text not null default 'student';
+
+-- v31.26：机构结清逐笔关联（哪些课酬被结算、各结算多少），jsonb NOT NULL（缺键由 sync PUSH_DEFAULTS 兜底空数组）
+alter table payments add column if not exists "settlements" jsonb not null default '[]'::jsonb;
 
 -- v6：打卡记录的 AI 家长反馈
 alter table "checkInRecords" add column if not exists "aiFeedback" text not null default '';

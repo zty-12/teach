@@ -274,6 +274,12 @@ export interface Payment extends SyncFields {
   paidAt: number
   note: string
   createdAt: number
+  /**
+   * v31.26：机构结清逐笔关联（仅 payer='institution' 使用）。
+   *  refId 对应课酬台账条目 id（形如 `r-{courseId}-prepaid`）；amountCents 为本项本次结算金额（分）。
+   *  为空/缺省 = 旧式整笔结清（不关联具体课酬，仅按全局待结算扣减）。
+   */
+  settlements?: Array<{ refId: string; amountCents: number }> | null
 }
 
 export interface Settlement extends SyncFields {

@@ -135,6 +135,11 @@ const PUSH_DEFAULTS: Partial<Record<SyncTableName, Record<string, unknown>>> = {
   courses: {
     feePerStudent: [],
   },
+  // v31.26：payments."settlements" 云端 jsonb NOT NULL，旧付款记录可能整键缺失
+  //           → 缺键被补 null 会整表推送失败；兜底空数组语义正确（= 旧式整笔结清）。
+  payments: {
+    settlements: [],
+  },
 }
 
 /** 对单条待推送记录补齐云端 NOT NULL 列的缺省值 */

@@ -15,7 +15,7 @@
  *  - 待结算课酬（settlementPendingCents）= 预付学生完课课酬合计 − 累计机构结清额（机构欠老师）
  *  - 欠费（arrears）= 仅后付学生，应收 − 实收 > 0（实收仅统计 student payer）
  */
-import { endOfMonth, startOfMonth, subMonths } from 'date-fns'
+import { endOfMonth, format, startOfMonth, subMonths } from 'date-fns'
 import type { Course, CourseAttendance, Group, GroupMember, Payment, Student } from './types'
 import { everMemberIdsByGroup } from './studentCourseStats'
 
@@ -34,6 +34,10 @@ export interface LedgerEntry {
   studentId?: string | null
   groupId?: string | null
   payer?: 'student' | 'institution'
+  /** v31.26：课酬条目已结算额（分）；仅 type==='课酬' 有意义 */
+  settledCents?: number
+  /** v31.26：课酬条目未结清余额（分）；仅 type==='课酬' 有意义 */
+  outstandingCents?: number
 }
 
 export interface FinanceMetrics {
@@ -51,6 +55,15 @@ export interface FinanceMetrics {
   arrears: Array<{ student: Student; outstanding: number }>
   /** 台账（课酬 / 应收 / 收款 / 结清） */
   ledger: LedgerEntry[]
+  /** v31.26：预付课酬中仍有未结清余额的条目（供记机构结清弹窗逐笔勾选）。按日期倒序。 */
+  prepaidFeeItems: Array<{
+    refId: string
+    date: number
+    who: string
+    subject: string
+    amountCents: number
+    outstandingCents: number
+  }>
   /** 近 6 月收款趋势（含 student + institution，单位：元） */
   trend: Array<{ label: string; 收入: number }>
   /** 近 6 月机构结清趋势（仅 institution，单位：元） */
@@ -144,11 +157,10 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     }))
   }
 
-  let totalPrepaidShare = 0
   let receivableCents = 0
   const receivableByStudent = new Map<string, number>()
   const doneCourses = liveCourses.filter((c) => c.status === 'done')
-  const ledger: LedgerEntry[] = []
+  const courseLedgers: LedgerEntry[] = []
 
   for (const c of doneCourses) {
     const attrs = attribution(c)
@@ -160,7 +172,6 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     let postpaidShare = 0
     for (const a of attrs) {
       if (a.prepaid) {
-        totalPrepaidShare += a.share
         prepaidShare += a.share
       } else {
         receivableCents += a.share
@@ -170,7 +181,7 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     }
 
     if (prepaidShare > 0) {
-      ledger.push({
+      courseLedgers.push({
         id: `r-${c.id}-prepaid`,
         date: c.startAt,
         type: '课酬',
@@ -185,7 +196,7 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
       })
     }
     if (postpaidShare > 0) {
-      ledger.push({
+      courseLedgers.push({
         id: `r-${c.id}-postpaid`,
         date: c.startAt,
         type: '应收',
@@ -201,6 +212,45 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     }
   }
 
+  // v31.26：逐笔结算归因 -------------------------------------------------
+  // 课酬台账条目 id = `r-${courseId}-prepaid`，与 Payment.settlements[].refId 对齐。
+  const prepaidEntries = courseLedgers.filter((e) => e.type === '课酬')
+  const refInfo = new Map<
+    string,
+    { date: number; who: string; subject: string; amountCents: number }
+  >()
+  for (const e of prepaidEntries) {
+    refInfo.set(e.id, { date: e.date, who: e.who, subject: e.subject, amountCents: e.amountCents })
+  }
+
+  // 按 refId 累计「新式逐笔结清」；旧式整笔结清（无 settlements 数组）进 legacy 池
+  const settledByRef = new Map<string, number>()
+  let legacySettledCents = 0
+  for (const p of livePayments) {
+    if ((p.payer ?? 'student') !== 'institution') continue
+    if (p.settlements && p.settlements.length) {
+      for (const s of p.settlements) {
+        settledByRef.set(s.refId, (settledByRef.get(s.refId) ?? 0) + s.amountCents)
+      }
+    } else {
+      legacySettledCents += p.amountCents
+    }
+  }
+  // legacy 池按课酬日期从早到晚 FIFO 分摊到各课酬未结清余额（仅兜底旧数据）
+  let legacyRemaining = legacySettledCents
+  for (const e of [...prepaidEntries].sort((a, b) => a.date - b.date)) {
+    let settled = settledByRef.get(e.id) ?? 0
+    if (legacyRemaining > 0 && settled < e.amountCents) {
+      const give = Math.min(e.amountCents - settled, legacyRemaining)
+      settled += give
+      legacyRemaining -= give
+    }
+    e.settledCents = settled
+    e.outstandingCents = Math.max(0, e.amountCents - settled)
+  }
+
+  const ledger: LedgerEntry[] = [...courseLedgers]
+
   // 学生实付（仅 payer='student'）—— 用于欠费抵扣
   const paidByStudent = new Map<string, number>()
   let institutionSettledCents = 0
@@ -208,19 +258,41 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     const payer: 'student' | 'institution' = p.payer ?? 'student'
     if (payer === 'institution') {
       institutionSettledCents += p.amountCents
-      ledger.push({
-        id: `p-${p.id}`,
-        date: p.paidAt,
-        type: '结清',
-        who: '机构',
-        subject: '',
-        amountCents: p.amountCents,
-        note: p.note || '机构结清课酬',
-        kind: 'payment',
-        refId: p.id,
-        studentId: null,
-        payer: 'institution',
-      })
+      if (p.settlements && p.settlements.length) {
+        // v31.26：逐笔结清 → 拆成多条「结清」台账，每条对应一笔课酬，标注日期与百分比
+        for (const s of p.settlements) {
+          const info = refInfo.get(s.refId)
+          const pct = info && info.amountCents > 0 ? Math.round((s.amountCents / info.amountCents) * 100) : 0
+          const courseDate = info ? format(info.date, 'MM-dd') : ''
+          ledger.push({
+            id: `p-${p.id}-${s.refId}`,
+            date: p.paidAt,
+            type: '结清',
+            who: '机构',
+            subject: info?.subject ?? '',
+            amountCents: s.amountCents,
+            note: `结清 ${courseDate} 课酬${pct > 0 ? ` (${pct}%)` : ''}`,
+            kind: 'payment',
+            refId: p.id,
+            studentId: null,
+            payer: 'institution',
+          })
+        }
+      } else {
+        ledger.push({
+          id: `p-${p.id}`,
+          date: p.paidAt,
+          type: '结清',
+          who: '机构',
+          subject: '',
+          amountCents: p.amountCents,
+          note: p.note || '机构结清课酬',
+          kind: 'payment',
+          refId: p.id,
+          studentId: null,
+          payer: 'institution',
+        })
+      }
     } else {
       ledger.push({
         id: `p-${p.id}`,
@@ -253,8 +325,8 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     .filter((x) => x.outstanding > 0)
     .sort((a, b) => b.outstanding - a.outstanding)
 
-  // 待结算课酬：预付完课合计 - 累计机构结清，下限 0
-  const settlementPendingCents = Math.max(0, totalPrepaidShare - institutionSettledCents)
+  // 待结算课酬：各课酬未结清余额之和（逐笔口径，已按部分/全额结算与 legacy 兜底正确扣减）
+  const settlementPendingCents = prepaidEntries.reduce((s, e) => s + (e.outstandingCents ?? 0), 0)
 
   const monthStart = startOfMonth(now).getTime()
   const monthEnd = endOfMonth(now).getTime()
@@ -283,6 +355,19 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     return { label: `${d.getMonth() + 1}月`, 结清: Math.round(sum / 100) }
   })
 
+  // v31.26：供「记机构结清」弹窗逐笔勾选的未结清课酬项（按日期倒序）
+  const prepaidFeeItems = prepaidEntries
+    .filter((e) => (e.outstandingCents ?? 0) > 0)
+    .sort((a, b) => b.date - a.date)
+    .map((e) => ({
+      refId: e.id,
+      date: e.date,
+      who: e.who,
+      subject: e.subject,
+      amountCents: e.amountCents,
+      outstandingCents: e.outstandingCents ?? 0,
+    }))
+
   return {
     monthIncome,
     totalPaid,
@@ -291,6 +376,7 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
     institutionSettledCents,
     arrears,
     ledger,
+    prepaidFeeItems,
     trend,
     settleTrend,
   }

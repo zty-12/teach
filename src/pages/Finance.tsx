@@ -523,6 +523,22 @@ export default function FinancePage() {
                     <td className={cn('px-4 py-2.5 text-right font-medium tabular-nums', meta.amount)}>
                       <span className="mr-0.5 opacity-70">{meta.sign}</span>
                       {formatMoney(r.amountCents)}
+                      {r.type === '课酬' && r.outstandingCents !== undefined && (
+                        <span className="mt-0.5 block text-[11px] font-normal tabular-nums">
+                          {r.outstandingCents === 0 ? (
+                            <span className="text-done">已结清</span>
+                          ) : (r.settledCents ?? 0) > 0 ? (
+                            <span className="text-text-3">
+                              已结 {formatMoney(r.settledCents ?? 0)} · 待结{' '}
+                              {formatMoney(r.outstandingCents)}
+                            </span>
+                          ) : (
+                            <span className="text-text-3">
+                              待结算 {formatMoney(r.outstandingCents)}
+                            </span>
+                          )}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-right">
                       {r.kind === 'payment' && r.refId && (
@@ -557,9 +573,25 @@ export default function FinancePage() {
                       {r.subject ? ` · ${r.subject}` : ''}
                     </p>
                   </div>
-                  <span className={cn('shrink-0 font-medium tabular-nums', meta.amount)}>
+                  <span className={cn('shrink-0 text-right font-medium tabular-nums', meta.amount)}>
                     <span className="mr-0.5 opacity-70">{meta.sign}</span>
                     {formatMoney(r.amountCents)}
+                    {r.type === '课酬' && r.outstandingCents !== undefined && (
+                      <span className="mt-0.5 block text-[11px] font-normal tabular-nums">
+                        {r.outstandingCents === 0 ? (
+                          <span className="text-done">已结清</span>
+                        ) : (r.settledCents ?? 0) > 0 ? (
+                          <span className="text-text-3">
+                            已结 {formatMoney(r.settledCents ?? 0)} · 待结{' '}
+                            {formatMoney(r.outstandingCents)}
+                          </span>
+                        ) : (
+                          <span className="text-text-3">
+                            待结算 {formatMoney(r.outstandingCents)}
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </span>
                 </li>
               )
@@ -577,6 +609,7 @@ export default function FinancePage() {
       <SettleWagesModal
         open={settleOpen}
         pending={data.settlementPendingCents / 100}
+        feeItems={data.prepaidFeeItems}
         onClose={() => setSettleOpen(false)}
       />
 
@@ -712,27 +745,88 @@ function PaymentModal({
 function SettleWagesModal({
   open,
   pending,
+  feeItems,
   onClose,
 }: {
   open: boolean
-  /** 当前待结算课酬总额（元）。调用处已把分 / 100。用于顶部提示 + 一键填入。 */
+  /** 当前待结算课酬总额（元）。用于顶部提示。 */
   pending: number
+  /**
+   * v31.26：可勾选结清的课酬项。
+   * 默认全部勾选、金额＝各自待结余额；可手动改成部分结算（如 100 元填 80 元 → 结算 80 元）。
+   */
+  feeItems: Array<{
+    refId: string
+    date: number
+    who: string
+    subject: string
+    amountCents: number
+    outstandingCents: number
+  }>
   onClose: () => void
 }) {
-  const [amount, setAmount] = useState('')
+  const [selected, setSelected] = useState<Record<string, boolean>>({})
+  const [amounts, setAmounts] = useState<Record<string, string>>({})
   const [method, setMethod] = useState(PAY_METHODS[0]!)
   const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'))
   const [note, setNote] = useState('')
   const [error, setError] = useState('')
 
-  function presetFull() {
-    setAmount(pending > 0 ? String(pending.toFixed(2)) : '')
+  // 每次打开重置：默认全选，每笔金额＝其待结余额
+  useEffect(() => {
+    if (!open) return
+    const sel: Record<string, boolean> = {}
+    const amt: Record<string, string> = {}
+    for (const it of feeItems) {
+      sel[it.refId] = true
+      amt[it.refId] = (it.outstandingCents / 100).toFixed(2)
+    }
+    setSelected(sel)
+    setAmounts(amt)
+    setNote('')
+    setError('')
+    setDate(format(new Date(), 'yyyy-MM-dd'))
+  }, [open])
+
+  // 本次勾选出的结算明细（已勾选 + 金额有效，且不超过待结余额）
+  const picks = feeItems
+    .map((it) => {
+      const yuan = Number(amounts[it.refId] ?? '')
+      const capped = Number.isFinite(yuan)
+        ? Math.min(Math.max(0, yuan), it.outstandingCents / 100)
+        : NaN
+      return { refId: it.refId, yuan: capped }
+    })
+    .filter((p) => Number.isFinite(p.yuan) && p.yuan > 0 && !!selected[p.refId])
+  const totalCents = picks.reduce((s, p) => s + Math.round(p.yuan * 100), 0)
+
+  // 校验：已勾选行的金额必须是有效非负数
+  const anyInvalid = feeItems.some((it) => {
+    if (!selected[it.refId]) return false
+    const raw = (amounts[it.refId] ?? '').trim()
+    if (raw === '') return true
+    const v = Number(raw)
+    return !Number.isFinite(v) || v < 0
+  })
+
+  function setAll(on: boolean) {
+    const sel: Record<string, boolean> = {}
+    for (const it of feeItems) sel[it.refId] = on
+    setSelected(sel)
+    if (on) {
+      const amt: Record<string, string> = {}
+      for (const it of feeItems) amt[it.refId] = (it.outstandingCents / 100).toFixed(2)
+      setAmounts(amt)
+    }
   }
 
   async function handleSave() {
-    const yuan = Number(amount)
-    if (!Number.isFinite(yuan) || yuan <= 0) {
-      setError('请填写大于 0 的金额')
+    if (anyInvalid) {
+      setError('结算金额需为有效数字，且不小于 0')
+      return
+    }
+    if (picks.length === 0 || totalCents <= 0) {
+      setError('请勾选至少一笔并填写结算金额')
       return
     }
     const [y, m, d] = date.split('-').map(Number)
@@ -742,15 +836,17 @@ function SettleWagesModal({
       withSyncFields<Payment>({
         studentId: null,
         payer: 'institution',
-        amountCents: Math.round(yuan * 100),
+        amountCents: totalCents,
         method,
         paidAt,
-        note: note.trim() || '机构结清课酬',
+        note: note.trim() || `机构结清课酬（${picks.length} 笔）`,
         createdAt: Date.now(),
+        settlements: picks.map((p) => ({
+          refId: p.refId,
+          amountCents: Math.round(p.yuan * 100),
+        })),
       }),
     )
-    setAmount('')
-    setNote('')
     setError('')
     onClose()
   }
@@ -779,31 +875,93 @@ function SettleWagesModal({
                 ¥{pending.toFixed(2)}
               </div>
             </div>
-            {pending > 0 && (
-              <Button size="sm" variant="ghost" onClick={presetFull}>
-                一键填入
+            <div className="flex shrink-0 gap-1">
+              <Button size="sm" variant="ghost" onClick={() => setAll(true)}>
+                全选
               </Button>
-            )}
+              <Button size="sm" variant="ghost" onClick={() => setAll(false)}>
+                清空
+              </Button>
+            </div>
           </div>
           <p className="mt-1 text-[11px] leading-5 text-text-3">
-            填写本次机构结算的金额，将从待结算课酬中扣减（不足部分不影响已结清累计）。
+            勾选本次要结清的课程（默认全选、金额＝待结余额）。可手动改成部分结算，如 100 元填 80 元即结算 80 元。
           </p>
         </div>
 
+        {/* v31.26：逐笔勾选 + 手动填写结算金额 */}
+        {feeItems.length === 0 ? (
+          <p className="rounded-xl border border-line-1 bg-surface-2/50 px-3 py-4 text-center text-[12px] text-text-3">
+            所有课酬都已结清
+          </p>
+        ) : (
+          <ul className="max-h-[42vh] space-y-1 overflow-y-auto rounded-xl border border-line-1 bg-surface-2/40 p-2">
+            {feeItems.map((it) => {
+              const on = !!selected[it.refId]
+              const cap = it.outstandingCents / 100
+              const raw = Number(amounts[it.refId] ?? '')
+              const pct = Number.isFinite(raw) && cap > 0 ? Math.round((raw / cap) * 100) : 0
+              return (
+                <li
+                  key={it.refId}
+                  className={cn(
+                    'flex items-center gap-2.5 rounded-lg px-2 py-2',
+                    on ? 'bg-surface-1' : 'opacity-60',
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={(e) =>
+                      setSelected((s) => ({ ...s, [it.refId]: e.target.checked }))
+                    }
+                    className="h-4 w-4 shrink-0 accent-[var(--c-accent)]"
+                    aria-label={`结算 ${format(it.date, 'yyyy-MM-dd')} ${it.who}`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[12px] font-medium text-text-1">{it.who}</p>
+                    <p className="truncate text-[11px] text-text-3">
+                      {format(it.date, 'yyyy-MM-dd')}
+                      {it.subject ? ` · ${it.subject}` : ''} · 待结 ¥{cap.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Input
+                      className="h-8 w-[92px] text-right text-[12px]"
+                      type="number"
+                      step={0.5}
+                      min={0}
+                      max={cap}
+                      value={amounts[it.refId] ?? ''}
+                      onChange={(e) => {
+                        setAmounts((m) => ({ ...m, [it.refId]: e.target.value }))
+                        setError('')
+                      }}
+                      disabled={!on}
+                      inputMode="decimal"
+                      aria-label="本次结算金额（元）"
+                    />
+                    <span className="w-9 text-[11px] tabular-nums text-text-3">
+                      {on && Number.isFinite(raw) ? `${pct}%` : ''}
+                    </span>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        {/* 合计预览 */}
+        <div className="flex items-center justify-between rounded-xl border border-line-1 bg-surface-2/60 px-3 py-2.5">
+          <span className="text-[12px] text-text-2">本次结算合计（{picks.length} 笔）</span>
+          <span className="text-[15px] font-semibold tabular-nums text-text-1">
+            {formatMoney(totalCents)}
+          </span>
+        </div>
+
+        {error && <p className="text-[12px] text-leave">{error}</p>}
+
         <div className="grid grid-cols-2 gap-3">
-          <Field label="金额（元）" error={error}>
-            <Input
-              type="number"
-              step={10}
-              value={amount}
-              onChange={(e) => {
-                setAmount(e.target.value)
-                setError('')
-              }}
-              placeholder="0"
-              inputMode="decimal"
-            />
-          </Field>
           <Field label="方式">
             <Select value={method} onChange={(e) => setMethod(e.target.value)}>
               {PAY_METHODS.map((m) => (
