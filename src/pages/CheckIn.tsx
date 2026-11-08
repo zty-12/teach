@@ -75,7 +75,7 @@ import { RuleChips, RulePicker } from '@/components/RulePicker'
 
 // v31.33：长列表折叠状态（本机 localStorage，纯 UI 偏好，不同步云端）
 const TASKS_VISIBLE_COUNT = 3
-const REDEMPTIONS_VISIBLE_COUNT = 30
+const REDEMPTIONS_VISIBLE_COUNT = 3
 const TASKS_EXPANDED_KEY = 'ew-checkin-tasks-expanded'
 const REDEMPTIONS_EXPANDED_KEY = 'ew-market-redemptions-expanded'
 
@@ -1962,7 +1962,7 @@ function MarketView({
                     className="flex w-full items-center justify-center gap-1 px-4 py-2.5 text-[12px] font-medium text-text-2 transition-colors hover:bg-surface-1"
                   >
                     {redemptionsExpanded
-                      ? '收起，只看最近 30 条'
+                      ? `收起，只看最近 ${REDEMPTIONS_VISIBLE_COUNT} 条`
                       : `展开其余 ${redemptions.length - REDEMPTIONS_VISIBLE_COUNT} 条兑换记录`}
                     <ChevronDown
                       size={14}

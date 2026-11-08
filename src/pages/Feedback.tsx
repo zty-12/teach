@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { format } from 'date-fns'
 import {
   BookOpen,
+  ChevronDown,
   ChevronRight,
   FileText,
   Loader2,
@@ -67,6 +68,27 @@ import type {
 } from '@/lib/types'
 import { FEEDBACK_PLACEHOLDERS, FIELD_SOURCE_LABEL } from '@/lib/types'
 
+/**
+ * v31.34：已写反馈默认只显示最近 3 条，其余折叠（本机 localStorage，纯 UI 偏好）。
+ * 与打卡任务 / 兑换记录 / 财务台账的折叠口径保持一致；隐私模式下降级为默认折叠。
+ */
+const WRITTEN_VISIBLE_COUNT = 3
+const WRITTEN_EXPANDED_KEY = 'ew-feedback-written-expanded'
+function readWrittenExpanded(): boolean {
+  try {
+    return localStorage.getItem(WRITTEN_EXPANDED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function writeWrittenExpanded(v: boolean) {
+  try {
+    localStorage.setItem(WRITTEN_EXPANDED_KEY, v ? '1' : '0')
+  } catch {
+    /* 隐私模式下 localStorage 不可用，忽略 */
+  }
+}
+
 export default function FeedbackPage() {
   const bp = useBreakpoint()
   const isDesktop = bp === 'desktop'
@@ -76,6 +98,8 @@ export default function FeedbackPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
   const [fbQuery, setFbQuery] = useState('')
+  /** v31.34：已写反馈折叠（本机记忆） */
+  const [writtenExpanded, setWrittenExpanded] = useState(readWrittenExpanded)
 
   const courses = useLiveQuery(() => db.courses.toArray(), [])
   const feedbacks = useLiveQuery(() => db.courseFeedbacks.toArray(), [])
@@ -126,6 +150,17 @@ export default function FeedbackPage() {
       return haystack.includes(q)
     })
   }, [written, fbQuery, courses, students, groups])
+
+  /**
+   * v31.34：written 已按 updatedAt 降序，filteredWritten 的 filter 保序，
+   * 因此 slice(0, 3) 就是「最近 3 条」。搜索时直接展示全部匹配结果，
+   * 避免「明明搜到 8 条却只看到 3 条」；此时也隐藏折叠按钮。
+   */
+  const hasQuery = fbQuery.trim().length > 0
+  const shownWritten = hasQuery || writtenExpanded
+    ? filteredWritten
+    : filteredWritten.slice(0, WRITTEN_VISIBLE_COUNT)
+  const hasMoreWritten = !hasQuery && filteredWritten.length > WRITTEN_VISIBLE_COUNT
 
   function openNew(course: Course) {
     setEditing(null)
@@ -275,7 +310,7 @@ export default function FeedbackPage() {
           />
         ) : (
           <ul className="divide-y divide-line-1">
-            {filteredWritten.map((f) => {
+            {shownWritten.map((f) => {
               const c = (courses ?? []).find((x) => x.id === f.courseId)
               return (
                 <li key={f.id} className="px-4 py-3">
@@ -326,6 +361,28 @@ export default function FeedbackPage() {
                 </li>
               )
             })}
+            {hasMoreWritten && (
+              <li>
+                <button
+                  type="button"
+                  aria-expanded={writtenExpanded}
+                  onClick={() => {
+                    const next = !writtenExpanded
+                    setWrittenExpanded(next)
+                    writeWrittenExpanded(next)
+                  }}
+                  className="flex w-full items-center justify-center gap-1 px-4 py-2.5 text-[12px] font-medium text-text-2 transition-colors hover:bg-surface-1"
+                >
+                  {writtenExpanded
+                    ? '收起多余反馈'
+                    : `展开其余 ${filteredWritten.length - WRITTEN_VISIBLE_COUNT} 条反馈`}
+                  <ChevronDown
+                    size={14}
+                    className={cn('transition-transform', writtenExpanded && 'rotate-180')}
+                  />
+                </button>
+              </li>
+            )}
           </ul>
         )}
       </Card>

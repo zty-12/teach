@@ -33,8 +33,8 @@ import { everMemberIdsByGroup } from '@/lib/studentCourseStats'
 
 const PAY_METHODS = ['微信', '支付宝', '银行卡', '现金', '其他']
 
-// v31.33：移动端财务台账默认显示最近 60 条，其余可展开（本机记忆，纯 UI 偏好）
-const LEDGER_VISIBLE_COUNT = 60
+// v31.34：财务台账桌面 / 移动端统一默认显示最近 3 条，其余可展开（本机记忆，纯 UI 偏好）
+const LEDGER_VISIBLE_COUNT = 3
 const LEDGER_EXPANDED_KEY = 'ew-finance-ledger-expanded'
 function readLedgerExpanded(): boolean {
   try {
@@ -555,7 +555,7 @@ export default function FinancePage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-line-1">
-              {data.ledger.map((r) => {
+              {data.ledger.slice(0, ledgerExpanded ? data.ledger.length : LEDGER_VISIBLE_COUNT).map((r) => {
                 const meta = TYPE_META[r.type]
                 return (
                   <tr key={r.id} className="transition-colors hover:bg-surface-1">
@@ -609,6 +609,30 @@ export default function FinancePage() {
                   </tr>
                 )
               })}
+              {data.ledger.length > LEDGER_VISIBLE_COUNT && (
+                <tr>
+                  <td colSpan={6} className="p-0">
+                    <button
+                      type="button"
+                      aria-expanded={ledgerExpanded}
+                      onClick={() => {
+                        const next = !ledgerExpanded
+                        setLedgerExpanded(next)
+                        writeLedgerExpanded(next)
+                      }}
+                      className="flex w-full items-center justify-center gap-1 px-4 py-2.5 text-[12px] font-medium text-text-2 transition-colors hover:bg-surface-1"
+                    >
+                      {ledgerExpanded
+                        ? `收起，只看最近 ${LEDGER_VISIBLE_COUNT} 条`
+                        : `展开其余 ${data.ledger.length - LEDGER_VISIBLE_COUNT} 条账目`}
+                      <ChevronDown
+                        size={14}
+                        className={cn('transition-transform', ledgerExpanded && 'rotate-180')}
+                      />
+                    </button>
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         ) : (
@@ -664,7 +688,7 @@ export default function FinancePage() {
                   className="flex w-full items-center justify-center gap-1 px-4 py-2.5 text-[12px] font-medium text-text-2 transition-colors hover:bg-surface-1"
                 >
                   {ledgerExpanded
-                    ? '收起，只看最近 60 条'
+                    ? `收起，只看最近 ${LEDGER_VISIBLE_COUNT} 条`
                     : `展开其余 ${data.ledger.length - LEDGER_VISIBLE_COUNT} 条账目`}
                   <ChevronDown
                     size={14}
