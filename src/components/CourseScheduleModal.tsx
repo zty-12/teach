@@ -394,6 +394,9 @@ export function CourseScheduleModal({
   // 选择补的原课：自动带入科目、一半时长、人均课酬（计 1 课时）
   function handleMakeupSourceChange(id: string) {
     setMakeupSourceCourseId(id)
+    // v31.29：编辑既有补课时只补「关联原课」，绝不重填表单 ——
+    // 否则会覆盖老师已改好的科目 / 时长 / 课酬 / 备注。
+    if (course) return
     const c = makeupSourceOptions.find((o) => o.id === id)
     if (!c) return
     patch({
@@ -927,8 +930,8 @@ export function CourseScheduleModal({
                       </div>
                     )}
 
-                    {/* 补课：选择原课，自动带出科目 / 一半时长 / 人均课酬（计 1 课时） */}
-                    {!course && courseType === 'makeup' && (
+                    {/* 补课：选择原课。新建时自动带出科目/时长/课酬；编辑时仅补关联（v31.29），供历史补课回补关联 */}
+                    {courseType === 'makeup' && (
                       <div className="mt-4">
                         <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-text-1">
                           <CalendarDays size={16} className="text-text-3" /> 补的原课（可选）
@@ -940,9 +943,9 @@ export function CourseScheduleModal({
                           ))}
                         </Select>
                         <div className={fieldHint}>
-                          {courseType === 'makeup'
-                            ? '选择原课后自动带入科目 / 一半时长 / 人均课酬（计 1 课时）；同堂学生共享这次关联'
-                            : '选择后自动带入原班课信息'}
+                          {course
+                            ? '补选原课后，出勤记录会把该生这次请假标为「已补上」；不改动已填的科目 / 时长 / 课酬'
+                            : '选择原课后自动带入科目 / 一半时长 / 人均课酬（计 1 课时）；同堂学生共享这次关联'}
                         </div>
                       </div>
                     )}

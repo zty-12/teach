@@ -282,6 +282,7 @@ export function StudentDetailSheet({
                   courses={data.courses}
                   attendances={data.attendances}
                   groups={data.groups}
+                  allCourses={courses ?? []}
                 />
               )}
               {tab === 'payments' && (

@@ -60,6 +60,27 @@ interface FeeRow {
   isGroup: boolean
 }
 
+/**
+ * v31.29：课酬明细折叠状态记忆（本机）。
+ * 沿用项目 ew-theme / ew-timezone 的 localStorage 命名；隐私模式不可用则降级为默认展开。
+ * 纯 UI 偏好，不进 app_settings、不同步云端、不需要任何列变更。
+ */
+const FEE_COLLAPSED_KEY = 'ew-finance-fee-collapsed'
+function readFeeCollapsed(): boolean {
+  try {
+    return localStorage.getItem(FEE_COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function writeFeeCollapsed(v: boolean) {
+  try {
+    localStorage.setItem(FEE_COLLAPSED_KEY, v ? '1' : '0')
+  } catch {
+    /* 隐私模式下 localStorage 不可用，忽略 */
+  }
+}
+
 export default function FinancePage() {
   const bp = useBreakpoint()
   const isDesktop = bp === 'desktop'
@@ -67,7 +88,7 @@ export default function FinancePage() {
   const [settleOpen, setSettleOpen] = useState(false)
   const [feeAdjustOpen, setFeeAdjustOpen] = useState(false)
   const [feeAdjustTarget, setFeeAdjustTarget] = useState<FeeRow | null>(null)
-  const [feeCollapsed, setFeeCollapsed] = useState(false)
+  const [feeCollapsed, setFeeCollapsed] = useState(readFeeCollapsed)
 
   const payments = useLiveQuery(() => db.payments.toArray(), [])
   const students = useLiveQuery(() => db.students.toArray(), [])
@@ -381,7 +402,11 @@ export default function FinancePage() {
       <Card>
         <button
           type="button"
-          onClick={() => setFeeCollapsed((v) => !v)}
+          onClick={() => {
+            const next = !feeCollapsed
+            setFeeCollapsed(next)
+            writeFeeCollapsed(next)
+          }}
           className="flex w-full items-start justify-between gap-3 border-b border-line-1 px-4 py-3.5 text-left transition-colors hover:bg-surface-1"
         >
           <div>

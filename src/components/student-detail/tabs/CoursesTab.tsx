@@ -11,6 +11,7 @@ import {
   type CourseAttendance,
   type Group,
 } from '@/lib/types'
+import { buildMakeupIndex, studentLeaveLabel } from '@/lib/attendanceView'
 import { cn, formatMoney } from '@/lib/utils'
 
 const STATUS_CLASS: Record<string, string> = {
@@ -25,13 +26,21 @@ export function CoursesTab({
   courses,
   attendances,
   groups,
+  allCourses,
 }: {
   studentId: string
   courses: Course[]
   attendances: CourseAttendance[]
   groups: Group[]
+  /** v31.29：全量课程（含所有学生的补课课），用于精确关联「请假 → 已补上」。缺省时退回 courses */
+  allCourses?: Course[]
 }) {
   const groupMap = useMemo(() => new Map(groups.map((g) => [g.id, g])), [groups])
+  // 口径与课表「出勤」视图共用 lib/attendanceView.ts：按 (原课 id, 学生 id) 精确匹配补课课
+  const makeupIndex = useMemo(
+    () => buildMakeupIndex(allCourses ?? courses),
+    [allCourses, courses],
+  )
   const myAttendByCourse = useMemo(() => {
     const map = new Map<string, CourseAttendance>()
     for (const a of attendances) {
@@ -73,6 +82,10 @@ export function CoursesTab({
           const group = c.groupId ? groupMap.get(c.groupId) : null
           const att = myAttendByCourse.get(c.id)
           const present = att?.present
+          // 请假时把「✗ 请假」升级为「请假，11.14 已补上 / 已排补课（待上）/ 未补」
+          const leaveLabel =
+            present === false ? studentLeaveLabel(makeupIndex, c.id, studentId) : null
+          const madeUp = leaveLabel?.includes('已补上') ?? false
           return (
             <li
               key={c.id}
@@ -120,10 +133,10 @@ export function CoursesTab({
                     <p
                       className={cn(
                         'mt-0.5 text-[11px]',
-                        present ? 'text-done' : 'text-leave',
+                        present ? 'text-done' : madeUp ? 'text-accent-text' : 'text-leave',
                       )}
                     >
-                      {present ? '✓ 已出席' : '✗ 请假'}
+                      {present ? '✓ 已出席' : `✗ ${leaveLabel ?? '请假，未补'}`}
                     </p>
                   )}
                   {c.status === 'done' && c.feeCents > 0 && (

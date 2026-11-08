@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { addDays, format, startOfDay } from 'date-fns'
 import {
+  CalendarCheck,
   CalendarPlus,
   Check,
   ChevronLeft,
@@ -14,6 +15,7 @@ import {
 import { db } from '@/lib/db'
 import { hardDeleteCourses } from '@/lib/batchDelete'
 import { AttendanceModal } from '@/components/AttendanceModal'
+import { AttendanceView } from '@/components/AttendanceView'
 import { CourseScheduleModal } from '@/components/CourseScheduleModal'
 import { CourseScheduleSheet } from '@/components/CourseScheduleSheet'
 import { GroupDetailSheet } from '@/components/GroupDetailSheet'
@@ -92,7 +94,8 @@ function cancelSingleClick(id: string): boolean {
 }
 
 type MethodFilter = 'all' | 'online' | 'offline'
-type ScheduleView = 'day' | 'week' | 'agenda'
+/** v31.29：attendance = 按课查询的「出勤」视图（PC 并入视图切换，移动端由页头按钮进入） */
+type ScheduleView = 'day' | 'week' | 'agenda' | 'attendance'
 
 export default function SchedulePage() {
   const bp = useBreakpoint()
@@ -329,6 +332,16 @@ export default function SchedulePage() {
         subtitle="支持排课冲突检测、按授课方式筛选与时间轴视图的排课大厅"
         action={
           <>
+            {/* 移动端没有桌面工具条的视图切换，这里给出勤视图一个入口（不动底部「更多」弹层） */}
+            {bp !== 'desktop' && (
+              <Button
+                variant="secondary"
+                onClick={() => setView(view === 'attendance' ? 'week' : 'attendance')}
+              >
+                {view === 'attendance' ? <ChevronLeft size={16} /> : <CalendarCheck size={16} />}
+                {view === 'attendance' ? '课表' : '出勤'}
+              </Button>
+            )}
             <Button
               variant="secondary"
               onClick={() => exportSchedule(liveCourses, studentMap, groupMap)}
@@ -348,39 +361,48 @@ export default function SchedulePage() {
         <Card className="overflow-hidden">
           {/* 顶部工具条：周导航 + 本周统计 + 方式筛选 + 视图切换 */}
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-1 px-4 py-2.5">
-            <div className="flex items-center gap-1">
-              <Button size="sm" variant="ghost" onClick={() => setAnchor(addDays(anchor, -7).getTime())}>
-                <ChevronLeft size={15} />
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setAnchor(startOfDay(new Date()).getTime())}>
-                本周
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setAnchor(addDays(anchor, 7).getTime())}>
-                <ChevronRight size={15} />
-              </Button>
-            </div>
+            {/* 出勤视图自带日期区间查询，隐藏周导航 / 方式筛选 / 多选这些课表专用控件 */}
+            {view !== 'attendance' && (
+              <>
+                <div className="flex items-center gap-1">
+                  <Button size="sm" variant="ghost" onClick={() => setAnchor(addDays(anchor, -7).getTime())}>
+                    <ChevronLeft size={15} />
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setAnchor(startOfDay(new Date()).getTime())}>
+                    本周
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setAnchor(addDays(anchor, 7).getTime())}>
+                    <ChevronRight size={15} />
+                  </Button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-text-2">
+                    {format(weekDays[0]!, 'yyyy年M月d日')} – {format(weekDays[6]!, 'M月d日')}
+                  </span>
+                  <span className="rounded-full bg-accent-soft px-2.5 py-0.5 text-[12px] font-medium text-accent-text">
+                    本周总排课 {weekCount} 节
+                  </span>
+                </div>
+              </>
+            )}
 
             <div className="flex items-center gap-2">
-              <span className="text-sm text-text-2">
-                {format(weekDays[0]!, 'yyyy年M月d日')} – {format(weekDays[6]!, 'M月d日')}
-              </span>
-              <span className="rounded-full bg-accent-soft px-2.5 py-0.5 text-[12px] font-medium text-accent-text">
-                本周总排课 {weekCount} 节
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <SegmentedControl
-                value={methodFilter}
-                onChange={(v) => setMethodFilter(v as MethodFilter)}
-                variant="toggle"
-                size="sm"
-                options={[
-                  { value: 'all', label: '全部方式' },
-                  { value: 'online', label: '线上' },
-                  { value: 'offline', label: '线下' },
-                ]}
-              />
+              {view !== 'attendance' && (
+                <>
+                  <SegmentedControl
+                    value={methodFilter}
+                    onChange={(v) => setMethodFilter(v as MethodFilter)}
+                    variant="toggle"
+                    size="sm"
+                    options={[
+                      { value: 'all', label: '全部方式' },
+                      { value: 'online', label: '线上' },
+                      { value: 'offline', label: '线下' },
+                    ]}
+                  />
+                </>
+              )}
               <SegmentedControl
                 value={view}
                 onChange={(v) => setView(v as ScheduleView)}
@@ -390,19 +412,31 @@ export default function SchedulePage() {
                   { value: 'day', label: '日视图' },
                   { value: 'week', label: '周视图' },
                   { value: 'agenda', label: '日程表' },
+                  { value: 'attendance', label: '出勤' },
                 ]}
               />
-              <Button
-                size="sm"
-                variant={selectMode ? 'primary' : 'ghost'}
-                onClick={toggleSelectMode}
-              >
-                多选
-              </Button>
+              {view !== 'attendance' && (
+                <Button
+                  size="sm"
+                  variant={selectMode ? 'primary' : 'ghost'}
+                  onClick={toggleSelectMode}
+                >
+                  多选
+                </Button>
+              )}
             </div>
           </div>
 
-          {view === 'week' ? (
+          {view === 'attendance' ? (
+            <AttendanceView
+              courses={liveCourses}
+              students={students ?? []}
+              groups={groups ?? []}
+              members={members ?? []}
+              attendances={liveAttendances}
+              onBack={() => setView('week')}
+            />
+          ) : view === 'week' ? (
             <WeekView
               anchor={anchor}
               courses={filteredCourses}
@@ -444,6 +478,15 @@ export default function SchedulePage() {
             />
           )}
         </Card>
+      ) : view === 'attendance' ? (
+        <AttendanceView
+          courses={liveCourses}
+          students={students ?? []}
+          groups={groups ?? []}
+          members={members ?? []}
+          attendances={liveAttendances}
+          onBack={() => setView('week')}
+        />
       ) : (
         <DayView anchor={anchor} setAnchor={setAnchor} {...shared} />
       )}
