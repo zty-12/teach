@@ -7,6 +7,7 @@ import {
   Award,
   CalendarRange,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Gift,
   Loader2,
@@ -71,6 +72,27 @@ import { getOrRefreshProfileForFeedback, getProfileSnapshot, type ProfileSnapsho
 import ClassPointsView from '@/components/ClassPointsView'
 import RuleLibraryView from '@/components/RuleLibraryView'
 import { RuleChips, RulePicker } from '@/components/RulePicker'
+
+// v31.33：长列表折叠状态（本机 localStorage，纯 UI 偏好，不同步云端）
+const TASKS_VISIBLE_COUNT = 3
+const REDEMPTIONS_VISIBLE_COUNT = 30
+const TASKS_EXPANDED_KEY = 'ew-checkin-tasks-expanded'
+const REDEMPTIONS_EXPANDED_KEY = 'ew-market-redemptions-expanded'
+
+function readExpandedPref(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === '1'
+  } catch {
+    return false
+  }
+}
+function writeExpandedPref(key: string, v: boolean) {
+  try {
+    localStorage.setItem(key, v ? '1' : '0')
+  } catch {
+    /* 隐私模式 / 存储被禁用时降级为默认折叠 */
+  }
+}
 
 type MainTab = 'tasks' | 'class' | 'rules' | 'market'
 
@@ -199,6 +221,21 @@ function TasksView({
 }) {
   const [newTaskOpen, setNewTaskOpen] = useState(false)
   const [editTask, setEditTask] = useState<CheckInTask | null>(null)
+  /** v31.33：默认只显示最近 3 个任务批次，其余折叠（本机记忆） */
+  const [tasksExpanded, setTasksExpanded] = useState(() => readExpandedPref(TASKS_EXPANDED_KEY))
+
+  const sortedTasks = tasks.slice().sort((a, b) => b.createdAt - a.createdAt)
+  const hasMoreTasks = sortedTasks.length > TASKS_VISIBLE_COUNT
+  const visibleTasks = (() => {
+    if (tasksExpanded) return sortedTasks
+    const base = sortedTasks.slice(0, TASKS_VISIBLE_COUNT)
+    // 当前正在查看的任务必须始终可见：否则下方记录卡开着，上面却找不到高亮项
+    const pinned = activeTaskId
+      ? sortedTasks.slice(TASKS_VISIBLE_COUNT).find((t) => t.id === activeTaskId)
+      : undefined
+    return pinned ? [...base, pinned] : base
+  })()
+  const hiddenTaskCount = sortedTasks.length - visibleTasks.length
 
   const activeTask = activeTaskId ? tasks.find((t) => t.id === activeTaskId) ?? null : null
   const recordsOfActive = activeTask
@@ -250,10 +287,7 @@ function TasksView({
           />
         ) : (
           <ul className="divide-y divide-line-1">
-            {tasks
-              .slice()
-              .sort((a, b) => b.createdAt - a.createdAt)
-              .map((t) => {
+            {visibleTasks.map((t) => {
                 const taskRecs = records.filter((r) => r.taskId === t.id)
                 const done = taskRecs.filter((r) => r.status === 'done').length
                 const total = taskRecs.length
@@ -334,6 +368,28 @@ function TasksView({
                   </li>
                 )
               })}
+              {hasMoreTasks && (
+                <li>
+                  <button
+                    type="button"
+                    aria-expanded={tasksExpanded}
+                    onClick={() => {
+                      const next = !tasksExpanded
+                      setTasksExpanded(next)
+                      writeExpandedPref(TASKS_EXPANDED_KEY, next)
+                    }}
+                    className="flex w-full items-center justify-center gap-1 px-4 py-2.5 text-[12px] font-medium text-text-2 transition-colors hover:bg-surface-1"
+                  >
+                    {tasksExpanded
+                      ? '收起多余任务'
+                      : `展开其余 ${hiddenTaskCount} 个打卡任务`}
+                    <ChevronDown
+                      size={14}
+                      className={cn('transition-transform', tasksExpanded && 'rotate-180')}
+                    />
+                  </button>
+                </li>
+              )}
           </ul>
         )}
       </Card>
@@ -1655,6 +1711,10 @@ function MarketView({
   const [busyId, setBusyId] = useState<string | null>(null)
   /** 打开「兑换」弹窗的目标学生（null = 关闭） */
   const [redeemFor, setRedeemFor] = useState<Student | null>(null)
+  /** v31.33：兑换记录默认显示最近 30 条，其余可展开（本机记忆） */
+  const [redemptionsExpanded, setRedemptionsExpanded] = useState(() =>
+    readExpandedPref(REDEMPTIONS_EXPANDED_KEY),
+  )
 
   const balances = useMemo(() => {
     // 同步计算（数据量小，实时算即可；不阻塞 UI）
@@ -1844,7 +1904,7 @@ function MarketView({
               {redemptions
                 .slice()
                 .sort((a, b) => b.redeemedAt - a.redeemedAt)
-                .slice(0, 30)
+                .slice(0, redemptionsExpanded ? redemptions.length : REDEMPTIONS_VISIBLE_COUNT)
                 .map((r) => {
                   const s = studentMap.get(r.studentId)
                   return (
@@ -1889,6 +1949,28 @@ function MarketView({
                     </li>
                   )
                 })}
+              {redemptions.length > REDEMPTIONS_VISIBLE_COUNT && (
+                <li>
+                  <button
+                    type="button"
+                    aria-expanded={redemptionsExpanded}
+                    onClick={() => {
+                      const next = !redemptionsExpanded
+                      setRedemptionsExpanded(next)
+                      writeExpandedPref(REDEMPTIONS_EXPANDED_KEY, next)
+                    }}
+                    className="flex w-full items-center justify-center gap-1 px-4 py-2.5 text-[12px] font-medium text-text-2 transition-colors hover:bg-surface-1"
+                  >
+                    {redemptionsExpanded
+                      ? '收起，只看最近 30 条'
+                      : `展开其余 ${redemptions.length - REDEMPTIONS_VISIBLE_COUNT} 条兑换记录`}
+                    <ChevronDown
+                      size={14}
+                      className={cn('transition-transform', redemptionsExpanded && 'rotate-180')}
+                    />
+                  </button>
+                </li>
+              )}
             </ul>
           )}
         </div>

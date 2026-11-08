@@ -361,10 +361,11 @@ export default function DashboardPage() {
     const feedbackCourseIds = new Set(
       (feedbacks ?? []).filter((f) => !f.deletedAt).map((f) => f.courseId),
     )
+    // v31.33：不再只取最近 5 节 —— 待办列自带 max-h-[320px] 内部滚动，
+    // 截断会让更早的「待补课后反馈」永久不再提醒，改为全量按时间倒序
     const pendingFeedback = liveCourses
       .filter((c) => c.status === 'done' && !feedbackCourseIds.has(c.id))
       .sort((a, b) => b.startAt - a.startAt)
-      .slice(0, 5)
 
     return {
       now,
