@@ -518,7 +518,14 @@ export default function FinancePage() {
                     <td className="px-4 py-2.5">
                       <span className={cn('inline-flex rounded-md px-1.5 py-0.5 text-[11px] font-medium', meta.chip)}>{r.type}</span>
                     </td>
-                    <td className="px-4 py-2.5 text-text-1">{r.who}</td>
+                    <td className="px-4 py-2.5 text-text-1">
+                      {r.who}
+                      {r.linkedNote && (
+                        <span className="mt-0.5 block text-[11px] font-normal leading-4 text-text-3">
+                          {r.linkedNote}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-2.5 text-text-2">{r.subject || '—'}</td>
                     <td className={cn('px-4 py-2.5 text-right font-medium tabular-nums', meta.amount)}>
                       <span className="mr-0.5 opacity-70">{meta.sign}</span>
@@ -572,6 +579,9 @@ export default function FinancePage() {
                       {format(r.date, 'yyyy-MM-dd')}
                       {r.subject ? ` · ${r.subject}` : ''}
                     </p>
+                    {r.linkedNote && (
+                      <p className="mt-0.5 truncate text-[11px] text-text-3">{r.linkedNote}</p>
+                    )}
                   </div>
                   <span className={cn('shrink-0 text-right font-medium tabular-nums', meta.amount)}>
                     <span className="mr-0.5 opacity-70">{meta.sign}</span>

@@ -125,7 +125,15 @@ export { isSameDay, startOfDay, endOfDay, startOfWeek, addDays, format }
  * 因此只要时间区间相交即视为冲突。
  */
 export function findConflicts(
-  candidate: { startAt: number; durationMin: number; id?: string },
+  candidate: {
+    startAt: number
+    durationMin: number
+    id?: string
+    /** v31.28：本次排课是否为补课（用于同堂豁免） */
+    isMakeup?: boolean
+    /** v31.28：本次排课科目（用于同堂豁免） */
+    subject?: string
+  },
   existing: Course[],
   groupMap?: Map<string, Group>,
 ): Course[] {
@@ -137,6 +145,12 @@ export function findConflicts(
     if (candidate.id && c.id === candidate.id) return false
     const cStart = c.startAt
     const cEnd = courseEnd(c, groupMap)
+    // v31.28 同堂补课豁免：多个学生一起补同一节课，各自生成一条独立课程，
+    // 物理上老师同一时段只上了一节，不应互报冲突（旧调用点不传这两个字段则行为完全不变）。
+    if (candidate.isMakeup && c.isMakeup && cStart === start && cEnd === end) {
+      const s = candidate.subject?.trim()
+      if (!s || !c.subject || c.subject === s) return false
+    }
     return start < cEnd && cStart < end
   })
 }

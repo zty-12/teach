@@ -209,9 +209,13 @@ export function CourseScheduleModal({
   const [bulkSelectedDates, setBulkSelectedDates] = useState<string[]>([])
   const [bulkCalendarMonth, setBulkCalendarMonth] = useState(() => fromDateKey(dateKey(Date.now())))
 
-  // 补课模式：常规排课 / 补课（学生缺勤班课后单独补的一对一课时）
+  // 补课模式：常规排课 / 补课（v31.28 起支持多名学生同堂一起补）
   const [courseType, setCourseType] = useState<'regular' | 'makeup'>('regular')
   const [makeupSourceCourseId, setMakeupSourceCourseId] = useState('')
+  // v31.28：同堂补课 —— form.studentId 为主学生，其余学生在此勾选。
+  // 保存时按人各生成一条独立 Course（各扣 1 课时、各记各自课酬），共享时段与补的原课。
+  const [extraMakeupStudentIds, setExtraMakeupStudentIds] = useState<string[]>([])
+  const [sameSessionNote, setSameSessionNote] = useState('')
 
   // 读取时表单重置
   useEffect(() => {
@@ -242,6 +246,9 @@ export function CourseScheduleModal({
       })
       setCourseType(course.isMakeup ? 'makeup' : 'regular')
       setMakeupSourceCourseId(course.makeupSourceCourseId ?? '')
+      // 编辑既有课程不开放多选，避免改写历史（v31.28）
+      setExtraMakeupStudentIds([])
+      setSameSessionNote('')
     } else {
       const base = defaultStart ? new Date(defaultStart) : new Date()
       setForm({
@@ -257,6 +264,8 @@ export function CourseScheduleModal({
       setBulkRule('weekly')
       setCourseType('regular')
       setMakeupSourceCourseId('')
+      setExtraMakeupStudentIds([])
+      setSameSessionNote('')
       // 从学生卡片发起排课：预选该学生并带入其科目/配色
       if (prefillStudentId) {
         const s = students.find((x) => x.id === prefillStudentId)
@@ -302,20 +311,37 @@ export function CourseScheduleModal({
     return toTimestamp(form.date, form.startTime)
   }, [form.date, form.startTime])
 
+  // v31.28：仅「新建 + 补课」开放同堂多学生；编辑既有课不开放（避免改写历史）
+  const isMultiMakeup = !course && courseType === 'makeup'
+  const makeupTargetIds = useMemo(() => {
+    if (!isMultiMakeup) return [form.studentId].filter(Boolean) as string[]
+    return Array.from(new Set([form.studentId, ...extraMakeupStudentIds].filter(Boolean)))
+  }, [isMultiMakeup, form.studentId, extraMakeupStudentIds])
+
   const conflicts = useMemo(() => {
     if (Number.isNaN(startTimestamp)) return []
     return findConflicts(
-      { startAt: startTimestamp, durationMin: form.durationMin, id: course?.id },
+      {
+        startAt: startTimestamp,
+        durationMin: form.durationMin,
+        id: course?.id,
+        isMakeup: courseType === 'makeup',
+        subject: form.subject.trim(),
+      },
       existing,
       groupMap,
     )
-  }, [startTimestamp, form.durationMin, course?.id, existing, groupMap])
+  }, [startTimestamp, form.durationMin, course?.id, courseType, form.subject, existing, groupMap])
 
-  // 排课对象标签（预览用）
+  // 排课对象标签（预览用）：同堂补课时列出全部学生
   const targetLabel = useMemo(() => {
     if (form.kind === 'group') return groups.find((g) => g.id === form.groupId)?.name ?? '请选择排课对象'
-    return students.find((s) => s.id === form.studentId)?.name ?? '请选择排课对象'
-  }, [form.kind, form.groupId, form.studentId, groups, students])
+    const ids = isMultiMakeup ? makeupTargetIds : [form.studentId]
+    const names = ids
+      .map((id) => students.find((s) => s.id === id)?.name)
+      .filter((n): n is string => !!n)
+    return names.length ? names.join('、') : '请选择排课对象'
+  }, [form.kind, form.groupId, form.studentId, isMultiMakeup, makeupTargetIds, groups, students])
 
   const targetKindLabel = form.kind === 'group' ? '班级' : '个人学生'
 
@@ -453,18 +479,31 @@ export function CourseScheduleModal({
     patch({ durationMin: dur > 0 ? dur : form.durationMin })
   }
 
-  const buildPayload = (dateStr: string, fs: ScheduleForm) => {
+  const buildPayload = (
+    dateStr: string,
+    fs: ScheduleForm,
+    opts?: { studentId?: string; sameSessionPeers?: string[]; note?: string },
+  ) => {
     const group = fs.kind === 'group' ? groups.find((g) => g.id === fs.groupId) : null
     const subject = fs.subject.trim() || group?.subject || ''
+    // v31.28：同堂补课把同学名单与老师备注写进每条课程的 note，
+    // 财务台账据此显示关联信息；不参与课酬 / 课时 / 结算计算。
+    const peers = opts?.sameSessionPeers ?? []
+    const teacherNote = opts?.note?.trim() ?? ''
+    const tags = [
+      peers.length ? `同堂补课：${peers.join('、')}` : '',
+      teacherNote ? `同堂备注：${teacherNote}` : '',
+    ].filter(Boolean)
+    const sameSessionTag = tags.length ? ` ｜${tags.join(' ｜')}` : ''
     return {
-      studentId: fs.kind === 'group' ? null : fs.studentId,
+      studentId: opts?.studentId ?? (fs.kind === 'group' ? null : fs.studentId),
       groupId: fs.kind === 'group' ? fs.groupId : null,
       subject,
       startAt: toTimestamp(dateStr, fs.startTime),
       durationMin: fs.durationMin,
       method: fs.method,
       location: fs.location.trim(),
-      note: fs.note.trim(),
+      note: `${fs.note.trim()}${sameSessionTag}`,
       status: fs.status,
       colorSlot: group ? group.colorSlot : fs.colorSlot || slotFromString(subject),
       feeCents: fs.feeYuan ? Math.round(Number(fs.feeYuan) * 100) : 0,
@@ -540,30 +579,59 @@ export function CourseScheduleModal({
         return
       }
 
+      // v31.28：同堂补课 —— 按学生各生成一条独立课程（各扣 1 课时、各记各自课酬），
+      // 共享时段 / 科目 / 课酬单价 / 补的原课，课表上各自保留可查记录。
+      const targetIds = makeupTargetIds.length ? makeupTargetIds : [form.studentId].filter(Boolean)
+      const nameOf = (id: string) => students.find((s) => s.id === id)?.name ?? ''
+      const optsFor = (sid: string) => ({
+        studentId: sid,
+        sameSessionPeers:
+          isMultiMakeup && targetIds.length > 1
+            ? targetIds.filter((id) => id !== sid).map(nameOf).filter(Boolean)
+            : [],
+        note: sameSessionNote,
+      })
+
       if (createMode === 'single') {
-        const saved = withSyncFields<Course>({ ...buildPayload(form.date, form), createdAt: Date.now() })
-        await db.courses.put(saved)
-        await ensureAttendance(saved)
+        for (const sid of targetIds) {
+          const saved = withSyncFields<Course>({
+            ...buildPayload(form.date, form, optsFor(sid)),
+            createdAt: Date.now(),
+          })
+          await db.courses.put(saved)
+          await ensureAttendance(saved)
+        }
         onClose()
         return
       }
 
-      // 批量创建
+      // 批量创建（每个日期 × 每个学生各一条；同批次由 findConflicts 豁免，不互相跳过）
       const all = (await db.courses.toArray()).filter((c) => !c.deletedAt)
       let created = 0
       let skipped = 0
       for (const d of bulkDates) {
-        const payload = buildPayload(d, form)
-        const clash = findConflicts({ startAt: payload.startAt, durationMin: payload.durationMin }, all, groupMap)
-        if (clash.length > 0) {
-          skipped += 1
-          continue
+        for (const sid of targetIds) {
+          const payload = buildPayload(d, form, optsFor(sid))
+          const clash = findConflicts(
+            {
+              startAt: payload.startAt,
+              durationMin: payload.durationMin,
+              isMakeup: courseType === 'makeup',
+              subject: payload.subject,
+            },
+            all,
+            groupMap,
+          )
+          if (clash.length > 0) {
+            skipped += 1
+            continue
+          }
+          const saved = withSyncFields<Course>({ ...payload, createdAt: Date.now() })
+          await db.courses.put(saved)
+          all.push(saved)
+          await ensureAttendance(saved)
+          created += 1
         }
-        const saved = withSyncFields<Course>({ ...payload, createdAt: Date.now() })
-        await db.courses.put(saved)
-        all.push(saved)
-        await ensureAttendance(saved)
-        created += 1
       }
       onClose()
       window.alert(`已创建 ${created} 节课` + (skipped > 0 ? `，跳过冲突 ${skipped} 节` : ''))
@@ -794,6 +862,71 @@ export function CourseScheduleModal({
                       </div>
                     </div>
 
+                    {/* v31.28：同堂补课 —— 一次选多名学生，各生成一条独立课程 */}
+                    {isMultiMakeup && (
+                      <div className="mt-4 rounded-xl border border-line-1 bg-surface-2/50 p-3">
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <div className="text-[12px] font-semibold text-text-1">
+                            同堂补课学生（一起上课 · 各扣 1 课时 · 各记课酬）
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={saving}
+                            onClick={() => {
+                              const pool = students
+                                .filter((s) => !s.deletedAt && s.status !== 'archived' && s.id !== form.studentId)
+                                .map((s) => s.id)
+                              setExtraMakeupStudentIds((cur) => (cur.length >= pool.length ? [] : pool))
+                              setError('')
+                            }}
+                          >
+                            {extraMakeupStudentIds.length >=
+                            students.filter((s) => !s.deletedAt && s.status !== 'archived' && s.id !== form.studentId).length
+                              ? '清空'
+                              : '全选'}
+                          </Button>
+                        </div>
+                        <div className="grid max-h-32 grid-cols-2 gap-1.5 overflow-y-auto sm:grid-cols-3">
+                          {students
+                            .filter((s) => !s.deletedAt && s.status !== 'archived' && s.id !== form.studentId)
+                            .map((s) => (
+                              <label
+                                key={s.id}
+                                className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line-1 bg-surface-1 px-2 py-1.5"
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="h-3.5 w-3.5 shrink-0"
+                                  checked={extraMakeupStudentIds.includes(s.id)}
+                                  disabled={saving}
+                                  onChange={(e) =>
+                                    setExtraMakeupStudentIds((cur) =>
+                                      e.target.checked ? [...cur, s.id] : cur.filter((id) => id !== s.id),
+                                    )
+                                  }
+                                />
+                                <span className="truncate text-[12px] text-text-1">{s.name}</span>
+                              </label>
+                            ))}
+                        </div>
+                        <div className="mt-2.5">
+                          <div className="mb-1 text-[11px] font-medium text-text-2">
+                            同堂备注（可选，会显示在财务台账）
+                          </div>
+                          <Input
+                            value={sameSessionNote}
+                            onChange={(e) => setSameSessionNote(e.target.value)}
+                            placeholder="例：两人一起补 9/5 的课"
+                            disabled={saving}
+                          />
+                        </div>
+                        <div className={fieldHint}>
+                          已选 {makeupTargetIds.length} 人：保存后课表保留各自记录，财务台账会关联到补的原课一起显示。
+                        </div>
+                      </div>
+                    )}
+
                     {/* 补课：选择原课，自动带出科目 / 一半时长 / 人均课酬（计 1 课时） */}
                     {!course && courseType === 'makeup' && (
                       <div className="mt-4">
@@ -808,7 +941,7 @@ export function CourseScheduleModal({
                         </Select>
                         <div className={fieldHint}>
                           {courseType === 'makeup'
-                            ? '补课为单个学生一对一：默认按原班课一半时长，计 1 课时课酬'
+                            ? '选择原课后自动带入科目 / 一半时长 / 人均课酬（计 1 课时）；同堂学生共享这次关联'
                             : '选择后自动带入原班课信息'}
                         </div>
                       </div>

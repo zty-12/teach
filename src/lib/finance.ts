@@ -29,6 +29,8 @@ export interface LedgerEntry {
   subject: string
   amountCents: number
   note: string
+  /** v31.28：补课 ↔ 原课的关联/同堂说明（仅展示，不参与金额计算、不影响逐笔结算 refId） */
+  linkedNote?: string
   kind: 'course' | 'payment'
   refId?: string
   studentId?: string | null
@@ -162,6 +164,23 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
   const doneCourses = liveCourses.filter((c) => c.status === 'done')
   const courseLedgers: LedgerEntry[] = []
 
+  // v31.28：补课 ↔ 原课关联（仅用于台账展示，不改金额 / refId / 逐笔结算口径）。
+  // 老师把同一节请假原课的两个学生安排在同一时段一起补 → 两条独立补课课酬，
+  // 财务上要能看出它们与原课属于「同一次课」：原课行显示含补课的本次合计，
+  // 补课行显示所补原课日期与同堂名单。
+  const makeupBySource = new Map<string, { cents: number; names: string[] }>()
+  const sourceInfo = new Map<string, { date: number; subject: string }>()
+  for (const c of liveCourses) sourceInfo.set(c.id, { date: c.startAt, subject: c.subject })
+  for (const c of doneCourses) {
+    if (!c.isMakeup || !c.makeupSourceCourseId || !c.studentId) continue
+    const share = attribution(c).reduce((s, a) => s + a.share, 0)
+    const acc = makeupBySource.get(c.makeupSourceCourseId) ?? { cents: 0, names: [] }
+    acc.cents += share
+    const name = studentMap.get(c.studentId)?.name
+    if (name && !acc.names.includes(name)) acc.names.push(name)
+    makeupBySource.set(c.makeupSourceCourseId, acc)
+  }
+
   for (const c of doneCourses) {
     const attrs = attribution(c)
     const groupName = c.groupId ? groupMap.get(c.groupId)?.name : undefined
@@ -180,6 +199,16 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
       }
     }
 
+    const yuan = (v: number) => `¥${(v / 100).toFixed(2)}`
+    const linked = makeupBySource.get(c.id)
+    const src = c.makeupSourceCourseId ? sourceInfo.get(c.makeupSourceCourseId) : undefined
+    const teacherNote = c.note?.split('｜同堂备注：')[1]?.trim() ?? ''
+    const linkedNote = !c.isMakeup && linked
+      ? `含 ${linked.names.length} 人补课 ${yuan(linked.cents)} · 本次合计 ${yuan(prepaidShare + postpaidShare + linked.cents)}`
+      : c.isMakeup && src
+        ? `补 ${format(src.date, 'M月d日')} ${src.subject}${linked && linked.names.length > 1 ? ` · 同堂：${linked.names.join('、')}` : ''}${teacherNote ? ` · ${teacherNote}` : ''}`
+        : undefined
+
     if (prepaidShare > 0) {
       courseLedgers.push({
         id: `r-${c.id}-prepaid`,
@@ -189,6 +218,7 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
         subject: c.isMakeup ? `${c.subject}（补课）` : c.subject,
         amountCents: prepaidShare,
         note: c.isMakeup ? '补课 · 预付课酬 · 机构待结算' : '预付课酬 · 机构待结算',
+        linkedNote,
         kind: 'course',
         refId: c.id,
         studentId: c.studentId,
@@ -204,6 +234,7 @@ export function computeFinanceMetrics(input: FinanceInput): FinanceMetrics {
         subject: c.isMakeup ? `${c.subject}（补课）` : c.subject,
         amountCents: postpaidShare,
         note: c.isMakeup ? '补课 · 课时费 · 待学生支付' : '课时费 · 待学生支付',
+        linkedNote,
         kind: 'course',
         refId: c.id,
         studentId: c.studentId,
