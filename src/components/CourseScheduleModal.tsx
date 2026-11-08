@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import { addDays, format } from 'date-fns'
+import { useLiveQuery } from 'dexie-react-hooks'
 import { db, touch, withSyncFields, uniqueMemberStudentIds } from '@/lib/db'
 import { revertCompletion } from '@/lib/courseCompletion'
 import { hardDeleteCourses } from '@/lib/batchDelete'
@@ -216,12 +217,20 @@ export function CourseScheduleModal({
   // 保存时按人各生成一条独立 Course（各扣 1 课时、各记各自课酬），共享时段与补的原课。
   const [extraMakeupStudentIds, setExtraMakeupStudentIds] = useState<string[]>([])
   const [sameSessionNote, setSameSessionNote] = useState('')
+  // v31.30：补课按「学生所在的班课」筛人。
+  // ⚠ 该值只用于筛选下方勾选名单，绝不写入 form.groupId / Course.groupId ——
+  // 否则补课会退化成班课课程（按出席人数×人均计费），破坏 v31.28
+  // 「每人一条独立一对一课、各扣 1 课时、各记课酬」的口径。
+  const [makeupGroupId, setMakeupGroupId] = useState('')
+  // 班课成员直接从本地库读，避免改动 Schedule / Students 两个父组件的 props。
+  const groupMembers = useLiveQuery(() => db.groupMembers.toArray(), [])
 
   // 读取时表单重置
   useEffect(() => {
     if (!open) return
     setError('')
     setSaving(false)
+    setMakeupGroupId('')
     if (course) {
       const d = new Date(course.startAt)
       // 编辑既有课程：若该课程来自班课，durationMin 用班课最新时长刷新，
@@ -313,10 +322,26 @@ export function CourseScheduleModal({
 
   // v31.28：仅「新建 + 补课」开放同堂多学生；编辑既有课不开放（避免改写历史）
   const isMultiMakeup = !course && courseType === 'makeup'
+
+  // v31.30：补课勾选名单 = 所选班课的存活成员（去重），排除已删 / 已归档学生。
+  // 未选班课 → 空名单，界面提示先选班课（用户口径：只按班课，不提供「全部学生」）。
+  const makeupPool = useMemo(() => {
+    if (!isMultiMakeup || !makeupGroupId) return []
+    const ids = new Set(
+      uniqueMemberStudentIds((groupMembers ?? []).filter((m) => !m.deletedAt), makeupGroupId),
+    )
+    return students.filter(
+      (s) => !s.deletedAt && s.status !== 'archived' && ids.has(s.id),
+    )
+  }, [isMultiMakeup, makeupGroupId, groupMembers, students])
+
+  // 补课时取消「主学生」概念：勾选名单即全部补课对象；
+  // 切换班课后自动丢掉不属于新名单的旧勾选，避免跨班误选。
   const makeupTargetIds = useMemo(() => {
     if (!isMultiMakeup) return [form.studentId].filter(Boolean) as string[]
-    return Array.from(new Set([form.studentId, ...extraMakeupStudentIds].filter(Boolean)))
-  }, [isMultiMakeup, form.studentId, extraMakeupStudentIds])
+    const pool = new Set(makeupPool.map((s) => s.id))
+    return Array.from(new Set(extraMakeupStudentIds.filter((id) => pool.has(id))))
+  }, [isMultiMakeup, form.studentId, extraMakeupStudentIds, makeupPool])
 
   const conflicts = useMemo(() => {
     if (Number.isNaN(startTimestamp)) return []
@@ -333,19 +358,26 @@ export function CourseScheduleModal({
     )
   }, [startTimestamp, form.durationMin, course?.id, courseType, form.subject, existing, groupMap])
 
-  // 排课对象标签（预览用）：同堂补课时列出全部学生
+  // 排课对象标签（预览用）：同堂补课时列出全部勾选学生
   const targetLabel = useMemo(() => {
+    if (isMultiMakeup) {
+      const names = makeupTargetIds
+        .map((id) => students.find((s) => s.id === id)?.name)
+        .filter((n): n is string => !!n)
+      return names.length ? names.join('、') : '请选择补课学生'
+    }
     if (form.kind === 'group') return groups.find((g) => g.id === form.groupId)?.name ?? '请选择排课对象'
-    const ids = isMultiMakeup ? makeupTargetIds : [form.studentId]
-    const names = ids
-      .map((id) => students.find((s) => s.id === id)?.name)
-      .filter((n): n is string => !!n)
-    return names.length ? names.join('、') : '请选择排课对象'
+    return students.find((s) => s.id === form.studentId)?.name ?? '请选择排课对象'
   }, [form.kind, form.groupId, form.studentId, isMultiMakeup, makeupTargetIds, groups, students])
 
-  const targetKindLabel = form.kind === 'group' ? '班级' : '个人学生'
+  const targetKindLabel = isMultiMakeup ? '班课补课' : form.kind === 'group' ? '班级' : '个人学生'
 
   const billingLabel = useMemo(() => {
+    if (isMultiMakeup) {
+      const g = groups.find((x) => x.id === makeupGroupId)
+      if (!g) return '请选择班课'
+      return `补课 · ¥${Math.round((g.perStudentFeeCents || 0) / 100)}/人 · 各计 1 课时`
+    }
     if (form.kind === 'group') {
       const g = groups.find((x) => x.id === form.groupId)
       return g ? `班课 · ¥${Math.round((g.perStudentFeeCents || 0) / 100)}/人` : '请选择排课对象'
@@ -354,7 +386,7 @@ export function CourseScheduleModal({
     if (!s) return '请选择排课对象'
     if (s.isTrial) return '试听学生'
     return BILLING_RULE_LABEL[s.billingRule]
-  }, [form.kind, form.groupId, form.studentId, groups, students])
+  }, [form.kind, form.groupId, form.studentId, isMultiMakeup, makeupGroupId, groups, students])
 
   // 补课可选的「原课」（带班课的已排课程，通常是请假/已完成的班课）
   const makeupSourceOptions = useMemo(() => {
@@ -384,11 +416,30 @@ export function CourseScheduleModal({
   function handleCourseTypeChange(type: 'regular' | 'makeup') {
     setCourseType(type)
     setError('')
+    // v31.30：切换课程类型时清空班课筛选与勾选名单（旧选择不属于新模式）
+    setMakeupGroupId('')
+    setExtraMakeupStudentIds([])
+    setSameSessionNote('')
     if (type === 'makeup') {
       patch({ kind: 'one_on_one', groupId: '' })
     } else {
       setMakeupSourceCourseId('')
     }
+  }
+
+  // v31.30：选择「学生所在的班课」—— 只筛名单 + 带入科目 / 配色 / 人均课酬，
+  // 不写入 form.groupId（补课仍是一对一独立课程）。
+  function handleMakeupGroupChange(id: string) {
+    setMakeupGroupId(id)
+    setExtraMakeupStudentIds([]) // 换班课即清空勾选，防止跨班误选
+    setError('')
+    const g = groups.find((x) => x.id === id)
+    if (!g) return
+    patch({
+      subject: g.subject || '',
+      colorSlot: g.colorSlot || form.colorSlot,
+      ...(g.perStudentFeeCents > 0 ? { feeYuan: String(g.perStudentFeeCents / 100) } : {}),
+    })
   }
 
   // 选择补的原课：自动带入科目、一半时长、人均课酬（计 1 课时）
@@ -399,6 +450,9 @@ export function CourseScheduleModal({
     if (course) return
     const c = makeupSourceOptions.find((o) => o.id === id)
     if (!c) return
+    // v31.30：仅在尚未选择班课时，自动把筛选定位到原课所属班课；
+    // 已手动选过班课则不覆盖老师的选择。
+    if (!makeupGroupId && c.group) setMakeupGroupId(c.group.id)
     patch({
       subject: c.subject,
       colorSlot: c.colorSlot,
@@ -444,14 +498,20 @@ export function CourseScheduleModal({
 
   const isValid = useMemo(() => {
     if (Number.isNaN(startTimestamp)) return false
-    if (form.kind === 'group' && !form.groupId) return false
-    if (form.kind === 'one_on_one' && !form.studentId) return false
+    // v31.30：补课以「已选班课 + 至少勾 1 人」为准，不再要求 form.studentId（主学生已取消）
+    if (isMultiMakeup) {
+      if (!makeupGroupId) return false
+      if (makeupTargetIds.length === 0) return false
+    } else {
+      if (form.kind === 'group' && !form.groupId) return false
+      if (form.kind === 'one_on_one' && !form.studentId) return false
+    }
     const subject = form.subject.trim() || (form.kind === 'group' ? groups.find((g) => g.id === form.groupId)?.subject : '') || ''
     if (!subject) return false
     if (!form.date || !form.startTime) return false
     if (form.durationMin <= 0) return false
     return true
-  }, [startTimestamp, form.kind, form.groupId, form.studentId, form.subject, form.date, form.startTime, form.durationMin, groups])
+  }, [startTimestamp, form.kind, form.groupId, form.studentId, form.subject, form.date, form.startTime, form.durationMin, groups, isMultiMakeup, makeupGroupId, makeupTargetIds])
 
   const isBulkValid = isValid && (createMode === 'single' || bulkDates.length > 0)
 
@@ -584,7 +644,8 @@ export function CourseScheduleModal({
 
       // v31.28：同堂补课 —— 按学生各生成一条独立课程（各扣 1 课时、各记各自课酬），
       // 共享时段 / 科目 / 课酬单价 / 补的原课，课表上各自保留可查记录。
-      const targetIds = makeupTargetIds.length ? makeupTargetIds : [form.studentId].filter(Boolean)
+      // v31.30：补课时严格按勾选名单生成，不再回退到 form.studentId（主学生已取消）
+      const targetIds = isMultiMakeup ? makeupTargetIds : [form.studentId].filter(Boolean)
       const nameOf = (id: string) => students.find((s) => s.id === id)?.name ?? ''
       const optsFor = (sid: string) => ({
         studentId: sid,
@@ -825,25 +886,40 @@ export function CourseScheduleModal({
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                       <div>
                         <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-text-1">
-                          <UserPlus size={16} className="text-text-3" /> 排课对象
+                          {isMultiMakeup
+                            ? <Users size={16} className="text-text-3" />
+                            : <UserPlus size={16} className="text-text-3" />} 排课对象
                         </div>
-                        <Select value={form.kind === 'group' ? form.groupId : form.studentId} onChange={(e) => handleTargetChange(e.target.value)} disabled={saving}>
-                          <option value="">
-                            {form.kind === 'group' ? '选择班级…' : '选择学生…'}
-                          </option>
-                          {form.kind === 'group'
-                            ? groups.map((g) => (
-                                <option key={g.id} value={g.id}>{g.name}</option>
-                              ))
-                            : students.map((s) => (
-                                <option key={s.id} value={s.id}>
-                                  {s.name}
-                                  {s.grade ? ` · ${s.grade}` : ''}
-                                  {s.isTrial ? ' · 试听' : ''}
-                                </option>
-                              ))}
-                        </Select>
-                        <div className={fieldHint}>请选择 {form.kind === 'group' ? '班级' : '学生'} 作为本次排课对象</div>
+                        {isMultiMakeup ? (
+                          <Select value={makeupGroupId} onChange={(e) => handleMakeupGroupChange(e.target.value)} disabled={saving}>
+                            <option value="">选择学生所在的班课…</option>
+                            {groups.filter((g) => !g.deletedAt).map((g) => (
+                              <option key={g.id} value={g.id}>{g.name}</option>
+                            ))}
+                          </Select>
+                        ) : (
+                          <Select value={form.kind === 'group' ? form.groupId : form.studentId} onChange={(e) => handleTargetChange(e.target.value)} disabled={saving}>
+                            <option value="">
+                              {form.kind === 'group' ? '选择班级…' : '选择学生…'}
+                            </option>
+                            {form.kind === 'group'
+                              ? groups.map((g) => (
+                                  <option key={g.id} value={g.id}>{g.name}</option>
+                                ))
+                              : students.map((s) => (
+                                  <option key={s.id} value={s.id}>
+                                    {s.name}
+                                    {s.grade ? ` · ${s.grade}` : ''}
+                                    {s.isTrial ? ' · 试听' : ''}
+                                  </option>
+                                ))}
+                          </Select>
+                        )}
+                        <div className={fieldHint}>
+                          {isMultiMakeup
+                            ? '请选择学生所在的班课，再在下方勾选本次一起补课的学生'
+                            : `请选择 ${form.kind === 'group' ? '班级' : '学生'} 作为本次排课对象`}
+                        </div>
                       </div>
                       <div>
                         <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-text-1">
@@ -865,35 +941,41 @@ export function CourseScheduleModal({
                       </div>
                     </div>
 
-                    {/* v31.28：同堂补课 —— 一次选多名学生，各生成一条独立课程 */}
+                    {/* v31.28 / v31.30：同堂补课 —— 先选班课，再勾选该班学生，各生成一条独立课程 */}
                     {isMultiMakeup && (
                       <div className="mt-4 rounded-xl border border-line-1 bg-surface-2/50 p-3">
                         <div className="mb-2 flex items-center justify-between gap-2">
                           <div className="text-[12px] font-semibold text-text-1">
-                            同堂补课学生（一起上课 · 各扣 1 课时 · 各记课酬）
+                            补课学生（一起上课 · 各扣 1 课时 · 各记课酬）
                           </div>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={saving}
-                            onClick={() => {
-                              const pool = students
-                                .filter((s) => !s.deletedAt && s.status !== 'archived' && s.id !== form.studentId)
-                                .map((s) => s.id)
-                              setExtraMakeupStudentIds((cur) => (cur.length >= pool.length ? [] : pool))
-                              setError('')
-                            }}
-                          >
-                            {extraMakeupStudentIds.length >=
-                            students.filter((s) => !s.deletedAt && s.status !== 'archived' && s.id !== form.studentId).length
-                              ? '清空'
-                              : '全选'}
-                          </Button>
+                          {makeupPool.length > 0 && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={saving}
+                              onClick={() => {
+                                const pool = makeupPool.map((s) => s.id)
+                                setExtraMakeupStudentIds((cur) =>
+                                  pool.every((id) => cur.includes(id)) ? [] : pool,
+                                )
+                                setError('')
+                              }}
+                            >
+                              {makeupPool.every((s) => extraMakeupStudentIds.includes(s.id)) ? '清空' : '全选'}
+                            </Button>
+                          )}
                         </div>
-                        <div className="grid max-h-32 grid-cols-2 gap-1.5 overflow-y-auto sm:grid-cols-3">
-                          {students
-                            .filter((s) => !s.deletedAt && s.status !== 'archived' && s.id !== form.studentId)
-                            .map((s) => (
+                        {!makeupGroupId ? (
+                          <div className="rounded-lg border border-dashed border-line-1 bg-surface-1 px-3 py-4 text-center text-[12px] text-text-3">
+                            请先在上方选择学生所在的班课，系统会列出该班学生供勾选
+                          </div>
+                        ) : makeupPool.length === 0 ? (
+                          <div className="rounded-lg border border-dashed border-line-1 bg-surface-1 px-3 py-4 text-center text-[12px] text-text-3">
+                            该班课暂无可补课的学生（成员为空或均已归档）
+                          </div>
+                        ) : (
+                          <div className="grid max-h-32 grid-cols-2 gap-1.5 overflow-y-auto sm:grid-cols-3">
+                            {makeupPool.map((s) => (
                               <label
                                 key={s.id}
                                 className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line-1 bg-surface-1 px-2 py-1.5"
@@ -912,7 +994,8 @@ export function CourseScheduleModal({
                                 <span className="truncate text-[12px] text-text-1">{s.name}</span>
                               </label>
                             ))}
-                        </div>
+                          </div>
+                        )}
                         <div className="mt-2.5">
                           <div className="mb-1 text-[11px] font-medium text-text-2">
                             同堂备注（可选，会显示在财务台账）
@@ -925,7 +1008,9 @@ export function CourseScheduleModal({
                           />
                         </div>
                         <div className={fieldHint}>
-                          已选 {makeupTargetIds.length} 人：保存后课表保留各自记录，财务台账会关联到补的原课一起显示。
+                          已选 {makeupTargetIds.length} 人
+                          {makeupGroupId ? `（${groups.find((g) => g.id === makeupGroupId)?.name ?? '班课'}）` : ''}
+                          ：保存后课表保留各自记录，财务台账会关联到补的原课一起显示。
                         </div>
                       </div>
                     )}
@@ -945,7 +1030,7 @@ export function CourseScheduleModal({
                         <div className={fieldHint}>
                           {course
                             ? '补选原课后，出勤记录会把该生这次请假标为「已补上」；不改动已填的科目 / 时长 / 课酬'
-                            : '选择原课后自动带入科目 / 一半时长 / 人均课酬（计 1 课时）；同堂学生共享这次关联'}
+                            : '选择原课后自动带入科目 / 一半时长 / 人均课酬（计 1 课时）；未选班课时会定位到原课所属班课，同堂学生共享这次关联'}
                         </div>
                       </div>
                     )}
