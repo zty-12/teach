@@ -33,6 +33,7 @@ import {
   courseEnd,
   findConflicts,
   formatTime,
+  sameSessionPeerNames,
   slotFromString,
 } from '@/lib/utils'
 import {
@@ -367,8 +368,12 @@ export function CourseScheduleModal({
       return names.length ? names.join('、') : '请选择补课学生'
     }
     if (form.kind === 'group') return groups.find((g) => g.id === form.groupId)?.name ?? '请选择排课对象'
-    return students.find((s) => s.id === form.studentId)?.name ?? '请选择排课对象'
-  }, [form.kind, form.groupId, form.studentId, isMultiMakeup, makeupTargetIds, groups, students])
+    const base = students.find((s) => s.id === form.studentId)?.name ?? '请选择排课对象'
+    // v31.32：编辑既有同堂补课时，预览标题并列显示同伴（名单存在 note 的「｜同堂补课：」标记里）。
+    // 新建补课时 isMultiMakeup 分支已列出全部勾选学生，不重复处理。
+    const peers = course && base !== '请选择排课对象' ? sameSessionPeerNames(form.note) : []
+    return peers.length ? [base, ...peers].join('、') : base
+  }, [form.kind, form.groupId, form.studentId, form.note, isMultiMakeup, makeupTargetIds, groups, students, course])
 
   const targetKindLabel = isMultiMakeup ? '班课补课' : form.kind === 'group' ? '班级' : '个人学生'
 

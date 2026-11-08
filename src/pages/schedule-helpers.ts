@@ -4,7 +4,7 @@
  */
 import { db, touch, uniqueMemberStudentIds, withSyncFields } from '../lib/db'
 import type { Course, CourseAttendance, Group, GroupMember, Student } from '../lib/types'
-import { courseDurationMin } from '../lib/utils'
+import { courseDurationMin, sameSessionPeerNames } from '../lib/utils'
 import { applyCompletion } from '../lib/courseCompletion'
 import { ensureAutoCheckInTask } from '../lib/points'
 import { ensureAutoClassActivityForCourse } from '../lib/classPoints'
@@ -24,6 +24,22 @@ export function courseTitle(
     return groupMap.get(course.groupId)!.name
   }
   return course.groupId ? '班课' : '课程'
+}
+
+/**
+ * v31.32：显示用标题 —— 同堂补课时把同伴姓名并列显示（如「肖佑霁、肖丹南」）。
+ * 仅供课表 / 课程详情 / 弹窗预览等 UI 使用；完成上课生成的打卡 / 课堂活动标题
+ * 仍走 courseTitle（只代表本条课程），避免把同伴名写进业务数据。
+ */
+export function courseTitleWithPeers(
+  course: Course,
+  studentMap: Map<string, Student>,
+  groupMap: Map<string, Group>,
+): string {
+  const base = courseTitle(course, studentMap, groupMap)
+  if (!course.studentId || !studentMap.get(course.studentId)) return base
+  const peers = sameSessionPeerNames(course.note)
+  return peers.length ? [base, ...peers].join('、') : base
 }
 
 /**

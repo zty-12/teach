@@ -52,7 +52,7 @@ import {
   completeCoursesWithAttendance,
   completeCourseWithAttendance,
   computePlannedGroupSlots,
-  courseTitle,
+  courseTitleWithPeers,
   materializeGroupSlot,
   persistAttendance,
   type PlannedGroupSlot,
@@ -269,7 +269,7 @@ export default function SchedulePage() {
     if (ids.length === 0) return
     const labels = liveCourses
       .filter((c) => ids.includes(c.id))
-      .map((c) => `${format(new Date(c.startAt), 'M/d HH:mm')} ${courseTitle(c, studentMap, groupMap)}`)
+      .map((c) => `${format(new Date(c.startAt), 'M/d HH:mm')} ${courseTitleWithPeers(c, studentMap, groupMap)}`)
       .join('\n')
     if (
       !confirm(
@@ -763,7 +763,7 @@ function WeekView({
                     HOUR_H
                   const dur = courseDurationMin(c, groupMap)
                   const height = Math.max((dur / 60) * HOUR_H - 2, 22)
-                  const title = courseTitle(c, studentMap, groupMap)
+                  const title = courseTitleWithPeers(c, studentMap, groupMap)
                   const isSelected = selectedCourseIds.has(c.id)
 
                   return (
@@ -1079,7 +1079,7 @@ function DayViewDesktop({
                 HOUR_H
               const dur = courseDurationMin(c, groupMap)
               const height = Math.max((dur / 60) * HOUR_H - 2, 22)
-              const title = courseTitle(c, studentMap, groupMap)
+              const title = courseTitleWithPeers(c, studentMap, groupMap)
               const isSelected = selectedCourseIds.has(c.id)
               const layout = layoutMap.get(c.id) ?? { colIndex: 0, groupSize: 1 }
               const { colIndex, groupSize: size } = layout
@@ -1304,7 +1304,7 @@ function AgendaView({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium text-text-1">
-                      {courseTitle(c, studentMap, groupMap)}
+                      {courseTitleWithPeers(c, studentMap, groupMap)}
                     </span>
                     <span className="shrink-0 text-[12px] text-text-3">{c.subject}</span>
                     {c.isMakeup && <span className="shrink-0 text-[11px] text-pending">补课</span>}
@@ -1436,7 +1436,7 @@ function DayView({
               key={c.id}
               course={c}
               groupMap={groupMap}
-              title={courseTitle(c, studentMap, groupMap)}
+              title={courseTitleWithPeers(c, studentMap, groupMap)}
               selectMode={selectMode}
               selected={selectedCourseIds.has(c.id)}
               onToggleSelect={() => onToggleSelectCourse(c.id)}

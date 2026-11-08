@@ -25,7 +25,7 @@ import {
   type Student,
 } from '@/lib/types'
 import { cn, formatCourseRange, subjectColorVar } from '@/lib/utils'
-import { courseTitle } from '@/pages/schedule-helpers'
+import { courseTitleWithPeers } from '@/pages/schedule-helpers'
 import { revertCompletion, summarizeRevert, type RevertResult } from '@/lib/courseCompletion'
 
 /** 每页显示多少条 */
@@ -255,7 +255,7 @@ export function CourseScheduleSheet({
     const ids = Array.from(selected)
     const labels = scope.list
       .filter((c) => ids.includes(c.id))
-      .map((c) => `${format(new Date(c.startAt), 'M/d HH:mm')} ${courseTitle(c, studentMap, groupMap)}`)
+      .map((c) => `${format(new Date(c.startAt), 'M/d HH:mm')} ${courseTitleWithPeers(c, studentMap, groupMap)}`)
       .join('\n')
     if (
       !confirm(
@@ -287,7 +287,7 @@ export function CourseScheduleSheet({
 
   if (!open || !course) return null
 
-  const title = courseTitle(course, studentMap, groupMap)
+  const title = courseTitleWithPeers(course, studentMap, groupMap)
   const sub = course.subject || (course.groupId ? '班课' : '课')
 
   return (

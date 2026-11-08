@@ -243,3 +243,20 @@ export function normalizeAiFeedback(raw: string | null | undefined): string {
   }
   return t
 }
+
+/**
+ * v31.32：从课程备注里读出「同堂补课」的同伴姓名（只读，不参与任何计费 / 课时 / 出勤判定）。
+ * 写入格式见 CourseScheduleModal.buildPayload：
+ *   `${用户备注} ｜同堂补课：A、B ｜同堂备注：xxx`
+ * 同名单条课程只记录「除自己外的其他同堂学生」。
+ */
+export function sameSessionPeerNames(note?: string | null): string[] {
+  if (!note) return []
+  const tail = note.split('｜同堂补课：')[1]
+  if (!tail) return []
+  return tail
+    .split('｜')[0]
+    .split('、')
+    .map((name) => name.trim())
+    .filter(Boolean)
+}
