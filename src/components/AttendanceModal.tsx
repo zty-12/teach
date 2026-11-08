@@ -52,6 +52,17 @@ export function AttendanceModal({
   // 包一层 useMemo：否则每次渲染都会新建 Map / 新数组，
   // 使下面课酬预览的 useMemo 依赖恒变、memo 完全失效。
   const studentById = useMemo(() => new Map(students.map((s) => [s.id, s])), [students])
+
+  // v31.27：已归档学生 id 集合。用 ref 承载最新值 —— 绝不把它放进下面草稿初始化的
+  // useEffect 依赖（父组件每次渲染都会产生新的 students 数组 / 新 Set），否则会像
+  // v31.26 记录的坑一样，在后台同步等父组件重渲染时把老师已勾选的名单重置掉。
+  const archivedIds = useMemo(
+    () => new Set(students.filter((s) => s.status === 'archived').map((s) => s.id)),
+    [students],
+  )
+  const archivedRef = useRef(archivedIds)
+  archivedRef.current = archivedIds
+
   const courseGroup = useMemo(
     () => (course?.groupId ? groups.find((g) => g.id === course.groupId) ?? null : null),
     [course, groups],
@@ -74,6 +85,14 @@ export function AttendanceModal({
       seededRef.current = false
       return
     }
+
+    // v31.27：仅「未完成」课程的出席名单排除已归档学生。
+    // ⚠ 已完成课程（含「重算并保存」）必须保持原样 —— 归档学生的历史出席是计费事实，
+    //   剔除会改写历史课酬 / 台账 / 课次统计，与 v31.20 / v31.23 的修复正面冲突。
+    //   用 ref 读取归档集合，不加入依赖数组，避免父组件重渲染时重置老师已勾选的名单。
+    const excludeArchived = course.status !== 'done'
+    const isExcluded = (sid: string) => excludeArchived && archivedRef.current.has(sid)
+
     const current = attendances.filter((a) => a.courseId === course.id)
     const sameCourse = initCourseRef.current === course.id
 
@@ -82,12 +101,12 @@ export function AttendanceModal({
       if (!sameCourse || seededRef.current) {
         initCourseRef.current = course.id
         seededRef.current = false
-        setDraft(current)
+        setDraft(current.filter((a) => !isExcluded(a.studentId)))
       }
       return
     }
     if (sameCourse) return
-    // 首次打开且尚无出席记录 → 预填默认（全员出席）
+    // 首次打开且尚无出席记录 → 预填默认（全员出席，排除已归档学生）
     const expected: string[] = []
     if (course.groupId) {
       // 去重：重复成员行会让名单里同一学生出现两次 → 出席人数 / 课酬预览多算一个人
@@ -95,8 +114,9 @@ export function AttendanceModal({
     } else if (course.studentId) {
       expected.push(course.studentId)
     }
+    const visible = expected.filter((sid) => !isExcluded(sid))
     const now = Date.now()
-    const seed = expected.map((sid) => ({
+    const seed = visible.map((sid) => ({
       id: newId(),
       courseId: course.id,
       studentId: sid,

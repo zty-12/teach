@@ -312,11 +312,19 @@ export async function completeCoursesWithAttendance(
 ): Promise<number> {
   let done = 0
   for (const c of courses) {
-    const rosterIds = c.groupId
-      ? uniqueMemberStudentIds(liveMembers, c.groupId)
-      : c.studentId
-        ? [c.studentId]
-        : []
+    const rosterIds = (
+      c.groupId
+        ? uniqueMemberStudentIds(liveMembers, c.groupId)
+        : c.studentId
+          ? [c.studentId]
+          : []
+    ).filter(
+      // v31.27：与出席弹窗同口径 —— 仅「未完成」课程排除已归档学生。
+      // 批量完成的名单原本直接取班课成员，会绕过弹窗过滤；且下面
+      // `presentByStudent.get(sid) ?? true` 会让归档学生默认出席 → 课酬多算一人。
+      // 已完成课程保持原样（历史出席是计费事实，不可改写）。
+      (sid) => c.status === 'done' || studentMap.get(sid)?.status !== 'archived',
+    )
     const existing = (await db.courseAttendances.toArray()).filter(
       (a) => !a.deletedAt && a.courseId === c.id,
     )
