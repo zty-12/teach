@@ -389,12 +389,16 @@ export function CourseScheduleModal({
   }, [form.kind, form.groupId, form.studentId, isMultiMakeup, makeupGroupId, groups, students])
 
   // 补课可选的「原课」（带班课的已排课程，通常是请假/已完成的班课）
+  // v31.31：按上课时间从近到远排序；已选班课时只列该班课的原课，
+  // 未选班课时仍列全部（保留「选原课自动定位到所属班课」口径）。
   const makeupSourceOptions = useMemo(() => {
     if (courseType !== 'makeup') return []
     return existing
       .filter((c) => c.groupId && !c.deletedAt)
+      .filter((c) => !makeupGroupId || c.groupId === makeupGroupId)
       .map((c) => ({
         id: c.id,
+        startAt: c.startAt,
         label: `${groupMap.get(c.groupId ?? '')?.name ?? '班课'} · ${format(new Date(c.startAt), 'M月d日')} ${formatTime(c.startAt)} ${c.subject}`,
         subject: c.subject,
         colorSlot: c.colorSlot,
@@ -403,8 +407,8 @@ export function CourseScheduleModal({
         note: c.note,
         group: c.groupId ? groupMap.get(c.groupId) : undefined,
       }))
-      .sort((a, b) => b.id.localeCompare(a.id))
-  }, [courseType, existing, groupMap])
+      .sort((a, b) => b.startAt - a.startAt || b.id.localeCompare(a.id))
+  }, [courseType, existing, groupMap, makeupGroupId])
 
   // 排课类型切换：一对一 / 班课（清空另一个对象 ID）
   function handleKindChange(kind: 'one_on_one' | 'group') {
@@ -430,6 +434,10 @@ export function CourseScheduleModal({
   // v31.30：选择「学生所在的班课」—— 只筛名单 + 带入科目 / 配色 / 人均课酬，
   // 不写入 form.groupId（补课仍是一对一独立课程）。
   function handleMakeupGroupChange(id: string) {
+    // v31.31：切换班课时，若已关联的「补的原课」不属于新班课，清空关联，避免跨班错关联；
+    // 未选班课时全量列表里选中、且恰好属于新班课的原课则保留，不打扰老师。
+    const linked = makeupSourceOptions.find((o) => o.id === makeupSourceCourseId)
+    if (makeupSourceCourseId && linked?.group?.id !== id) setMakeupSourceCourseId('')
     setMakeupGroupId(id)
     setExtraMakeupStudentIds([]) // 换班课即清空勾选，防止跨班误选
     setError('')
