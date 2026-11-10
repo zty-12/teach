@@ -483,7 +483,7 @@ function GroupModal({
         {/* v14：班课「课后自动打卡」配置（与详情页「打卡」Tab 同源，便于在班课设置里直接找到） */}
         <Field
           label="课后自动打卡"
-          hint="本班每次课完成后，自动为出勤学员生成周期打卡任务"
+          hint="本班每次课完成后，自动为全班学员（含请假）生成周期打卡任务"
         >
           <label className="flex items-start gap-2 rounded-lg border border-line-1 bg-surface-0 px-3 py-2.5 text-[13px] text-text-1">
             <input

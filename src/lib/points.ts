@@ -575,12 +575,13 @@ export function formatCadenceLabel(days: number[]): string {
  * 编辑打卡任务：更新标题/备注/打卡日，并按新旧打卡日差异同步增删记录。
  *  - 移除的天：该任务这些天的记录软删（含已打卡的，编辑日期是明确操作）
  *  - 新增的天：为任务现有参与学生补 pending 记录
+ *  - v31.35：patch.memberIds 可增减参与学生（补 / 删记录并重算积分）
  *  - 最后幂等重算积分，避免删掉已打卡记录后积分虚高
  */
 export async function updateCheckInTaskDays(
   task: CheckInTask,
   nextDays: number[],
-  patch?: { title?: string; note?: string; ruleIds?: string[] },
+  patch?: { title?: string; note?: string; ruleIds?: string[]; memberIds?: string[] },
 ): Promise<void> {
   const days = Array.from(
     new Set(nextDays.map((d) => startOfDay(new Date(d)).getTime())),
@@ -601,17 +602,26 @@ export async function updateCheckInTaskDays(
     (r) => !r.deletedAt && r.taskId === task.id,
   )
   const daySet = new Set(days)
-  // 参与学生 = 现有记录里出现过的学生（保持参与范围稳定）
-  const studentIds = Array.from(new Set(recs.map((r) => r.studentId)))
+  // v31.35：显式传入 memberIds 时按其增减参与学生；否则保持原有范围稳定。
+  const studentIds =
+    patch?.memberIds && patch.memberIds.length > 0
+      ? Array.from(new Set(patch.memberIds))
+      : Array.from(new Set(recs.map((r) => r.studentId)))
+  const studentSet = new Set(studentIds)
+  // 补建记录沿用「编辑后」的标题 / 说明，避免新加入学生的快照带着旧文案
+  const nextTitle = patch?.title !== undefined ? patch.title.trim() || task.title : task.title
+  const nextNote = patch?.note !== undefined ? patch.note.trim() : task.note
+  const nextCadence = formatCadenceLabel(days)
 
   for (const r of recs) {
-    if (r.dayAt !== null && !daySet.has(r.dayAt)) {
+    // 被移出参与范围 / 落在被移除日期的记录一律软删（含已打卡），积分由末尾重算
+    if (!studentSet.has(r.studentId) || (r.dayAt !== null && !daySet.has(r.dayAt))) {
       await db.checkInRecords.put(touch({ ...r, deletedAt: now }))
     }
   }
   const kept = new Set(
     recs
-      .filter((r) => r.dayAt !== null && daySet.has(r.dayAt))
+      .filter((r) => studentSet.has(r.studentId) && r.dayAt !== null && daySet.has(r.dayAt))
       .map((r) => `${r.studentId}::${r.dayAt}`),
   )
   const rows: CheckInRecord[] = []
@@ -628,7 +638,7 @@ export async function updateCheckInTaskDays(
           aiFeedback: '',
           checkedAt: null,
           // v-next：补天记录同样固化任务快照（沿用当时任务内容）
-          taskSnapshot: { title: task.title, note: task.note, cadenceLabel: task.cadenceLabel },
+          taskSnapshot: { title: nextTitle, note: nextNote, cadenceLabel: nextCadence },
           createdAt: now,
         }),
       )
@@ -640,7 +650,8 @@ export async function updateCheckInTaskDays(
 
 /**
  * 课程完成后自动创建「课后打卡」周期任务（幂等：每门课程只建一次）。
- * 打卡日 = 下课次日起连续 7 天；参与者 = 本次实际出勤的学生（无出席数据时回退）。
+ * 打卡日 = 下课次日起连续 7 天；参与者 = 班课全员（含请假）∪ 本次出席，
+ * 统一排除已归档 / 已删除学生（v31.35：请假学生也会打卡，内容可能是复习要求）。
  *
  * v30.2 去重修正：**只被「存活」任务阻挡**。此前的判定把「任何非 revert 的墓碑」
  * （老版本 markDeleted 未写 reason 的 undefined、或被旧版取消完成误标为 manual 的墓碑）
@@ -657,7 +668,7 @@ export async function ensureAutoCheckInTask(input: {
   title: string
   /** 本次实际出勤的学生 id */
   presentStudentIds: string[]
-  /** 出席数据缺失时的回退名单（班课全员 / 单个学生） */
+  /** 班课全员名单（含请假）/ 1对1 单个学生；与出席名单取并集，不再只作为「无出席时的回退」 */
   fallbackStudentIds: string[]
 }): Promise<{ created: boolean }> {
   const existing = (await db.checkInTasks.toArray()).find(
@@ -665,9 +676,21 @@ export async function ensureAutoCheckInTask(input: {
   )
   if (existing) return { created: false }
 
+  // v31.35：请假学生也会打卡（复习要求不一定只针对当次课），参与名单取
+  // 「本次出席 ∪ 班课全员」；再统一剔除已归档 / 已删除学生。
+  // 放在这里统一兜底，完成上课流程与打卡页自愈两条路径口径自动一致。
+  const allStudents = await db.students.toArray()
+  const activeIds =
+    allStudents.length > 0
+      ? new Set(
+          allStudents
+            .filter((s) => !s.deletedAt && s.status !== 'archived')
+            .map((s) => s.id),
+        )
+      : null
   const ids = Array.from(
-    new Set(input.presentStudentIds.length > 0 ? input.presentStudentIds : input.fallbackStudentIds),
-  )
+    new Set([...input.presentStudentIds, ...input.fallbackStudentIds]),
+  ).filter((id) => !activeIds || activeIds.has(id))
   if (ids.length === 0) return { created: false }
 
   const DAY = 86_400_000

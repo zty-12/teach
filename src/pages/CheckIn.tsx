@@ -452,18 +452,30 @@ function TasksView({
         students={students}
       />
 
-      <EditCheckInTaskModal task={editTask} onClose={() => setEditTask(null)} />
+      <EditCheckInTaskModal
+        task={editTask}
+        onClose={() => setEditTask(null)}
+        students={students}
+        records={records}
+        studentMap={studentMap}
+      />
     </>
   )
 }
 
-/** 编辑打卡任务：标题 / 备注 / 打卡日期（增删日期自动同步学生记录） */
+/** 编辑打卡任务：标题 / 备注 / 打卡日期 / 参与学生（增删日期或学生自动同步记录） */
 function EditCheckInTaskModal({
   task,
   onClose,
+  students,
+  records,
+  studentMap,
 }: {
   task: CheckInTask | null
   onClose: () => void
+  students: Student[]
+  records: CheckInRecord[]
+  studentMap: Map<string, Student>
 }) {
   const [title, setTitle] = useState('')
   const [note, setNote] = useState('')
@@ -473,7 +485,14 @@ function EditCheckInTaskModal({
   const [rangeTo, setRangeTo] = useState('')
   // v20：本任务适用的打卡规则
   const [ruleIds, setRuleIds] = useState<string[]>([])
+  /** v31.35：参与学生可随时增减（请假学生 / 复习打卡也能加进来） */
+  const [memberIds, setMemberIds] = useState<string[]>([])
+  const [memberQuery, setMemberQuery] = useState('')
   const [saving, setSaving] = useState(false)
+  // ⚠ 只依赖 [task] 初始化：父组件每次渲染都生成新数组，把 records / students
+  // 加进依赖会在老师勾选时把草稿重置掉（v31.26 / v31.27 同源坑）。
+  const recordsRef = useRef(records)
+  recordsRef.current = records
 
   useEffect(() => {
     if (!task) return
@@ -483,6 +502,16 @@ function EditCheckInTaskModal({
     setAddDate('')
     setRangeFrom('')
     setRangeTo('')
+    setMemberIds(
+      Array.from(
+        new Set(
+          recordsRef.current
+            .filter((r) => !r.deletedAt && r.taskId === task.id)
+            .map((r) => r.studentId),
+        ),
+      ),
+    )
+    setMemberQuery('')
     const ids = task.ruleIds
     if (ids && ids.length > 0) {
       setRuleIds(ids)
@@ -516,14 +545,45 @@ function EditCheckInTaskModal({
   }
 
   async function handleSave() {
-    if (!task || days.length === 0) return
+    if (!task || days.length === 0 || memberIds.length === 0) return
     setSaving(true)
     try {
-      await updateCheckInTaskDays(task, days, { title, note, ruleIds })
+      await updateCheckInTaskDays(task, days, { title, note, ruleIds, memberIds })
       onClose()
     } finally {
       setSaving(false)
     }
+  }
+
+  /** 候选 = 全体在读学生 + 本任务已有记录里的学生（归档 / 不在读的也保留，避免误删历史记录） */
+  const candidates = (() => {
+    const map = new Map<string, { id: string; name: string; active: boolean }>()
+    for (const s of students) map.set(s.id, { id: s.id, name: s.name, active: true })
+    const currentIds = task
+      ? Array.from(
+          new Set(
+            records
+              .filter((r) => !r.deletedAt && r.taskId === task.id)
+              .map((r) => r.studentId),
+          ),
+        )
+      : []
+    for (const id of currentIds) {
+      if (!map.has(id)) {
+        map.set(id, {
+          id,
+          name: studentMap.get(id)?.name ?? '（已归档 / 不在在读名单）',
+          active: false,
+        })
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+  })()
+  const filteredCandidates = candidates.filter(
+    (s) => !memberQuery.trim() || s.name.toLowerCase().includes(memberQuery.trim().toLowerCase()),
+  )
+  function toggleMember(id: string) {
+    setMemberIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
 
   const WEEKDAY = ['日', '一', '二', '三', '四', '五', '六']
@@ -542,7 +602,7 @@ function EditCheckInTaskModal({
           <Button onClick={onClose}>取消</Button>
           <Button
             variant="primary"
-            disabled={days.length === 0 || saving}
+            disabled={days.length === 0 || memberIds.length === 0 || saving}
             onClick={() => void handleSave()}
           >
             {saving ? '保存中…' : `保存（${days.length} 天）`}
@@ -599,6 +659,57 @@ function EditCheckInTaskModal({
             <p className="mt-1 text-[11px] text-text-3">
               当前节奏：{formatCadenceLabel(days)}。移除日期会同时删除该天的打卡记录，新增日期会为参与学生补上待打卡记录。
             </p>
+          </Field>
+          <Field
+            label={`参与学生（${memberIds.length} 人）`}
+            hint="请假学生也能加入；取消勾选会清除该生在本批次的打卡记录与积分"
+          >
+            <div className="mb-2 flex items-center gap-2">
+              <Input
+                value={memberQuery}
+                onChange={(e) => setMemberQuery(e.target.value)}
+                placeholder="搜索学生姓名"
+              />
+              <Button size="sm" onClick={() => setMemberIds(candidates.map((s) => s.id))}>
+                全选
+              </Button>
+              <Button size="sm" onClick={() => setMemberIds([])}>
+                清空
+              </Button>
+            </div>
+            <div className="max-h-40 overflow-y-auto rounded-md border border-line-1 bg-surface-0 p-2">
+              {filteredCandidates.length === 0 ? (
+                <p className="px-1 py-2 text-[12px] text-text-3">没有匹配的学生</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-1.5">
+                  {filteredCandidates.map((s) => {
+                    const on = memberIds.includes(s.id)
+                    return (
+                      <label
+                        key={s.id}
+                        className={cn(
+                          'flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-[12px]',
+                          on
+                            ? 'border-accent bg-accent-soft text-accent-text'
+                            : 'border-line-1 text-text-2 hover:border-accent',
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggleMember(s.id)}
+                          className="h-3.5 w-3.5 shrink-0 accent-accent"
+                        />
+                        <span className="truncate">{s.name}</span>
+                        {!s.active && (
+                          <span className="ml-auto shrink-0 text-[10px] text-text-3">不在读</span>
+                        )}
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
           </Field>
           <Field label="适用规则">
             <RulePicker scope="checkin" value={ruleIds} onChange={setRuleIds} />
