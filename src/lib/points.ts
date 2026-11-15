@@ -670,7 +670,13 @@ export async function ensureAutoCheckInTask(input: {
   presentStudentIds: string[]
   /** 班课全员名单（含请假）/ 1对1 单个学生；与出席名单取并集，不再只作为「无出席时的回退」 */
   fallbackStudentIds: string[]
-}): Promise<{ created: boolean }> {
+}): Promise<{ created: boolean; skipped?: boolean }> {
+  // v31.36：补课完成后不生成打卡任务（用户口径）。
+  // 判定统一放在入口：完成上课流程与打卡页自愈两条路径自动一致，
+  // 未来新增调用点也不会漏。课程记录读不到时按普通课处理（安全降级，不误伤）。
+  const course = await db.courses.get(input.courseId)
+  if (course?.isMakeup === true) return { created: false, skipped: true }
+
   const existing = (await db.checkInTasks.toArray()).find(
     (t) => t.courseId === input.courseId && !t.deletedAt,
   )
@@ -781,6 +787,8 @@ export async function ensureTodayAutoCheckInTasks(
     (c) =>
       !c.deletedAt &&
       !!c.groupId &&
+      // v31.36：补课不生成/补建打卡任务（主防线在 ensureAutoCheckInTask，这里显式跳过）
+      !c.isMakeup &&
       c.status === 'done' &&
       startOfDay(new Date(c.startAt)).getTime() === dayStart,
   )
@@ -902,4 +910,42 @@ export async function ensureCheckInRuleBindings(): Promise<number> {
     legacy.map((t) => ({ ...t, ruleIds: ids, updatedAt: now, dirty: 1 as const })),
   )
   return legacy.length
+}
+
+/**
+ * v31.36 清理历史：删除「补课课程」自动生成的打卡任务（幂等，可重复调用）。
+ *
+ * 背景：v31.36 之前完成补课时也会生成课后打卡任务（v31.28 起同堂补课按人拆课，
+ * 一次完成会生成 N 个）。用户口径「升级时自动清理」，故在 App 启动后跑一次幂等补偿。
+ *
+ * 严格限定范围，避免误伤：
+ *  - 只认 Course.isMakeup === true 的课程（含已软删的补课，其自动任务同样是孤儿）；
+ *  - 只清「完成时自动生成」的任务（auto===true 或旧数据的备注前缀），
+ *    与 courseCompletion.ts 的 isAutoCheckInTask 同口径；老师手动建的任务不动；
+ *  - 走 deleteCheckInTask 软删：任务 + 打卡记录 + 积分流水一并标记 deletedAt/dirty=1，
+ *    能推到云端、不会在换设备后复活；积分按流水汇总，删流水即完成冲销。
+ *
+ * @returns 本次清理的任务数
+ */
+export async function purgeMakeupAutoCheckInTasks(): Promise<number> {
+  const [courses, tasks] = await Promise.all([
+    db.courses.toArray(),
+    db.checkInTasks.toArray(),
+  ])
+  const makeupIds = new Set(
+    courses.filter((c) => c.isMakeup === true).map((c) => c.id),
+  )
+  if (makeupIds.size === 0) return 0
+  const targets = tasks.filter(
+    (t) =>
+      !t.deletedAt &&
+      typeof t.courseId === 'string' &&
+      makeupIds.has(t.courseId) &&
+      // 不 import courseCompletion（其已依赖 points，避免循环依赖），判定保持一致
+      (t.auto === true || t.note.startsWith('课程完成后自动创建')),
+  )
+  for (const t of targets) {
+    await deleteCheckInTask(t.id, { reason: 'manual' })
+  }
+  return targets.length
 }

@@ -1707,13 +1707,13 @@ function NewCheckInTaskModal({
           <Field label="关联课程">
             <Select value={courseId} onChange={(e) => setCourseId(e.target.value)}>
               <option value="">请选择课程</option>
-              {courses.map((c) => (
+              {courses.filter((c) => !c.isMakeup).map((c) => (
                 <option key={c.id} value={c.id}>
                   {format(c.startAt, 'M-d HH:mm')} {c.subject}
                 </option>
               ))}
             </Select>
-            <p className="mt-1 text-[11px] text-text-3">自动取该课程的成员</p>
+            <p className="mt-1 text-[11px] text-text-3">自动取该课程的成员；补课课程不生成打卡任务</p>
           </Field>
         )}
         {kind === 'single' && (

@@ -276,7 +276,8 @@ export async function completeCourseWithAttendance(
       presentStudentIds: presentIds,
       fallbackStudentIds: fallbackIds,
     })
-    result.checkIn = r.created ? 'created' : 'exists'
+    // v31.36：补课时 ensureAutoCheckInTask 返回 skipped，记为 disabled（本课不适用）
+    result.checkIn = r.skipped ? 'disabled' : r.created ? 'created' : 'exists'
   } catch (e) {
     result.checkIn = 'failed'
     result.messages.push(`课后打卡生成失败：${e instanceof Error ? e.message : String(e)}`)
