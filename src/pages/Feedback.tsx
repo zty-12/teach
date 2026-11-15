@@ -122,8 +122,9 @@ export default function FeedbackPage() {
       if (c.groupId && gMap.get(c.groupId)) return gMap.get(c.groupId)!.name
       return c.groupId ? '班课' : '课程'
     }
+    // v31.37：补课不需要课后反馈（判定沿用 Course.isMakeup，与 v31.36 打卡口径一致）
     const doneList = liveCourses
-      .filter((c) => c.status === 'done' && !fbByCourse.has(c.id))
+      .filter((c) => c.status === 'done' && !c.isMakeup && !fbByCourse.has(c.id))
       .sort((a, b) => b.startAt - a.startAt)
     const writtenList = [...liveFb].sort((a, b) => b.updatedAt - a.updatedAt)
     const liveTemplates = (templates ?? []).filter((t) => !t.deletedAt)
@@ -202,7 +203,7 @@ export default function FeedbackPage() {
       <Card className="mb-4">
         <CardHeader
           title="待写反馈"
-          subtitle={done.length ? `${done.length} 节已完成课程待补` : undefined}
+          subtitle={done.length ? `${done.length} 节已完成课程待补 · 补课不计` : '补课课程不需要课后反馈'}
         />
         {done.length === 0 ? (
           <EmptyState
