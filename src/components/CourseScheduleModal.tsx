@@ -658,7 +658,12 @@ export function CourseScheduleModal({
       // v31.28：同堂补课 —— 按学生各生成一条独立课程（各扣 1 课时、各记各自课酬），
       // 共享时段 / 科目 / 课酬单价 / 补的原课，课表上各自保留可查记录。
       // v31.30：补课时严格按勾选名单生成，不再回退到 form.studentId（主学生已取消）
-      const targetIds = isMultiMakeup ? makeupTargetIds : [form.studentId].filter(Boolean)
+      // v31.38：只有「同堂补课」才按学生拆课。常规一对一 / 班课一律每个日期 1 条，
+      //   由 buildPayload 依 fs.kind 决定 studentId / groupId；班课的 studentId 恒为 null，
+      //   出席名单仍由 ensureAttendance 依 groupId 自动展开。
+      //   ⚠ 旧写法 [form.studentId].filter(Boolean) 在班课模式得到空数组，循环 0 次
+      //   →「已创建 0 节课」（v31.28 引入的回归，v31.38 修复）。
+      const targetIds = isMultiMakeup ? makeupTargetIds : []
       const nameOf = (id: string) => students.find((s) => s.id === id)?.name ?? ''
       const optsFor = (sid: string) => ({
         studentId: sid,
@@ -668,11 +673,17 @@ export function CourseScheduleModal({
             : [],
         note: sameSessionNote,
       })
+      const targetOpts: Array<{ studentId?: string; sameSessionPeers?: string[]; note?: string }> =
+        isMultiMakeup ? targetIds.map(optsFor) : [{}]
+      if (targetOpts.length === 0) {
+        setError('未选择任何排课对象，请检查排课对象后再保存。')
+        return
+      }
 
       if (createMode === 'single') {
-        for (const sid of targetIds) {
+        for (const opts of targetOpts) {
           const saved = withSyncFields<Course>({
-            ...buildPayload(form.date, form, optsFor(sid)),
+            ...buildPayload(form.date, form, opts),
             createdAt: Date.now(),
           })
           await db.courses.put(saved)
@@ -682,13 +693,13 @@ export function CourseScheduleModal({
         return
       }
 
-      // 批量创建（每个日期 × 每个学生各一条；同批次由 findConflicts 豁免，不互相跳过）
+      // 批量创建（每个日期 × 每个拆课对象各一条；同批次由 findConflicts 豁免，不互相跳过）
       const all = (await db.courses.toArray()).filter((c) => !c.deletedAt)
       let created = 0
       let skipped = 0
       for (const d of bulkDates) {
-        for (const sid of targetIds) {
-          const payload = buildPayload(d, form, optsFor(sid))
+        for (const opts of targetOpts) {
+          const payload = buildPayload(d, form, opts)
           const clash = findConflicts(
             {
               startAt: payload.startAt,
@@ -709,6 +720,11 @@ export function CourseScheduleModal({
           await ensureAttendance(saved)
           created += 1
         }
+      }
+      // v31.38：0 条且并非冲突跳过 → 不静默关闭弹窗，明确报错留在表单里
+      if (created === 0 && skipped === 0) {
+        setError('未创建任何课程：请检查排课对象与日期，或稍后重试。')
+        return
       }
       onClose()
       window.alert(`已创建 ${created} 节课` + (skipped > 0 ? `，跳过冲突 ${skipped} 节` : ''))
