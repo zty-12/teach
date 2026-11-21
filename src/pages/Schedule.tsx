@@ -1,6 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { addDays, format, startOfDay } from 'date-fns'
+import {
+  addDays,
+  addMonths,
+  addYears,
+  format,
+  startOfDay,
+  startOfMonth,
+  startOfWeek,
+} from 'date-fns'
 import {
   CalendarCheck,
   CalendarPlus,
@@ -61,6 +69,12 @@ import {
 /** 一小时对应的像素高度 */
 const HOUR_H = 56
 
+/** v31.39：月视图 6 周网格（周一起始，与 getWeekDays 口径一致） */
+function getMonthGridDays(anchor: number): Date[] {
+  const monday = startOfWeek(startOfMonth(anchor), { weekStartsOn: 1 })
+  return Array.from({ length: 42 }, (_, i) => addDays(monday, i))
+}
+
 // ============================================================
 // 单击 / 双击 消歧
 // ============================================================
@@ -95,7 +109,8 @@ function cancelSingleClick(id: string): boolean {
 
 type MethodFilter = 'all' | 'online' | 'offline'
 /** v31.29：attendance = 按课查询的「出勤」视图（PC 并入视图切换，移动端由页头按钮进入） */
-type ScheduleView = 'day' | 'week' | 'agenda' | 'attendance'
+/** v31.39：month / year = 概览视图（仅 PC），只统计真实课程，不画班课计划块 */
+type ScheduleView = 'day' | 'week' | 'month' | 'year' | 'agenda' | 'attendance'
 
 export default function SchedulePage() {
   const bp = useBreakpoint()
@@ -178,6 +193,37 @@ export default function SchedulePage() {
         .length,
     [filteredCourses, weekDays],
   )
+
+  // v31.39：月 / 年概览视图的周期标题、统计与导航（anchor 扩为「当前周期锚点」）
+  const isOverview = view === 'month' || view === 'year'
+  const periodUnit = view === 'month' ? '本月' : view === 'year' ? '本年' : '本周'
+  const periodLabel = useMemo(() => {
+    if (view === 'month') return format(anchor, 'yyyy年M月')
+    if (view === 'year') return format(anchor, 'yyyy年')
+    return `${format(weekDays[0]!, 'yyyy年M月d日')} – ${format(weekDays[6]!, 'M月d日')}`
+  }, [view, anchor, weekDays])
+  const periodCount = useMemo(() => {
+    if (view === 'month') {
+      const key = format(anchor, 'yyyy-MM')
+      return filteredCourses.filter((c) => format(c.startAt, 'yyyy-MM') === key).length
+    }
+    if (view === 'year') {
+      const key = format(anchor, 'yyyy')
+      return filteredCourses.filter((c) => format(c.startAt, 'yyyy') === key).length
+    }
+    return weekCount
+  }, [view, anchor, filteredCourses, weekCount])
+
+  function stepPeriod(dir: -1 | 1) {
+    if (view === 'month') setAnchor(startOfDay(addMonths(anchor, dir)).getTime())
+    else if (view === 'year') setAnchor(startOfDay(addYears(anchor, dir)).getTime())
+    else setAnchor(addDays(anchor, 7 * dir).getTime())
+  }
+
+  // 移动端没有月 / 年视图；窗口缩到 PC 以下时优雅回退，避免拿月锚点看日视图
+  useEffect(() => {
+    if (bp !== 'desktop' && (view === 'month' || view === 'year')) setView('week')
+  }, [bp, view])
 
   function openCreate(
     startAt?: number,
@@ -365,23 +411,21 @@ export default function SchedulePage() {
             {view !== 'attendance' && (
               <>
                 <div className="flex items-center gap-1">
-                  <Button size="sm" variant="ghost" onClick={() => setAnchor(addDays(anchor, -7).getTime())}>
+                  <Button size="sm" variant="ghost" onClick={() => stepPeriod(-1)}>
                     <ChevronLeft size={15} />
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setAnchor(startOfDay(new Date()).getTime())}>
-                    本周
+                    {periodUnit}
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setAnchor(addDays(anchor, 7).getTime())}>
+                  <Button size="sm" variant="ghost" onClick={() => stepPeriod(1)}>
                     <ChevronRight size={15} />
                   </Button>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-text-2">
-                    {format(weekDays[0]!, 'yyyy年M月d日')} – {format(weekDays[6]!, 'M月d日')}
-                  </span>
+                  <span className="text-sm text-text-2">{periodLabel}</span>
                   <span className="rounded-full bg-accent-soft px-2.5 py-0.5 text-[12px] font-medium text-accent-text">
-                    本周总排课 {weekCount} 节
+                    {periodUnit}总排课 {periodCount} 节
                   </span>
                 </div>
               </>
@@ -405,17 +449,27 @@ export default function SchedulePage() {
               )}
               <SegmentedControl
                 value={view}
-                onChange={(v) => setView(v as ScheduleView)}
+                onChange={(v) => {
+                  const next = v as ScheduleView
+                  // 概览视图只读：进入时退出多选，避免留下无法勾选的批量删除栏
+                  if (next === 'month' || next === 'year') {
+                    setSelectMode(false)
+                    setSelectedCourseIds(new Set())
+                  }
+                  setView(next)
+                }}
                 variant="strong"
                 size="sm"
                 options={[
                   { value: 'day', label: '日视图' },
                   { value: 'week', label: '周视图' },
+                  { value: 'month', label: '月视图' },
+                  { value: 'year', label: '年视图' },
                   { value: 'agenda', label: '日程表' },
                   { value: 'attendance', label: '出勤' },
                 ]}
               />
-              {view !== 'attendance' && (
+              {view !== 'attendance' && !isOverview && (
                 <Button
                   size="sm"
                   variant={selectMode ? 'primary' : 'ghost'}
@@ -466,6 +520,27 @@ export default function SchedulePage() {
               selectMode={selectMode}
               selectedCourseIds={selectedCourseIds}
               onToggleSelectCourse={toggleSelectCourse}
+            />
+          ) : view === 'month' ? (
+            <MonthView
+              anchor={anchor}
+              courses={filteredCourses}
+              studentMap={studentMap}
+              groupMap={groupMap}
+              onView={openCourseView}
+              onPickDate={(ts) => {
+                setAnchor(startOfDay(ts).getTime())
+                setView('day')
+              }}
+            />
+          ) : view === 'year' ? (
+            <YearView
+              anchor={anchor}
+              courses={filteredCourses}
+              onPick={(ts) => {
+                setAnchor(startOfDay(ts).getTime())
+                setView('month')
+              }}
             />
           ) : (
             <AgendaView
@@ -1220,6 +1295,198 @@ function DayViewDesktop({
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ============================================================
+// PC v31.39：月视图（6 周网格，每格最多 2 条课程 + 剩余条数）
+// ============================================================
+
+function MonthView({
+  anchor,
+  courses,
+  studentMap,
+  groupMap,
+  onView,
+  onPickDate,
+}: {
+  anchor: number
+  courses: Course[]
+  studentMap: Map<string, Student>
+  groupMap: Map<string, Group>
+  onView: (c: Course) => void
+  onPickDate: (ts: number) => void
+}) {
+  const days = useMemo(() => getMonthGridDays(anchor), [anchor])
+  const today = startOfDay(new Date()).getTime()
+  const monthKey = format(anchor, 'yyyy-MM')
+  const byDay = useMemo(() => {
+    const m = new Map<number, Course[]>()
+    for (const c of courses) {
+      const key = startOfDay(c.startAt).getTime()
+      const arr = m.get(key)
+      if (arr) arr.push(c)
+      else m.set(key, [c])
+    }
+    for (const arr of m.values()) arr.sort((a, b) => a.startAt - b.startAt)
+    return m
+  }, [courses])
+
+  return (
+    <div className="p-3">
+      <div className="grid grid-cols-7 border-b border-line-1 bg-surface-2">
+        {['一', '二', '三', '四', '五', '六', '日'].map((w) => (
+          <div key={w} className="px-2 py-1.5 text-center text-[12px] font-medium text-text-2">
+            周{w}
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-7">
+        {days.map((d) => {
+          const key = startOfDay(d).getTime()
+          const inMonth = format(d, 'yyyy-MM') === monthKey
+          const list = byDay.get(key) ?? []
+          const isToday = key === today
+          return (
+            <div
+              key={key}
+              className={cn(
+                'min-h-[104px] border-b border-r border-line-1 p-1.5',
+                !inMonth && 'bg-surface-1',
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => onPickDate(key)}
+                title={`查看 ${format(d, 'M月d日')} 的日视图`}
+                className={cn(
+                  'mb-1 flex h-6 w-6 items-center justify-center rounded-full text-[12px] tabular-nums hover:bg-surface-2',
+                  isToday
+                    ? 'bg-accent font-medium text-white hover:bg-accent'
+                    : inMonth
+                      ? 'text-text-1'
+                      : 'text-text-3',
+                )}
+              >
+                {format(d, 'd')}
+              </button>
+              <div className="space-y-1">
+                {list.slice(0, 2).map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => onView(c)}
+                    title={`${formatTime(c.startAt)}-${formatTime(courseEnd(c, groupMap))} ${courseTitleWithPeers(c, studentMap, groupMap)}`}
+                    className="flex w-full items-center gap-1 rounded border-l-[3px] bg-surface-1 px-1 py-0.5 text-left hover:bg-surface-2"
+                    style={{ borderLeftColor: subjectColorVar(c.colorSlot) }}
+                  >
+                    <span className="shrink-0 text-[10px] tabular-nums text-text-2">
+                      {formatTime(c.startAt)}
+                    </span>
+                    <span className="truncate text-[11px] text-text-1">
+                      {courseTitleWithPeers(c, studentMap, groupMap)}
+                    </span>
+                  </button>
+                ))}
+                {list.length > 2 && (
+                  <button
+                    type="button"
+                    onClick={() => onPickDate(key)}
+                    className="w-full text-left text-[10px] text-accent hover:underline"
+                  >
+                    +{list.length - 2} 节
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ============================================================
+// PC v31.39：年视图（12 个迷你月历，有课日期高亮）
+// ============================================================
+
+function YearView({
+  anchor,
+  courses,
+  onPick,
+}: {
+  anchor: number
+  courses: Course[]
+  onPick: (ts: number) => void
+}) {
+  const year = new Date(anchor).getFullYear()
+  const today = startOfDay(new Date()).getTime()
+  const { daySet, monthCounts } = useMemo(() => {
+    const days = new Set<number>()
+    const counts = new Map<string, number>()
+    for (const c of courses) {
+      days.add(startOfDay(c.startAt).getTime())
+      const k = format(c.startAt, 'yyyy-MM')
+      counts.set(k, (counts.get(k) ?? 0) + 1)
+    }
+    return { daySet: days, monthCounts: counts }
+  }, [courses])
+  const months = useMemo(() => Array.from({ length: 12 }, (_, i) => new Date(year, i, 1)), [year])
+
+  return (
+    <div className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-3">
+      {months.map((m, mi) => {
+        const key = format(m, 'yyyy-MM')
+        const count = monthCounts.get(key) ?? 0
+        const days = getMonthGridDays(m.getTime())
+        return (
+          <section key={key} className="rounded-xl border border-line-1 bg-surface-0 p-2.5">
+            <button
+              type="button"
+              onClick={() => onPick(m.getTime())}
+              className="mb-2 flex w-full items-center justify-between px-0.5 text-left"
+            >
+              <span className="text-[13px] font-semibold text-text-1">{mi + 1}月</span>
+              <span className="text-[11px] text-text-3">{count} 节</span>
+            </button>
+            <div className="grid grid-cols-7 text-center">
+              {['一', '二', '三', '四', '五', '六', '日'].map((w) => (
+                <div key={w} className="pb-1 text-[10px] text-text-3">
+                  {w}
+                </div>
+              ))}
+              {days.map((d) => {
+                const ts = startOfDay(d).getTime()
+                const inMonth = d.getMonth() === mi
+                const has = daySet.has(ts)
+                const isToday = ts === today
+                return (
+                  <button
+                    key={ts}
+                    type="button"
+                    disabled={!inMonth}
+                    onClick={() => onPick(d.getTime())}
+                    title={`${format(d, 'M月d日')}${has ? ' · 有课' : ''}`}
+                    className={cn(
+                      'relative mx-auto flex h-5 w-5 items-center justify-center rounded text-[10px] tabular-nums',
+                      !inMonth && 'invisible',
+                      isToday && 'bg-accent font-medium text-white',
+                      has && !isToday && 'bg-accent-soft font-medium text-accent-text',
+                      !has && !isToday && 'text-text-2 hover:bg-surface-2',
+                    )}
+                  >
+                    {format(d, 'd')}
+                    {has && !isToday && (
+                      <span className="absolute bottom-0 h-0.5 w-1 rounded-full bg-accent" />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </section>
+        )
+      })}
     </div>
   )
 }
