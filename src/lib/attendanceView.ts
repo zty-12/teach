@@ -13,6 +13,8 @@
  *    完全没有出席记录的课回退「当前存活成员」（与 finance.ts attribution 的 fallback 一致），
  *    不按「曾有过成员」回退 —— 否则早已归档的学生会被塞进他停课之后的课里。
  *    未完成课额外排除 archived（与 v31.27「待完成课名单排除归档生」一致）。
+ *  - v31.41：学生级「停课起始日」优先于 v31.40 的班课移出时间（用于归档办迟了的情况）；
+ *    该日及之后的所有课（含未完成课）从名单剔除，更早的历史课照常保留。
  *  - **未完成课不把排课预置的 `present:true` 当成出席**，统一显示「待点名」。
  *
  * 本模块不写库、不改课酬 / 课时 / 结算，也不需要任何数据模型或云端列变更。
@@ -130,6 +132,15 @@ const STATUS_TEXT: Record<string, string> = {
   leave: '请假',
 }
 
+/** 'yyyy-MM-dd' → 本地当天 00:00 的时间戳；格式非法返回 undefined（按未设置处理） */
+function dateOnlyTs(value?: string | null): number | undefined {
+  if (!value) return undefined
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim())
+  if (!m) return undefined
+  const ts = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+  return Number.isFinite(ts) ? ts : undefined
+}
+
 export interface AttendanceViewInput {
   courses: ReadonlyArray<Course>
   students: ReadonlyArray<Student>
@@ -199,14 +210,18 @@ export function buildCourseAttendanceCards(input: AttendanceViewInput): CourseAt
     } else {
       rosterIds = c.studentId ? [c.studentId] : []
     }
-    // 未完成课排除归档生（v31.27 口径）；
-    // 已完成课：班课学员若在该课当天或之后才被移出（停课），不再列入名单（v31.40）。
-    // 移出之前的历史课照常保留（v31.23「历史实到含归档生」口径不变），
+    // v31.41：学生级「停课起始日」优先（归档办迟了也能按真实停课日截断）——
+    //   该日及之后的课（含未完成课）一律剔除；更早的历史课保留（v31.23 口径）。
+    // v31.40 兜底：班课学员若在该课当天或之后才被移出，同样不再列入名单。
     // 应到数随名单自动减少；一对一课不受班课移出影响。
     rosterIds = rosterIds.filter((id) => {
-      if (c.status !== 'done') return studentById.get(id)?.status !== 'archived'
+      const st = studentById.get(id)
+      const stopFrom = dateOnlyTs(st?.attendanceStopFrom)
+      const day = startOfDay(c.startAt).getTime()
+      if (stopFrom !== undefined && day >= stopFrom) return false
+      if (c.status !== 'done') return st?.status !== 'archived'
       const cutoff = c.groupId ? leftGroupFrom.get(memberKey(id, c.groupId)) : undefined
-      return cutoff === undefined || startOfDay(c.startAt).getTime() < cutoff
+      return cutoff === undefined || day < cutoff
     })
 
     const rows: StudentAttendanceRow[] = rosterIds.map((sid) => {

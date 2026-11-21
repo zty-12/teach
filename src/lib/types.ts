@@ -75,6 +75,10 @@ export interface Student extends SyncFields {
   archiveReason: ArchiveReason | null
   /** 因「课时结束」归档时，被移出的班课 id 列表；解档时据此外挪回原班课（班课已删则跳过）。'class' 归档或旧数据为空数组 */
   previousGroupIds: string[]
+  /** v31.41：停课起始日（yyyy-MM-dd，按自然日）。该日及之后的课不再计入出勤名单；
+   *  留空 / 旧数据 = 不限制，仍回退 v31.40 的「移出班课时间」截断。
+   *  只影响出勤名单，不改课酬 / 课时 / 结算，也不改出席记录本身。 */
+  attendanceStopFrom?: string | null
 }
 
 // ============================================================

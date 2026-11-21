@@ -6,6 +6,7 @@ import { isSupabaseConfigured } from '@/lib/supabase'
 import { purgeTombstones } from '@/lib/sync'
 import { ensureCheckInRuleBindings, purgeMakeupAutoCheckInTasks } from '@/lib/points'
 import { purgeMakeupCourseFeedbacks } from '@/lib/makeupFeedback'
+import { applyLegacyStopDates } from '@/lib/stopDateMigration'
 import AppShell from '@/components/layout/AppShell'
 import DashboardPage from '@/pages/Dashboard'
 import StudentsPage from '@/pages/Students'
@@ -34,7 +35,8 @@ export default function App() {
   //     已配置云端 → 必须保留墓碑，等 pushAll 推送成功后自行清理；
   //  2) 旧打卡任务固化 ruleIds（否则之后新增规则会追溯影响历史积分）；
   //  3) v31.36：清理历史「补课课程」自动生成的打卡任务（幂等，软删可推云端）；
-  //  4) v31.37：清理历史「补课课程」的课后反馈（幂等，软删可推云端）。
+  //  4) v31.37：清理历史「补课课程」的课后反馈（幂等，软删可推云端）；
+  //  5) v31.41：补录历史停课起始日（幂等，仅对名单里还没有日期的学生生效）。
   useEffect(() => {
     if (!loaded) return
     if (!isSupabaseConfigured(useSettings.getState().settings)) {
@@ -43,6 +45,7 @@ export default function App() {
     void ensureCheckInRuleBindings()
     void purgeMakeupAutoCheckInTasks()
     void purgeMakeupCourseFeedbacks()
+    void applyLegacyStopDates()
   }, [loaded])
 
   if (!loaded) {

@@ -1092,6 +1092,7 @@ function StudentModal({
       remindHours: Math.max(0, Math.floor(Number(form.remindHours || 0))),
       isTrial: form.isTrial,
       trialAt: form.isTrial ? (form.trialAt ?? Date.now()) : null,
+      attendanceStopFrom: form.attendanceStopFrom.trim() || null,
     }
 
     let studentId: string
@@ -1358,6 +1359,17 @@ function StudentModal({
           )}
         </Field>
 
+        <Field
+          label="停课起始日"
+          hint="该日及之后的课不再计入出勤名单；留空表示不限制（仍按移出班课时间）"
+        >
+          <Input
+            type="date"
+            value={form.attendanceStopFrom}
+            onChange={(e) => patch({ attendanceStopFrom: e.target.value })}
+          />
+        </Field>
+
         <Field label="备注">
           <Input
             value={form.note}
@@ -1469,6 +1481,7 @@ interface StudentForm {
   remindHours: string
   isTrial: boolean
   trialAt: number | null
+  attendanceStopFrom: string
 }
 
 const emptyForm = (): StudentForm => ({
@@ -1486,6 +1499,7 @@ const emptyForm = (): StudentForm => ({
   remindHours: '2',
   isTrial: false,
   trialAt: null,
+  attendanceStopFrom: '',
 })
 
 const toForm = (s: Student): StudentForm => ({
@@ -1503,4 +1517,5 @@ const toForm = (s: Student): StudentForm => ({
   remindHours: s.remindHours != null ? String(s.remindHours) : '2',
   isTrial: !!s.isTrial,
   trialAt: s.trialAt ?? null,
+  attendanceStopFrom: s.attendanceStopFrom ?? '',
 })

@@ -45,7 +45,9 @@ create table if not exists students (
   "trialAt" bigint,
   -- v31.19：归档原因 + 解档复原原班课
   "archiveReason" text,
-  "previousGroupIds" jsonb not null default '[]'::jsonb
+  "previousGroupIds" jsonb not null default '[]'::jsonb,
+  -- v31.41：停课起始日（yyyy-MM-dd），可空；该日及之后的课不计入出勤名单
+  "attendanceStopFrom" text
 );
 create index if not exists students_updated_idx on students ("updatedAt");
 create index if not exists students_trial_idx on students ("isTrial");
@@ -595,6 +597,8 @@ alter table "learningReports" add column if not exists title text not null defau
 --   · students."previousGroupIds"：因「课时结束」归档而被移出的班课 id 列表（jsonb）
 alter table students add column if not exists "archiveReason" text;
 alter table students add column if not exists "previousGroupIds" jsonb not null default '[]'::jsonb;
+-- v31.41：学生停课起始日（可空列，缺键补 null 安全，无需 PUSH_DEFAULTS 兜底）
+alter table students add column if not exists "attendanceStopFrom" text;
 -- v31.21：补 createdAt 列。本地旧版 withSyncFields 曾给所有记录写入 createdAt，
 -- 但以下三张表建表时未声明该列，导致推送 upsert 整表失败、dirty 永久残留、跨端不同步。
 alter table "groupMembers" add column if not exists "createdAt" bigint not null default 0;
