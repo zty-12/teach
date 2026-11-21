@@ -17,7 +17,7 @@
  *
  * 本模块不写库、不改课酬 / 课时 / 结算，也不需要任何数据模型或云端列变更。
  */
-import { format } from 'date-fns'
+import { format, startOfDay } from 'date-fns'
 import { uniqueMemberStudentIds } from './db'
 import type { Course, CourseAttendance, Group, GroupMember, Student } from './types'
 
@@ -152,6 +152,25 @@ export function buildCourseAttendanceCards(input: AttendanceViewInput): CourseAt
     liveByIds.set(c.groupId, uniqueMemberStudentIds(members, c.groupId))
   }
 
+  // v31.40：班课学员的「停课起点」= 被移出该班课的那天（按自然日比较，
+  // 避免「当天 13:00 上课、当天下午才办归档」漏掉当天那节）。
+  // 只对「当前已无存活成员关系」的组合生效：若后来复活（ensureGroupMember 清掉
+  // deletedAt），历史与新课都照常计入，不因旧墓碑误删。
+  const memberKey = (studentId: string, groupId: string) => `${studentId}::${groupId}`
+  const livePairs = new Set<string>()
+  const leftGroupFrom = new Map<string, number>()
+  for (const m of members) {
+    const k = memberKey(m.studentId, m.groupId)
+    if (!m.deletedAt) {
+      livePairs.add(k)
+      continue
+    }
+    const day = startOfDay(m.deletedAt).getTime()
+    const prev = leftGroupFrom.get(k)
+    if (prev === undefined || day < prev) leftGroupFrom.set(k, day)
+  }
+  for (const k of livePairs) leftGroupFrom.delete(k)
+
   // courseId → 存活出席行（同课同生多行时 present=true 优先，与 attendanceIndexForStudent 一致）
   const attByCourse = new Map<string, Map<string, boolean>>()
   for (const a of attendances) {
@@ -180,10 +199,15 @@ export function buildCourseAttendanceCards(input: AttendanceViewInput): CourseAt
     } else {
       rosterIds = c.studentId ? [c.studentId] : []
     }
-    // 未完成课排除归档生（v31.27 口径）；已完成课一律保留
-    if (c.status !== 'done') {
-      rosterIds = rosterIds.filter((id) => studentById.get(id)?.status !== 'archived')
-    }
+    // 未完成课排除归档生（v31.27 口径）；
+    // 已完成课：班课学员若在该课当天或之后才被移出（停课），不再列入名单（v31.40）。
+    // 移出之前的历史课照常保留（v31.23「历史实到含归档生」口径不变），
+    // 应到数随名单自动减少；一对一课不受班课移出影响。
+    rosterIds = rosterIds.filter((id) => {
+      if (c.status !== 'done') return studentById.get(id)?.status !== 'archived'
+      const cutoff = c.groupId ? leftGroupFrom.get(memberKey(id, c.groupId)) : undefined
+      return cutoff === undefined || startOfDay(c.startAt).getTime() < cutoff
+    })
 
     const rows: StudentAttendanceRow[] = rosterIds.map((sid) => {
       const st = studentById.get(sid)
